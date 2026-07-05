@@ -2460,7 +2460,8 @@ async function loadAlerts() {
     content.parentNode.insertBefore(zone, content);
   }
   zone.innerHTML = "";
-  if (!alerts || alerts.length === 0) return;
+  // api() returns an error object (not an array) on network/server failure
+  if (!Array.isArray(alerts) || alerts.length === 0) return;
 
   const expired = alerts.filter(a => a.expiry === "expired" || a.health_status === "error");
   const stale   = alerts.filter(a => a.expiry === "stale" && a.health_status !== "error");
@@ -2544,7 +2545,11 @@ async function showNewAccountModal() {
   // Load group list from server
   const sel = document.getElementById("new-account-group");
   sel.innerHTML = '<option value="">Loading…</option>';
-  const groups = await api("/api/groups");
+  let groups = await api("/api/groups");
+  if (!Array.isArray(groups)) {
+    toast("Could not load group list: " + (groups && groups.message || "server error"), "error");
+    groups = [{ path: "", name: "Root" }];
+  }
   sel.innerHTML = groups.map(g =>
     `<option value="${esc(g.path)}">${esc(g.name === "Root" ? "📂 Root (top level)" : "📁 " + g.name)}</option>`
   ).join("");
@@ -2631,7 +2636,13 @@ async function showBackupBrowser(presetFilter) {
   document.getElementById("backup-filter").value = presetFilter || "";
   const listEl = document.getElementById("backup-list");
   listEl.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-dim)">Loading…</div>';
-  allBackups = await api("/api/backups");
+  const res = await api("/api/backups");
+  if (!Array.isArray(res)) {
+    toast("Could not load backups: " + (res && res.message || "server error"), "error");
+    allBackups = [];
+  } else {
+    allBackups = res;
+  }
   renderBackupList();
 }
 
