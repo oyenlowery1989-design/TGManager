@@ -30,7 +30,7 @@ tail -f data/manager.log
 **Run tests + syntax check (do both before committing):**
 ```bash
 python3 -m unittest discover -s tests -q
-python3 -m py_compile "TelegramManager.app/Contents/Resources/server.py"
+python3 -m py_compile TelegramManager.app/Contents/Resources/*.py
 ```
 
 ## Directory Layout
@@ -43,9 +43,13 @@ TelegramManager_backup_v3/       ← PARENT_DIR
         launcher.sh              ← entry point: compiles Swift, falls back to Chrome
         launcher_swift           ← compiled Swift binary (gitignored artifact)
       Resources/
-        server.py                ← backend (Python, ~3300 lines)
+        server.py                ← HTTP routing + RequestHandler (Python, ~2600 lines)
+        state.py                 ← config/metadata/workspaces load-save, shared locks & caches (zero repo-internal imports)
+        backups.py               ← backup list/resolve/delete/prune/backup_account/restore_backup
+        proxy.py                 ← apply_proxy / _recover_stale_proxy / get_active_network_service
+        keeper.py                ← Session Keeper loop + manual trigger
         app_window.py            ← PyObjC fallback window (unused when Swift binary exists)
-        index.html               ← frontend (single-file, inline CSS+JS, ~3700 lines)
+        index.html               ← frontend (single-file, inline CSS+JS, ~4000 lines)
         launcher.swift           ← Swift WKWebView window source
   TG/                            ← ROOT_DIR — account folders live here
   data/                          ← DATA_DIR — config, logs, backups, _apps/
@@ -78,8 +82,13 @@ The Swift launcher (`launcher.sh`) reads `manager_config.json` from `../../manag
 
 ## Architecture
 
-**Backend (`server.py`):**
+**Backend (`server.py` + sibling modules):**
 Plain Python `http.server` with `ThreadingMixIn`. No frameworks. All API endpoints are `/api/*`. The server serves `index.html` at `/`.
+
+`server.py` was split into sibling modules (no build step, no packages — plain `import state`/`import backups`/etc. since Python auto-adds the script's own directory to `sys.path`):
+- `state.py` — path resolution (`ROOT_DIR`/`DATA_DIR`), config/metadata/workspaces load-save, `is_safe_path`, all shared locks (`_meta_lock`, account-op registry, `_proxy_state_lock`, …), the `config`/`metadata` singletons. Has zero internal-repo imports, so everything else imports it safely.
+- `backups.py`, `proxy.py`, `keeper.py` — import `state` via attribute access (e.g. `state.DATA_DIR`, read fresh each call) and, where needed, `server` (via a `sys.modules.setdefault("server", sys.modules[__name__])` self-alias at the top of server.py, resolved lazily inside function bodies to avoid import-order cycles).
+- `server.py` keeps the `RequestHandler`/HTTP routing, scan/cache/health/watcher/open_account/shared-app-cloning logic, and `__main__`. It re-exports the split-out names via `from state import (...)` etc. so existing bare-name references and `server.X` lookups (tests, tooling) keep working unchanged.
 
 **Frontend (`index.html`):**
 Single-file, no build toolchain. All CSS and JS are inline. Communicates with the backend via `fetch()` to the local server.
@@ -120,7 +129,14 @@ Four config keys added to `manager_config.json` for the lock screen feature:
 | `lock_hint` | `""` | Optional hint shown on lock screen |
 | `lock_timeout_minutes` | `5` | Idle minutes before auto-lock (0 = never) |
 
-Lock logic lives entirely in `index.html` JS (`initLock`, `lockApp`, `tryUnlock`, `resetIdleTimer`). Called from `boot()` after server is ready.
+**Server-side enforcement** (not just UI): the server tracks its own locked/unlocked state (`_lock_unlocked_at`/`_lock_last_activity`, guarded by `_lock_state_lock`) so a caller who already has the URL session token still cannot read/change anything without the lock password too:
+- Every `/api/*` route except `/api/lock-status`, `/api/unlock`, `/api/lock` (`_LOCK_EXEMPT`) is gated in `_do_GET`/`_do_POST` — a locked request gets HTTP 423 before its body is even parsed.
+- `POST /api/unlock` verifies the password server-side (`hmac.compare_digest` over `sha256(salt+password)`) — the client's own hash compare is UI-only, never trusted for the auth decision. Failed attempts are throttled (increasing `time.sleep`, capped 5s).
+- `POST /api/lock-config` is the only way to set/change/remove the password; changing or removing an *existing* password requires re-submitting the current one (`current_password`), even though the caller is already unlocked.
+- `GET /api/config` (and export/import) never serialize `lock_password_hash`/`lock_password_salt` — replaced with a `lock_enabled` boolean.
+- Idle timeout (`lock_timeout_minutes`) is checked lazily on the next gated request (no background thread) — a backstop behind the client's own `resetIdleTimer` → `lockApp()` → `POST /api/lock`.
+
+Frontend lock UI lives in `index.html` JS (`initLock`, `lockApp`, `tryUnlock`, `resetIdleTimer`), called from `boot()` after server is ready — now just a thin client over the endpoints above.
 
 ## Config Keys (`manager_config.json`)
 

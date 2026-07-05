@@ -3,10 +3,12 @@
 
 import base64
 import copy
-import functools
+import hashlib
+import hmac
 import json
 import os
 import plistlib
+import secrets
 import shlex
 import subprocess
 import threading
@@ -15,133 +17,34 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs
-import logging
-from logging.handlers import RotatingFileHandler
 
-# Layout (clean-root mode):
-#   PARENT/
-#     TelegramManager.app/   ← APP_BUNDLE
-#     TelegramManager Lite.app/
-#     TG/                    ← ROOT_DIR  — account folders only
-#     data/                  ← DATA_DIR  — config, logs, backups, avatars, _apps
-#
-# Falls back to PARENT for both ROOT_DIR and DATA_DIR if the subfolders don't exist.
-APP_BUNDLE       = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-_PARENT_DIR      = os.path.dirname(APP_BUNDLE)  # true parent (Swift launcher reads config here)
-_tg_sub          = os.path.join(_PARENT_DIR, "TG")
-ROOT_DIR         = _tg_sub if os.path.isdir(_tg_sub) else _PARENT_DIR
-_data_sub        = os.path.join(_PARENT_DIR, "data")
-DATA_DIR         = _data_sub if os.path.isdir(_data_sub) else _PARENT_DIR
-# A missing TG/ or data/ silently rescans the wrong tree and resets config
-# (including the lock password) — collect warnings to log and show in the UI.
-PATH_WARNINGS = []
-if ROOT_DIR == _PARENT_DIR:
-    PATH_WARNINGS.append(f"TG/ folder not found — scanning the whole parent dir instead: {_PARENT_DIR}")
-if DATA_DIR == _PARENT_DIR:
-    PATH_WARNINGS.append(f"data/ folder not found — config/backups fall back to: {_PARENT_DIR}")
-PRIVATE_STATE_DIR = os.path.expanduser("~/Library/Application Support/TelegramManager")
-METADATA_FILE    = os.path.join(PRIVATE_STATE_DIR, "manager_data.json")
-CONFIG_FILE      = os.path.join(DATA_DIR, "manager_config.json")
-WORKSPACES_FILE  = os.path.join(PRIVATE_STATE_DIR, "manager_workspaces.json")
-LEGACY_METADATA_FILE   = os.path.join(DATA_DIR, "manager_data.json")
-LEGACY_WORKSPACES_FILE = os.path.join(DATA_DIR, "manager_workspaces.json")
+# server.py runs as a script (python3 server.py), so it executes as module
+# __main__, not "server". Alias "server" to this running module BEFORE
+# importing any sibling module, so that backups.py/keeper.py's module-level
+# `import server` binds this live singleton instead of re-executing this file
+# a second time as a separate module (which would duplicate the log handler,
+# generate a different SESSION_TOKEN, and create a parallel set of caches and
+# locks). Under unittest (which imports "server" normally) this is a no-op.
+import sys
+sys.modules.setdefault("server", sys.modules[__name__])
 
-try:
-    os.makedirs(PRIVATE_STATE_DIR, exist_ok=True)
-    os.chmod(PRIVATE_STATE_DIR, 0o700)
-except OSError:
-    pass
-
-# ── Logging ──────────────────────────────────────────────────────────────────
-_log_file    = os.path.join(DATA_DIR, "manager.log")
-_log         = logging.getLogger("TelegramManager")
-_log.setLevel(logging.INFO)
-_log_handler = RotatingFileHandler(_log_file, maxBytes=2 * 1024 * 1024, backupCount=3,
-                                   encoding="utf-8")
-_log_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-_log.addHandler(_log_handler)
-# The log line records request paths, which contain the secret URL token.
-# Keep it owner-only so another local user/process can't read the token back.
-try:
-    os.chmod(_log_file, 0o600)
-except OSError:
-    pass
-
-DEFAULT_CONFIG = {
-    "app_source":            "",
-    "port":                  8477,
-    "extra_scan_dirs":       [],
-    # Session Keeper
-    "keeper_enabled":        False,
-    "keeper_interval_days":  30,
-    "keeper_open_seconds":   120,
-    # Media cache: auto-clear on close if cache exceeds this size (MB). 0 = disabled.
-    "auto_clear_cache_mb":   0,
-    # After each new backup keep only the newest N per account. 0 = keep all.
-    "backup_keep_per_account": 0,
-    # Apply account proxy system-wide when opening (admin prompt)
-    "proxy_system_apply":    False,
-    # Password lock
-    "lock_password_hash":    None,
-    "lock_password_salt":    None,
-    "lock_hint":             "",
-    "lock_timeout_minutes":  5,
-}
-
-def _sq(value: str) -> str:
-    """Single-quote a shell argument for embedding inside an AppleScript double-quoted string.
-
-    shlex.quote() may emit double-quoted strings which break AppleScript's own double-quote
-    delimiters. This always produces single-quoted strings by escaping embedded single quotes
-    as: '  →  '\''
-    """
-    return "'" + str(value).replace("'", "'\\''") + "'"
-
-def _as_str(value: str) -> str:
-    """Produce an AppleScript string expression for value, safe for use in any string context.
-
-    AppleScript has no backslash escape sequences inside string literals — a literal " cannot
-    be embedded directly.  We split on " and rejoin with (ASCII character 34) concatenation:
-        /foo/bar         →  "/foo/bar"
-        /foo "bar"/baz   →  "/foo " & (ASCII character 34) & "bar" & (ASCII character 34) & "/baz"
-    The result is a valid AppleScript expression that evaluates to the original string.
-    """
-    parts = str(value).split('"')
-    return '"' + ('" & (ASCII character 34) & "'.join(parts)) + '"'
-
-def _run_as_admin(shell_cmds: str, prompt: str) -> "subprocess.CompletedProcess[str]":
-    """Run shell_cmds with macOS administrator privileges via osascript.
-
-    Writes the commands to a temp file so no user-controlled value is ever embedded inside
-    the AppleScript 'do shell script "..."' string literal — which _sq() alone cannot
-    guarantee because single-quoted shell strings may still contain '"' characters.
-    """
-    import tempfile, stat
-    fd, tmp_path = tempfile.mkstemp(suffix=".sh", prefix="tm_admin_")
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write("#!/bin/bash\n")
-            f.write(shell_cmds)
-        os.chmod(tmp_path, stat.S_IRWXU)
-        prompt_expr = _as_str(prompt)
-        script = (
-            f'do shell script "bash {shlex.quote(tmp_path)}" '
-            f'with administrator privileges with prompt {prompt_expr}'
-        )
-        try:
-            return subprocess.run(["osascript", "-e", script],
-                                  capture_output=True, text=True, timeout=120)
-        except subprocess.TimeoutExpired:
-            _log.warning("_run_as_admin: osascript timed out after 120s")
-            return subprocess.CompletedProcess(
-                ["osascript"], returncode=124, stdout="",
-                stderr="administrator prompt timed out")
-    finally:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-
+import state
+from state import (
+    APP_BUNDLE, _PARENT_DIR, ROOT_DIR, DATA_DIR, PATH_WARNINGS, PRIVATE_STATE_DIR,
+    METADATA_FILE, CONFIG_FILE, WORKSPACES_FILE, LEGACY_METADATA_FILE, LEGACY_WORKSPACES_FILE,
+    _log, _log_file, DEFAULT_CONFIG, _sq, _as_str, _run_as_admin,
+    _save_json_atomic, _load_json_file, _load_json_file_with_fallbacks, is_safe_path,
+    load_config, save_config, load_metadata, save_metadata,
+    _meta_lock, _config_lock, _ws_lock, _account_path_lock, serialize_account_op, _BUSY_MSG,
+    config, metadata, load_workspaces, save_workspaces,
+    get_folder_size, human_size,
+    CACHE_DIR_NAMES, CACHE_TOPLEVEL_NAMES, BACKUP_EXCLUDE_DIR_NAMES, _find_cache_dirs,
+    PROXY_ORIGINAL_FILE, _proxy_state_lock,
+)
+from proxy import get_active_network_service, apply_proxy, _recover_stale_proxy
+from backups import (list_backups, _last_backup_map, _resolve_backup_dir,
+                     delete_backup, prune_backups, restore_backup, backup_account)
+from keeper import _keeper_status, run_keeper_loop, trigger_keeper_now
 
 def choose_app_dialog(prompt_text, default_dir="/Applications", timeout=600):
     """Show a native macOS file picker restricted to .app bundles.
@@ -210,152 +113,82 @@ def is_allowed_app_source(path):
     return False
 
 
-def _save_json_atomic(path, value):
-    directory = os.path.dirname(path)
-    if directory:
-        os.makedirs(directory, exist_ok=True)
-        try:
-            os.chmod(directory, 0o700)
-        except OSError:
-            pass
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(value, f, indent=2)
-    os.replace(tmp, path)
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
+# ── Password-lock server-side enforcement ───────────────────────────────────
+# The client no longer holds any authority over the lock: it only ever sends
+# a plaintext password over the 127.0.0.1 loopback (same trust level as the
+# session token itself); the server hashes/compares/tracks unlock state.
 
+def _lock_enabled() -> bool:
+    """Whether a lock password is configured. Plain dict read to match the
+    rest of the file's convention of reading `config` without _config_lock."""
+    return bool(config.get("lock_password_hash"))
 
-def _load_json_file(path, default_value):
-    try:
-        if os.path.exists(path):
-            with open(path) as f:
-                return json.load(f)
-    except Exception as e:
-        _log.warning("Failed to load JSON from %s: %s", path, e)
-    return copy.deepcopy(default_value)
-
-
-def _load_json_file_with_fallbacks(path, default_value, fallback_paths=()):
-    for candidate in (path, *fallback_paths):
-        try:
-            if os.path.exists(candidate):
-                with open(candidate) as f:
-                    return json.load(f), candidate
-        except Exception as e:
-            _log.warning("Failed to load JSON from %s: %s", candidate, e)
-    return copy.deepcopy(default_value), None
-
-def is_safe_path(path: str) -> bool:
-    """Return True if path resolves to within ROOT_DIR or DATA_DIR (prevents path traversal)."""
-    if not path:
+def _verify_lock_password(password) -> bool:
+    stored = config.get("lock_password_hash") or ""
+    salt   = config.get("lock_password_salt") or ""
+    if not stored or not isinstance(password, str):
         return False
-    try:
-        real_path = os.path.realpath(os.path.abspath(path))
-        for base in (ROOT_DIR, DATA_DIR):
-            real_base = os.path.realpath(base)
-            if real_path == real_base or real_path.startswith(real_base + os.sep):
-                return True
-        return False
-    except Exception:
-        return False
+    digest = hashlib.sha256((salt + password).encode()).hexdigest()
+    return hmac.compare_digest(digest, stored)
 
-def load_config():
-    cfg = _load_json_file(CONFIG_FILE, DEFAULT_CONFIG)
-    for k, v in DEFAULT_CONFIG.items():
-        if k not in cfg:
-            cfg[k] = v
-    return cfg
+def _server_unlock():
+    global _lock_unlocked_at, _lock_last_activity, _unlock_fail_count
+    with _lock_state_lock:
+        _lock_unlocked_at = _lock_last_activity = time.monotonic()
+        _unlock_fail_count = 0
 
-def save_config(cfg):
-    with _config_lock:
-        tmp = CONFIG_FILE + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(cfg, f, indent=2)
-        os.replace(tmp, CONFIG_FILE)
-    # Mirror port to true parent dir so the Swift launcher always finds it (atomic write)
-    if DATA_DIR != _PARENT_DIR:
-        try:
-            mirror = os.path.join(_PARENT_DIR, "manager_config.json")
-            mirror_tmp = mirror + ".tmp"
-            with open(mirror_tmp, "w") as f:
-                json.dump({"port": cfg.get("port", 8477)}, f)
-            os.replace(mirror_tmp, mirror)
-        except OSError as e:
-            # The Swift launcher reads this mirror to find the port — a failed
-            # write means the next launch may connect to the wrong port.
-            _log.warning("save_config: could not mirror port to %s: %s", _PARENT_DIR, e)
+def _server_lock():
+    global _lock_unlocked_at
+    with _lock_state_lock:
+        _lock_unlocked_at = 0.0
 
-def load_metadata():
-    data, source = _load_json_file_with_fallbacks(
-        METADATA_FILE,
-        {"notes": {}, "usernames": {}, "order": {}, "colors": {},
-         "last_opened": {}, "pinned": [], "proxies": {}, "avatars": {}},
-        (LEGACY_METADATA_FILE,)
-    )
-    if source == LEGACY_METADATA_FILE and METADATA_FILE != LEGACY_METADATA_FILE:
-        try:
-            _save_json_atomic(METADATA_FILE, data)
-            os.unlink(LEGACY_METADATA_FILE)
-        except OSError:
-            pass
-    return data
+def _register_unlock_failure() -> int:
+    """Record a failed unlock/lock-config attempt; return the new consecutive
+    failure count so the caller can throttle the response."""
+    global _unlock_fail_count
+    with _lock_state_lock:
+        _unlock_fail_count += 1
+        return _unlock_fail_count
 
-# Thread locks for file I/O.
-# Both are RLocks so handlers can acquire them and then call save_metadata() /
-# save_config() (which also acquire them) without deadlocking.
-_meta_lock   = threading.RLock()
-_config_lock = threading.RLock()
-# RLock so an endpoint can hold it across load_workspaces→mutate→save_workspaces
-# while save_workspaces() re-acquires it internally without deadlocking.
-_ws_lock     = threading.RLock()
+def _check_and_touch_unlocked() -> bool:
+    """Gate for lock-protected endpoints. Atomically checks whether the
+    session is unlocked (and hasn't idle-timed-out) and, if so, refreshes the
+    activity timestamp so the idle clock resets on real API traffic."""
+    if not _lock_enabled():
+        return True
+    global _lock_unlocked_at, _lock_last_activity
+    with _lock_state_lock:
+        if _lock_unlocked_at == 0.0:
+            return False
+        timeout_s = max(0, int(config.get("lock_timeout_minutes") or 0)) * 60
+        now = time.monotonic()
+        if timeout_s and (now - _lock_last_activity) > timeout_s:
+            _lock_unlocked_at = 0.0   # lazy re-lock on next request
+            return False
+        _lock_last_activity = now
+        return True
 
-# One lock per account path, so open/backup/restore for the SAME account can't
-# interleave (double-launch against one tdata, torn backup, tdata-less restore).
-# Different accounts stay fully parallel. kill/close intentionally stays
-# lock-free so an account can always be force-closed, even mid-backup.
-_account_op_locks = {}
-_account_op_locks_guard = threading.Lock()
+def _is_unlocked_no_touch() -> bool:
+    """Same check as _check_and_touch_unlocked() but never mutates state —
+    used by /api/lock-status so status polling can't itself keep a session
+    alive or mask an idle expiry."""
+    if not _lock_enabled():
+        return True
+    with _lock_state_lock:
+        if _lock_unlocked_at == 0.0:
+            return False
+        timeout_s = max(0, int(config.get("lock_timeout_minutes") or 0)) * 60
+        if timeout_s and (time.monotonic() - _lock_last_activity) > timeout_s:
+            return False
+        return True
 
-def _account_path_lock(path):
-    key = os.path.realpath(path)
-    with _account_op_locks_guard:
-        lk = _account_op_locks.get(key)
-        if lk is None:
-            lk = _account_op_locks[key] = threading.Lock()
-    return lk
+# Password-lock session state (see helpers below _server_unlock/_server_lock/
+# _check_and_touch_unlocked). Guards the three fields below.
+_lock_state_lock    = threading.Lock()
+_lock_unlocked_at   = 0.0   # time.monotonic() of last successful unlock; 0.0 = locked
+_lock_last_activity = 0.0   # time.monotonic() of last gated request that passed
+_unlock_fail_count  = 0     # consecutive failed unlock attempts (throttle)
 
-def serialize_account_op(get_path, busy_result):
-    """Decorate an account operation so it holds that account's lock for its
-    whole run. get_path(*args) picks the account path from the call; a caller
-    that can't get the lock immediately gets busy_result (shaped to match the
-    function's normal return) instead of blocking."""
-    def deco(fn):
-        @functools.wraps(fn)
-        def wrapper(*a, **k):
-            lk = _account_path_lock(get_path(*a, **k))
-            if not lk.acquire(blocking=False):
-                _log.info("serialize_account_op: %s busy for %s", fn.__name__, get_path(*a, **k))
-                return busy_result
-            try:
-                return fn(*a, **k)
-            finally:
-                lk.release()
-        return wrapper
-    return deco
-
-_BUSY_MSG = "Another operation is already in progress for this account — try again in a moment."
-
-def save_metadata(meta):
-    """Atomic write: write to .tmp then rename, so a crash can't corrupt the file."""
-    with _meta_lock:
-        _save_json_atomic(METADATA_FILE, meta)
-
-
-config   = load_config()
-metadata = load_metadata()
 SESSION_TOKEN = os.environ.get("TG_SESSION_TOKEN", "")
 _TOKEN_GENERATED = False
 if not SESSION_TOKEN:
@@ -376,6 +209,10 @@ def _route_path(raw_path: str):
         return path[len(ROUTE_PREFIX):]
     return None
 
+# Endpoints reachable even while the app is locked — status polling and the
+# unlock/lock actions themselves. Everything else under /api/* is gated.
+_LOCK_EXEMPT = {"/api/lock-status", "/api/unlock", "/api/lock"}
+
 SKIP_NAMES = {
     "TelegramForcePortable", "Backups", ".DS_Store",
     "TelegramManager.app", "Telegram.app", "tupdates", "tdata", "modules", "_apps"
@@ -385,10 +222,6 @@ SKIP_NAMES = {
 SHARED_APPS_DIR  = os.path.join(DATA_DIR, "_apps")
 SHARED_MACOS_APP = os.path.join(SHARED_APPS_DIR, "macOS", "Telegram.app")
 
-# Original system proxy state, persisted before apply_proxy() changes it.
-# Present on disk = a restore is pending (or failed); recovered at startup.
-PROXY_ORIGINAL_FILE = os.path.join(DATA_DIR, "proxy_original.json")
-_proxy_state_lock = threading.Lock()  # serializes check+write of the file above
 # Sibling auto-detect: Telegram.app placed next to TelegramManager.app in DATA_DIR
 SIBLING_APP      = os.path.join(DATA_DIR, "Telegram.app")
 
@@ -526,44 +359,6 @@ def clear_media_cache(account_path, threshold_mb=0):
     return True, size
 
 
-# Regenerable cache directory names found INSIDE tdata/user_data* (media/file
-# caches plus the Chromium caches of Telegram's embedded bot/mini-app WebView).
-# None of these hold session/login data — Telegram rebuilds them on demand.
-# Session data lives in key_datas, settings*, and the hex account dirs, which we
-# never touch: cache clearing only ever descends into user_data* subtrees.
-CACHE_DIR_NAMES = {
-    "media_cache", "cache", "Cache", "Cache_Data", "GPUCache", "Code Cache",
-    "ShaderCache", "GrShaderCache", "GraphiteDawnCache", "DawnGraphiteCache",
-    "DawnWebGPUCache", "component_crx_cache",
-}
-# Top-level regenerable dirs (re-downloaded on next launch).
-CACHE_TOPLEVEL_NAMES = ("emoji", "dumps")
-# Basenames excluded from backups (superset — a backup only needs the session).
-BACKUP_EXCLUDE_DIR_NAMES = sorted(CACHE_DIR_NAMES | set(CACHE_TOPLEVEL_NAMES))
-
-
-def _find_cache_dirs(tdata):
-    """Return the top-most cache directories under tdata, scoped to user_data*
-    subtrees and the known top-level cache dirs — never the session dirs."""
-    targets = []
-    for name in CACHE_TOPLEVEL_NAMES:
-        p = os.path.join(tdata, name)
-        if os.path.isdir(p):
-            targets.append(p)
-    try:
-        roots = [os.path.join(tdata, n) for n in os.listdir(tdata)
-                 if n.startswith("user_data") and os.path.isdir(os.path.join(tdata, n))]
-    except OSError:
-        roots = []
-    for root in roots:
-        for dp, dirnames, _ in os.walk(root, topdown=True):
-            for d in list(dirnames):
-                if d in CACHE_DIR_NAMES:
-                    targets.append(os.path.join(dp, d))
-                    dirnames.remove(d)   # don't descend into a dir we'll delete
-    return targets
-
-
 def clear_account_caches(account_path, threshold_mb=0):
     """Delete all regenerable caches inside the account's tdata (media, file,
     emoji and the bot-WebView Chromium caches) — never session/login data.
@@ -585,30 +380,6 @@ def clear_account_caches(account_path, threshold_mb=0):
     _log.info("Cleared %d cache dir(s) for %s (freed %s)",
               len(targets), os.path.basename(account_path), human_size(total))
     return True, total
-
-
-def _copy_tdata_excluding_cache(src, dst):
-    """Copy tdata src→dst for a backup, skipping regenerable cache dirs so
-    backups stay small. Uses rsync --exclude; falls back to a full cp -R (a
-    complete, if larger, backup) if rsync is missing or errors. Returns
-    (ok, error_message)."""
-    os.makedirs(dst, exist_ok=True)
-    cmd = ["rsync", "-a"]
-    for name in BACKUP_EXCLUDE_DIR_NAMES:
-        cmd += ["--exclude", name + "/"]   # trailing slash = directories only
-    cmd += [src.rstrip("/") + "/", dst.rstrip("/") + "/"]
-    try:
-        r = subprocess.run(cmd, capture_output=True, timeout=1800)
-        if r.returncode == 0:
-            return True, ""
-        _log.warning("backup rsync rc=%d, falling back to cp: %s",
-                     r.returncode, r.stderr.decode(errors="replace").strip()[:200])
-    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-        _log.warning("backup rsync unavailable (%s); falling back to cp", e)
-    subprocess.run(["rm", "-rf", dst], capture_output=True, timeout=300)
-    r = subprocess.run(["cp", "-R", src, dst], capture_output=True, timeout=1800)
-    return (r.returncode == 0), ("" if r.returncode == 0
-                                 else r.stderr.decode(errors="replace").strip()[:200])
 
 
 def scan_accounts():
@@ -720,19 +491,6 @@ def scan_accounts():
     accounts.sort(key=lambda a: (0 if a["pinned"] else 1, a["group"], a["order"], a["name"]))
     return accounts
 
-def get_folder_size(path):
-    total = 0
-    try:
-        for dp, _, fn in os.walk(path, followlinks=False):
-            for f in fn:
-                try:
-                    total += os.path.getsize(os.path.join(dp, f))
-                except OSError:
-                    pass
-    except OSError:
-        pass
-    return total
-
 # Per-account tdata size cache. get_folder_size() is a full tree walk; the
 # account scan ran it for every account on every scan, and the UI polls faster
 # than the scan-cache TTL, so a big install re-walked every tdata continuously.
@@ -759,15 +517,6 @@ def invalidate_tdata_size(account_path):
     tdata = os.path.join(account_path, "TelegramForcePortable", "tdata")
     with _tdata_size_lock:
         _tdata_size_cache.pop(os.path.realpath(tdata), None)
-
-def human_size(n):
-    """Return a human-readable size string using decimal units (1 GB = 1,000,000,000 bytes),
-    matching how macOS Finder displays file sizes."""
-    for unit in ("B", "KB", "MB", "GB"):
-        if abs(n) < 1000:
-            return f"{n:.1f} {unit}"
-        n /= 1000
-    return f"{n:.1f} TB"
 
 # ── Disk-size cache (slow walk, refreshed in background every 60 s) ─────────
 # Kept separate from the 4-second scan cache so expensive ROOT_DIR walks
@@ -1097,425 +846,6 @@ def open_account(path):
     return True, ""
 
 
-def get_active_network_service():
-    """Return the macOS network service name for the current default-route interface."""
-    try:
-        r = subprocess.run(["route", "get", "default"], capture_output=True, text=True, timeout=15)
-        iface = ""
-        for line in r.stdout.split("\n"):
-            if "interface:" in line:
-                iface = line.split(":")[-1].strip()
-                break
-        if not iface:
-            return "Wi-Fi"
-        r2 = subprocess.run(["networksetup", "-listnetworkserviceorder"],
-                            capture_output=True, text=True, timeout=15)
-        lines = r2.stdout.split("\n")
-        for i, line in enumerate(lines):
-            if f"Device: {iface}" in line:
-                for j in range(i - 1, -1, -1):
-                    if ")" in lines[j] and lines[j].strip():
-                        return lines[j].split(")", 1)[-1].strip()
-    except Exception:
-        pass
-    return "Wi-Fi"
-
-def apply_proxy(proxy_config):
-    """
-    Temporarily set the macOS system SOCKS proxy so Telegram routes through it.
-    Restores original proxy state after 35 seconds (enough for Telegram to connect).
-    """
-
-    proxy_type = proxy_config.get("type", "socks5").lower()
-    host       = proxy_config.get("host", "")
-    port       = str(proxy_config.get("port", 1080))
-    if not host:
-        return
-
-    _log.info("Applying %s proxy %s:%s", proxy_type, host, port)
-    service = get_active_network_service()
-
-    def scutil_get_proxy():
-        cmd = "socks" if proxy_type.startswith("socks") else "http"
-        try:
-            r = subprocess.run(["networksetup", f"-get{cmd}firewallproxy", service],
-                               capture_output=True, text=True, timeout=15)
-        except subprocess.TimeoutExpired:
-            _log.warning("scutil_get_proxy: networksetup query timed out")
-            return False, "", "0"
-        enabled = "Enabled: Yes" in r.stdout
-        cur_host, cur_port = "", "0"
-        for ln in r.stdout.split("\n"):
-            if ln.startswith("Server:"): cur_host = ln.split(":", 1)[1].strip()
-            if ln.startswith("Port:"):   cur_port = ln.split(":", 1)[1].strip()
-        return enabled, cur_host, cur_port
-
-    orig_enabled, orig_host, orig_port = scutil_get_proxy()
-
-    # Persist the pre-change state so a failed restore can be recovered at
-    # next startup. First writer wins: if a restore is already pending, the
-    # file already holds the true original — do not overwrite it.
-    #
-    # The restore is then built from the FILE's baseline, not from this call's
-    # live query: if two accounts on the same proxy channel are opened within
-    # the 35 s window, the second's live query returns the FIRST account's
-    # proxy (already applied), so baking that in used to restore the wrong
-    # proxy and leave it stuck on. Reading back the authoritative baseline
-    # makes every concurrent restore converge on the same true original.
-    channel = "socks" if proxy_type.startswith("socks") else "http"
-    r_enabled, r_host, r_port = orig_enabled, orig_host, orig_port
-    with _proxy_state_lock:
-        if not os.path.exists(PROXY_ORIGINAL_FILE):
-            _save_json_atomic(PROXY_ORIGINAL_FILE, {
-                "service": service, "proxy_type": proxy_type,
-                "enabled": orig_enabled, "host": orig_host, "port": orig_port,
-                "saved_at": datetime.now().isoformat(),
-            })
-        try:
-            with open(PROXY_ORIGINAL_FILE) as _pf:
-                _base = json.load(_pf)
-            _base_channel = "socks" if str(_base.get("proxy_type", "")).startswith("socks") else "http"
-            # Only trust the file when it describes THIS proxy channel; a
-            # different channel is independent and its live query is correct.
-            if _base_channel == channel:
-                r_enabled = bool(_base.get("enabled"))
-                r_host    = str(_base.get("host", "") or "")
-                r_port    = str(_base.get("port", "0") or "0")
-        except Exception as _e:
-            _log.warning("apply_proxy: baseline read-back failed (%s); using live query", _e)
-
-    # Build per-type command strings using shlex.quote() for all user-controlled values.
-    # The initial set+enable pair runs via _run_as_admin() (temp-file approach — no AppleScript
-    # string embedding).  Restore uses sudo -n with cached credentials via bash -c directly.
-    if proxy_type.startswith("socks"):
-        set_cmd     = f"networksetup -setsocksfirewallproxy {shlex.quote(service)} {shlex.quote(host)} {shlex.quote(port)} off"
-        on_cmd      = f"networksetup -setsocksfirewallproxystate {shlex.quote(service)} on"
-        off_cmd     = f"networksetup -setsocksfirewallproxystate {shlex.quote(service)} off"
-        restore_set = f"networksetup -setsocksfirewallproxy {shlex.quote(service)} {shlex.quote(r_host)} {shlex.quote(r_port)} off"
-    else:
-        set_cmd     = f"networksetup -sethttpproxy {shlex.quote(service)} {shlex.quote(host)} {shlex.quote(port)}"
-        on_cmd      = f"networksetup -sethttpproxystate {shlex.quote(service)} on"
-        off_cmd     = f"networksetup -sethttpproxystate {shlex.quote(service)} off"
-        restore_set = f"networksetup -sethttpproxy {shlex.quote(service)} {shlex.quote(r_host)} {shlex.quote(r_port)}"
-
-    result = _run_as_admin(
-        f"{set_cmd}\n{on_cmd}\n",
-        "TelegramManager is setting a proxy for this Telegram account."
-    )
-    if result.returncode != 0:
-        _log.warning("apply_proxy: admin prompt rejected or failed (rc=%d)", result.returncode)
-        return
-
-    _log.info("Proxy %s:%s active on service %r; will restore in 35 s", host, port, service)
-
-    def schedule_restore():
-        import tempfile, stat
-        if r_enabled and r_host:
-            restore_lines = [restore_set, on_cmd]
-        else:
-            restore_lines = [off_cmd]
-        # Runs under `set -e`: only reached when the restore succeeded, so a
-        # leftover file always means "system proxy may still be modified".
-        restore_lines.append(f"rm -f {shlex.quote(PROXY_ORIGINAL_FILE)}")
-
-        fd_restore, restore_path = tempfile.mkstemp(suffix=".sh", prefix="tm_proxy_restore_cmd_")
-        fd_wrapper, wrapper_path = tempfile.mkstemp(suffix=".sh", prefix="tm_proxy_restore_job_")
-        try:
-            with os.fdopen(fd_restore, "w") as f:
-                f.write("#!/bin/bash\n")
-                f.write("set -e\n")
-                f.write("\n".join(restore_lines) + "\n")
-            os.chmod(restore_path, stat.S_IRWXU)
-
-            prompt = _as_str("TelegramManager is restoring the proxy settings after Telegram connected.")
-            admin_script = (
-                f'do shell script "bash {shlex.quote(restore_path)}" '
-                f'with administrator privileges with prompt {prompt}'
-            )
-
-            with os.fdopen(fd_wrapper, "w") as f:
-                f.write("#!/bin/bash\n")
-                f.write("sleep 35\n")
-                f.write(f"osascript -e {shlex.quote(admin_script)} >/dev/null 2>&1 || true\n")
-                f.write(f"rm -f {shlex.quote(restore_path)}\n")
-                f.write(f"rm -f {shlex.quote(wrapper_path)}\n")
-            os.chmod(wrapper_path, stat.S_IRWXU)
-
-            subprocess.Popen(["/usr/bin/nohup", "bash", wrapper_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception as e:
-            _log.error("apply_proxy: failed to schedule restore for service %r: %s", service, e)
-            try:
-                os.unlink(restore_path)
-            except OSError:
-                pass
-            try:
-                os.unlink(wrapper_path)
-            except OSError:
-                pass
-
-    schedule_restore()
-
-
-def _recover_stale_proxy():
-    """Restore system proxy settings left modified by a previous run.
-
-    PROXY_ORIGINAL_FILE existing at startup means apply_proxy() changed the
-    system proxy but its scheduled restore never completed (server killed,
-    admin prompt denied, crash). Without this, the whole machine keeps
-    routing through the last account's proxy indefinitely.
-    """
-    try:
-        with open(PROXY_ORIGINAL_FILE) as f:
-            rec = json.load(f)
-    except FileNotFoundError:
-        return
-    except Exception as e:
-        _log.error("stale proxy record unreadable (%s) — remove %s and check "
-                   "System Settings → Network manually", e, PROXY_ORIGINAL_FILE)
-        return
-
-    service = rec.get("service", "")
-    ptype   = str(rec.get("proxy_type", "socks5"))
-    if not service:
-        try:
-            os.unlink(PROXY_ORIGINAL_FILE)
-        except OSError:
-            pass
-        return
-
-    _log.warning("Previous proxy restore did not complete — restoring original "
-                 "settings for service %r", service)
-    q = shlex.quote
-    if ptype.startswith("socks"):
-        if rec.get("enabled") and rec.get("host"):
-            lines = [
-                f"networksetup -setsocksfirewallproxy {q(service)} {q(str(rec.get('host')))} {q(str(rec.get('port', '0')))} off",
-                f"networksetup -setsocksfirewallproxystate {q(service)} on",
-            ]
-        else:
-            lines = [f"networksetup -setsocksfirewallproxystate {q(service)} off"]
-    else:
-        if rec.get("enabled") and rec.get("host"):
-            lines = [
-                f"networksetup -sethttpproxy {q(service)} {q(str(rec.get('host')))} {q(str(rec.get('port', '0')))}",
-                f"networksetup -sethttpproxystate {q(service)} on",
-            ]
-        else:
-            lines = [f"networksetup -sethttpproxystate {q(service)} off"]
-
-    r = _run_as_admin(
-        "\n".join(lines) + "\n",
-        "TelegramManager needs to restore proxy settings left over from a previous run.",
-    )
-    if r.returncode == 0:
-        try:
-            os.unlink(PROXY_ORIGINAL_FILE)
-        except OSError:
-            pass
-        _log.info("Stale proxy state restored for service %r", service)
-    else:
-        _log.error("Stale proxy restore failed (rc=%d) — the system proxy may "
-                   "still be set; check System Settings → Network → %s",
-                   r.returncode, service)
-
-
-def list_backups():
-    """Return all tdata backups found in ROOT_DIR/Backups/, newest first."""
-    backup_root = os.path.join(DATA_DIR, "Backups")
-    backups = []
-    if not os.path.isdir(backup_root):
-        return []
-    for date_folder in sorted(os.listdir(backup_root), reverse=True):
-        date_path = os.path.join(backup_root, date_folder)
-        if not os.path.isdir(date_path):
-            continue
-        for account in sorted(os.listdir(date_path)):
-            if account.endswith(".partial"):   # crashed mid-copy — not a valid backup
-                continue
-            acc_path  = os.path.join(date_path, account)
-            tdata_src = os.path.join(acc_path, "tdata")
-            if os.path.isdir(tdata_src):
-                size = get_folder_size(tdata_src)
-                backups.append({
-                    "date":       date_folder,
-                    "account":    account,
-                    "backup_path": acc_path,
-                    "size":       size,
-                    "size_human": human_size(size),
-                })
-    return backups
-
-
-_backup_map_cache = {"ts": 0.0, "map": {}}
-
-def _last_backup_map():
-    """Map account name → newest backup date folder ("YYYY-MM-DD_HH-MM").
-
-    listdir-only (no sizes), cached 30 s — cheap enough for the accounts poll.
-    """
-    now = time.time()
-    if now - _backup_map_cache["ts"] < 30:
-        return _backup_map_cache["map"]
-    backup_root = os.path.join(DATA_DIR, "Backups")
-    result = {}
-    if os.path.isdir(backup_root):
-        try:
-            for date_folder in sorted(os.listdir(backup_root), reverse=True):
-                date_path = os.path.join(backup_root, date_folder)
-                if not os.path.isdir(date_path):
-                    continue
-                for account in os.listdir(date_path):
-                    if account.endswith(".partial"):
-                        continue
-                    result.setdefault(account, date_folder)
-        except OSError as e:
-            _log.warning("_last_backup_map: %s", e)
-    _backup_map_cache["map"] = result
-    _backup_map_cache["ts"] = now
-    return result
-
-
-def _resolve_backup_dir(backup_path):
-    """Resolve a client-supplied backup path to its realpath, or None.
-
-    Only accepts paths exactly two levels below DATA_DIR/Backups
-    (Backups/<date>/<account>) so a crafted request can never touch the whole
-    Backups tree, a live account's tdata, or anything outside Backups.
-    """
-    backup_root = os.path.realpath(os.path.join(DATA_DIR, "Backups"))
-    real = os.path.realpath(str(backup_path or ""))
-    rel = os.path.relpath(real, backup_root)
-    if rel.startswith("..") or len(rel.split(os.sep)) != 2:
-        return None
-    return real
-
-
-def delete_backup(backup_path):
-    """Delete one backup folder (Backups/<date>/<account>). Returns (ok, msg)."""
-    real = _resolve_backup_dir(backup_path)
-    if real is None:
-        return False, "Invalid backup path"
-    if not os.path.isdir(real):
-        return False, "Backup not found"
-    r = subprocess.run(["rm", "-rf", real], capture_output=True, timeout=120)
-    if r.returncode != 0:
-        return False, "Delete failed: " + r.stderr.decode(errors="replace").strip()[:200]
-    # drop the date folder too once its last account backup is gone
-    try:
-        os.rmdir(os.path.dirname(real))
-    except OSError:
-        pass
-    _log.info("Backup deleted: %s", real)
-    _backup_map_cache["ts"] = 0.0
-    return True, "Backup deleted"
-
-
-def prune_backups(account_name):
-    """Enforce backup_keep_per_account for one account (0 = keep all)."""
-    try:
-        keep = int(config.get("backup_keep_per_account", 0))
-    except (TypeError, ValueError):
-        keep = 0
-    if keep <= 0:
-        return
-    mine = [b for b in list_backups() if b["account"] == account_name]  # newest first
-    for b in mine[keep:]:
-        ok, msg = delete_backup(b["backup_path"])
-        if ok:
-            _log.info("prune_backups: removed old backup %s", b["backup_path"])
-        else:
-            _log.warning("prune_backups: could not remove %s: %s", b["backup_path"], msg)
-
-
-@serialize_account_op(lambda backup_path, account_path: account_path, (False, _BUSY_MSG))
-def restore_backup(backup_path, account_path):
-    """Copy tdata from a backup folder back into the account's TelegramForcePortable/.
-
-    Crash-safe: the backup is first copied to tdata.new inside the account,
-    then the live tdata is swapped out via two renames. If the server dies
-    mid-copy the live tdata is untouched (a stale tdata.new is cleaned up on
-    the next restore).
-    """
-    real_backup = _resolve_backup_dir(backup_path)
-    if real_backup is None:
-        _log.warning("restore_backup: invalid backup path %r", backup_path)
-        return False, "Invalid backup path"
-    _log.info("Restoring backup from %s into %s", real_backup, account_path)
-    tdata_src = os.path.join(real_backup, "tdata")
-    portable  = os.path.join(account_path, "TelegramForcePortable")
-    tdata_dst = os.path.join(portable, "tdata")
-    tdata_new = tdata_dst + ".new"
-
-    if not os.path.isdir(tdata_src):
-        _log.warning("restore_backup: tdata not found at %s", tdata_src)
-        return False, "Backup tdata not found"
-    if not os.path.isdir(account_path):
-        _log.warning("restore_backup: account folder not found: %s", account_path)
-        return False, "Account folder not found"
-    if find_telegram_pid(account_path):
-        _log.warning("restore_backup: refused — Telegram is running for %s", account_path)
-        return False, "Close Telegram for this account before restoring a backup"
-
-    os.makedirs(portable, exist_ok=True)
-
-    # Re-validate the FINAL destination right before writing: the account path
-    # was checked by the route, but a symlink planted at TelegramForcePortable/
-    # or tdata could still redirect the copy outside the managed tree.
-    if os.path.islink(portable) or os.path.islink(tdata_dst) or not is_safe_path(portable):
-        _log.warning("restore_backup: destination failed re-validation: %s", portable)
-        return False, "Restore destination is not a valid account folder"
-
-    # Copy to a sibling temp dir first — the live tdata stays intact until the
-    # copy has fully succeeded.
-    subprocess.run(["rm", "-rf", tdata_new], capture_output=True, timeout=300)
-    r = subprocess.run(["cp", "-R", tdata_src, tdata_new], capture_output=True, timeout=1800)
-    if r.returncode != 0:
-        _log.error("restore_backup: cp failed: %s", r.stderr.decode(errors="replace").strip())
-        subprocess.run(["rm", "-rf", tdata_new], capture_output=True, timeout=300)
-        return False, "Copy failed — the current tdata was not touched"
-
-    # Swap: current tdata → timestamped .bak, then tdata.new → tdata.
-    bak = None
-    try:
-        if os.path.isdir(tdata_dst):
-            bak = tdata_dst + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
-            os.rename(tdata_dst, bak)
-            _log.info("Existing tdata moved to %s", bak)
-        os.rename(tdata_new, tdata_dst)
-    except OSError as e:
-        _log.error("restore_backup: swap failed: %s", e)
-        if bak and os.path.isdir(bak) and not os.path.isdir(tdata_dst):
-            try:
-                os.rename(bak, tdata_dst)
-                _log.info("restore_backup: original tdata restored from %s", bak)
-            except Exception as undo_e:
-                _log.error("restore_backup: rollback also failed: %s", undo_e)
-        subprocess.run(["rm", "-rf", tdata_new], capture_output=True, timeout=300)
-        return False, "Restore failed — original tdata has been restored"
-
-    invalidate_tdata_size(account_path)   # tdata was just replaced
-    _log.info("Backup restored successfully")
-    return True, "Restored successfully. The previous tdata was kept as a .bak folder."
-
-
-# ── Workspaces ────────────────────────────────────────────────────────────
-
-def load_workspaces():
-    data, source = _load_json_file_with_fallbacks(WORKSPACES_FILE, {}, (LEGACY_WORKSPACES_FILE,))
-    if source == LEGACY_WORKSPACES_FILE and WORKSPACES_FILE != LEGACY_WORKSPACES_FILE:
-        try:
-            _save_json_atomic(WORKSPACES_FILE, data)
-            os.unlink(LEGACY_WORKSPACES_FILE)
-        except OSError:
-            pass
-    return data
-
-def save_workspaces(ws):
-    """Atomic write: write to .tmp then rename, so a crash can't corrupt the file."""
-    with _ws_lock:
-        _save_json_atomic(WORKSPACES_FILE, ws)
-
-
 def _validate_import_string_map(section_name, value):
     if not isinstance(value, dict):
         return False, f"{section_name} must be an object"
@@ -1685,113 +1015,6 @@ def kill_account(account_path):
     return False
 
 
-
-
-# ── Session Keeper ─────────────────────────────────────────────────────────
-
-_keeper_status = {
-    "running":    False,
-    "last_run":   None,
-    "last_account": None,
-    "next_check": None,
-}
-
-# Ensures the scheduled loop and the manual "Run Now" trigger never run a keeper
-# pass concurrently. Acquired non-blocking; a busy caller skips its pass.
-_keeper_lock = threading.Lock()
-
-def run_keeper_loop():
-    """
-    Background thread: every hour, check if any account needs a keepalive open.
-    Opens each due account for keeper_open_seconds, then kills just that process.
-    """
-    CHECK_INTERVAL = 3600   # check every hour
-
-    while True:
-        now_ts = time.time()
-        _keeper_status["next_check"] = datetime.fromtimestamp(now_ts + CHECK_INTERVAL).isoformat()
-
-        if config.get("keeper_enabled", False):
-            if _keeper_lock.acquire(blocking=False):
-                try:
-                    interval_days = config.get("keeper_interval_days", 30)
-                    open_secs     = config.get("keeper_open_seconds", 120)
-
-                    _keeper_status["running"]  = True
-                    _keeper_status["last_run"] = datetime.now().isoformat()
-
-                    _run_keeper_pass(interval_days, open_secs)
-                finally:
-                    _keeper_status["running"] = False
-                    _keeper_lock.release()
-            else:
-                _log.info("run_keeper_loop: keeper already running — skipping this cycle")
-
-        # Sleep at the END so the first check runs immediately on startup.
-        time.sleep(CHECK_INTERVAL)
-
-
-def _run_keeper_pass(interval_days, open_secs):
-    """Open every account that hasn't been seen in interval_days. Shared by the
-    scheduled loop and the manual 'Run Now' trigger."""
-    for acc in scan_accounts():
-        if acc["status"] != "ready":
-            continue
-        if acc["running"]:
-            # Already open — counts as a keepalive; update last_opened
-            with _meta_lock:
-                metadata.setdefault("last_opened", {})[acc["path"]] = datetime.now().isoformat()
-                save_metadata(metadata)
-            continue
-
-        with _meta_lock:
-            last_iso = metadata.get("last_opened", {}).get(acc["path"])
-        days_since = 999
-        if last_iso:
-            try:
-                days_since = (time.time() - datetime.fromisoformat(last_iso).timestamp()) / 86400
-            except Exception:
-                pass
-
-        if days_since >= interval_days:
-            _keeper_status["last_account"] = acc["name"]
-            ok, msg = open_account(acc["path"])
-            if not ok:
-                _log.error("Keeper: failed to open %s: %s", acc["name"], msg)
-                continue
-            try:
-                time.sleep(open_secs)
-            finally:
-                # Never leave a keeper-opened Telegram running, even if this
-                # thread is interrupted mid-sleep.
-                kill_account(acc["path"])
-            time.sleep(5)   # brief pause between accounts
-
-
-def trigger_keeper_now():
-    """Force an immediate keeper run in a background thread.
-
-    Returns (started, message). If a keeper pass is already in progress the
-    request is rejected rather than running a second concurrent pass.
-    """
-    if not _keeper_lock.acquire(blocking=False):
-        _log.info("trigger_keeper_now: keeper already running — request ignored")
-        return False, "keeper already running"
-
-    def run_once():
-        try:
-            _keeper_status["running"]  = True
-            _keeper_status["last_run"] = datetime.now().isoformat()
-            _run_keeper_pass(
-                config.get("keeper_interval_days", 30),
-                config.get("keeper_open_seconds", 120),
-            )
-        finally:
-            _keeper_status["running"] = False
-            _keeper_lock.release()
-
-    threading.Thread(target=run_once, daemon=True).start()
-    return True, "Keeper started"
 
 
 def _patch_app_display_name(app_path: str, display_name: str) -> bool:
@@ -2078,45 +1301,6 @@ def setup_account(folder_path):
     set_telegram_display_name(folder_path, account_name)
 
     return True, "Setup complete"
-
-@serialize_account_op(lambda folder_path, account_name: folder_path, (False, _BUSY_MSG, ""))
-def backup_account(folder_path, account_name):
-    # Two accounts with the same folder name in different groups would write
-    # to the same Backups/<date>/<name> dir (and prune each other) — suffix
-    # the parent folder name when the basename is ambiguous.
-    basename = os.path.basename(folder_path)
-    dupes = [a for a in scan_accounts() if os.path.basename(a["path"]) == basename]
-    if len(dupes) > 1:
-        parent = os.path.basename(os.path.dirname(folder_path))
-        account_name = f"{account_name} ({parent})"
-    _log.info("Backing up account %r from %s", account_name, folder_path)
-    date_str   = datetime.now().strftime("%Y-%m-%d_%H-%M")
-    backup_dir = os.path.join(DATA_DIR, "Backups", date_str, account_name)
-    tdata_src  = os.path.join(folder_path, "TelegramForcePortable", "tdata")
-    if not os.path.isdir(tdata_src):
-        _log.warning("backup_account: tdata not found at %s", tdata_src)
-        return False, "No tdata found", ""
-    # Refuse to backup while Telegram is writing to tdata — the copy would be inconsistent
-    if find_telegram_pid(folder_path):
-        _log.warning("backup_account: refused — Telegram is running for %s", folder_path)
-        return False, "Close Telegram for this account before backing up", ""
-    # Crash-safe: copy into a .partial dir, rename to the final name only once
-    # the copy fully succeeded. A server crash mid-copy leaves a *.partial dir
-    # that list_backups() ignores, never a half backup that looks valid.
-    partial_dir = backup_dir + ".partial"
-    subprocess.run(["rm", "-rf", partial_dir], capture_output=True, timeout=300)
-    os.makedirs(partial_dir, exist_ok=True)
-    ok, err = _copy_tdata_excluding_cache(tdata_src, os.path.join(partial_dir, "tdata"))
-    if not ok:
-        subprocess.run(["rm", "-rf", partial_dir], capture_output=True, timeout=300)
-        return False, f"Copy failed: {err}", ""
-    if os.path.isdir(backup_dir):   # same account backed up twice in one minute
-        subprocess.run(["rm", "-rf", backup_dir], capture_output=True, timeout=300)
-    os.rename(partial_dir, backup_dir)
-    _log.info("Backup complete: %s", backup_dir)
-    prune_backups(account_name)
-    _backup_map_cache["ts"] = 0.0
-    return True, f"Backed up to Backups/{date_str}/{account_name}", backup_dir
 
 def update_all_apps():
     running = [acc for acc in scan_accounts() if acc["running"]]
@@ -2519,6 +1703,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
             return
+        if path.startswith("/api/") and path not in _LOCK_EXEMPT and not _check_and_touch_unlocked():
+            self.send_json({"success": False, "locked": True, "message": "App is locked"}, 423)
+            return
         if path == "/api/accounts":
             accs = scan_accounts_cached()
             last_map = _last_backup_map()
@@ -2526,9 +1713,24 @@ class RequestHandler(BaseHTTPRequestHandler):
                 a["last_backup"] = last_map.get(a["name"], "")
             self.send_json(accs)
         elif path == "/api/config":
-            self.send_json({**config, "root_dir": ROOT_DIR,
+            # Never serialize the lock secrets — stripping here is defense in
+            # depth (the endpoint is already gated while locked).
+            safe = {k: v for k, v in config.items()
+                    if k not in ("lock_password_hash", "lock_password_salt")}
+            safe["lock_enabled"] = bool(config.get("lock_password_hash"))
+            self.send_json({**safe, "root_dir": ROOT_DIR,
                             "path_warnings": PATH_WARNINGS,
                             "reserved_names": sorted(SKIP_NAMES)})
+        elif path == "/api/lock-status":
+            # Ungated status probe used by the lock screen; must never touch
+            # the activity timestamp (polling this endpoint must not itself
+            # keep an idle session alive).
+            self.send_json({
+                "enabled":         _lock_enabled(),
+                "unlocked":        _is_unlocked_no_touch(),
+                "hint":            config.get("lock_hint", ""),
+                "timeout_minutes": config.get("lock_timeout_minutes", 5),
+            })
         elif path == "/api/backups":
             self.send_json(list_backups())
         elif path == "/api/workspaces":
@@ -2657,6 +1859,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         path   = _route_path(self.path)
         if path is None:
             self.send_json({"success": False, "message": "Not found"}, 404)
+            return
+        if path.startswith("/api/") and path not in _LOCK_EXEMPT and not _check_and_touch_unlocked():
+            self.send_json({"success": False, "locked": True, "message": "App is locked"}, 423)
             return
         try:
             length = int(self.headers.get("Content-Length", 0))
@@ -3133,6 +2338,65 @@ class RequestHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json({"success": False, "message": str(e)})
 
+        elif path == "/api/unlock":
+            if not _lock_enabled():
+                self.send_json({"success": True, "enabled": False})
+                return
+            if _verify_lock_password(data.get("password")):
+                _server_unlock()
+                self.send_json({"success": True})
+            else:
+                fail_count = _register_unlock_failure()
+                _log.warning("unlock: incorrect password (consecutive failures=%d)", fail_count)
+                time.sleep(min(0.5 * fail_count, 5.0))
+                self.send_json({"success": False, "message": "Incorrect password"}, 403)
+
+        elif path == "/api/lock":
+            _server_lock()
+            self.send_json({"success": True})
+
+        elif path == "/api/lock-config":
+            # The only way to set/change/remove the lock password. A
+            # currently-unlocked session is deliberately insufficient to
+            # change or remove an existing password — the caller must prove
+            # they know the current one, so a walked-away unlocked screen
+            # can't silently drop the lock.
+            if _lock_enabled():
+                if not _verify_lock_password(data.get("current_password")):
+                    fail_count = _register_unlock_failure()
+                    _log.warning("lock-config: incorrect current password (consecutive failures=%d)", fail_count)
+                    time.sleep(min(0.5 * fail_count, 5.0))
+                    self.send_json({"success": False, "message": "Current password is incorrect"}, 403)
+                    return
+
+            new_pw  = data.get("new_password")
+            hint    = data.get("hint")
+            timeout = data.get("timeout_minutes")
+
+            if new_pw is not None and (not isinstance(new_pw, str) or not new_pw):
+                self.send_json({"success": False, "message": "New password cannot be empty"}, 400)
+                return
+
+            with _config_lock:
+                if new_pw:
+                    salt = secrets.token_hex(16)
+                    config["lock_password_hash"] = hashlib.sha256((salt + new_pw).encode()).hexdigest()
+                    config["lock_password_salt"] = salt
+                else:
+                    # new_password null/absent → remove the lock entirely.
+                    config["lock_password_hash"] = None
+                    config["lock_password_salt"] = None
+                if isinstance(hint, str):
+                    config["lock_hint"] = hint
+                if isinstance(timeout, int) and not isinstance(timeout, bool):
+                    config["lock_timeout_minutes"] = max(0, timeout)
+                save_config(config)
+
+            # The person who just proved the (old or new) password is
+            # standing there — don't make them re-enter it immediately.
+            _server_unlock()
+            self.send_json({"success": True, "lock_enabled": bool(config.get("lock_password_hash"))})
+
         elif path == "/api/config":
             int_keys  = ("keeper_interval_days", "keeper_open_seconds",
                          "auto_clear_cache_mb", "backup_keep_per_account",
@@ -3144,8 +2408,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                           "keeper_enabled", "keeper_interval_days", "keeper_open_seconds",
                           "auto_clear_cache_mb", "proxy_system_apply",
                           "backup_keep_per_account",
-                          "lock_password_hash", "lock_password_salt", "lock_hint",
-                          "lock_timeout_minutes"):
+                          "lock_hint", "lock_timeout_minutes"):
                     if k not in data:
                         continue
                     v = data[k]
@@ -3269,11 +2532,15 @@ class RequestHandler(BaseHTTPRequestHandler):
                             "freed": freed, "freed_human": human_size(freed)})
 
         elif path == "/api/export-config":
+            # Strip the lock secrets from the export — otherwise export
+            # re-opens the offline brute-force hole this whole feature closes.
+            exported_cfg = {k: v for k, v in load_config().items()
+                            if k not in ("lock_password_hash", "lock_password_salt")}
             self.send_json({
                 "version":    1,
                 "exported_at": datetime.now().isoformat(),
                 "metadata":   load_metadata(),
-                "config":     load_config(),
+                "config":     exported_cfg,
                 "workspaces": load_workspaces(),
             })
 
@@ -3283,6 +2550,12 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self.send_json({"success": False, "message": message})
                 return
             imported_cfg = normalized["config"]
+            # Import can never alter the lock password — it's only ever set
+            # via /api/lock-config (which requires proving the current one).
+            # Keep the two keys accepted by _validate_import_payload (so old
+            # export files still validate) but overwrite with live values.
+            imported_cfg["lock_password_hash"] = config.get("lock_password_hash")
+            imported_cfg["lock_password_salt"] = config.get("lock_password_salt")
             try:
                 with _meta_lock:
                     save_metadata(normalized["metadata"])
