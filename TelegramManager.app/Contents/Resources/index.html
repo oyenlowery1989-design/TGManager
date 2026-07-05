@@ -1436,6 +1436,8 @@ let searchFilter = "";
 let dragSrc     = null;
 let noteTimers  = {};
 let _keeperInfo = { enabled: false, interval_days: 30 };
+// Fallback until /api/config delivers the server's authoritative SKIP_NAMES
+let _reservedNames = ["TelegramForcePortable","Backups","TelegramManager.app","Telegram.app","tdata","tupdates","modules","_apps",".DS_Store"];
 const API_BASE = (() => {
   const path = window.location.pathname || "/";
   if (path === "/") return "/";
@@ -2145,10 +2147,7 @@ async function clearAccountCache(path, name, running) {
     toast("Close Telegram for this account before clearing its cache", "warning");
     return;
   }
-  if (!window.confirm(`Clear cached media and mini-app data for "${name}"?\n` +
-      `Frees disk space. Your session and messages are untouched — Telegram ` +
-      `re-downloads cached media on demand.`)) return;
-  toast(`Clearing cache for ${name}…`, "info");
+  toast(`Clearing cache for ${name}… (sessions and messages are untouched)`, "info");
   const r = await api("/api/clear-cache", "POST", { path });
   toast(r.message || (r.success ? "Cache cleared" : "Failed"),
         r.success ? "success" : "error");
@@ -2156,11 +2155,6 @@ async function clearAccountCache(path, name, running) {
 }
 
 async function clearAllCaches() {
-  const reclaimable = _statsData && _statsData.cache_total_human
-    ? ` (about ${_statsData.cache_total_human} reclaimable)` : "";
-  if (!window.confirm(`Clear cached media and mini-app data from all closed accounts${reclaimable}?\n` +
-      `Sessions and messages are untouched. Running accounts are skipped. ` +
-      `Telegram re-downloads cached media on demand.`)) return;
   const btn = document.querySelector('[onclick="clearAllCaches()"]');
   if (btn) { btn.disabled = true; btn.textContent = "🧹 Clearing…"; }
   toast("Clearing caches…", "info", 8000);
@@ -2571,8 +2565,7 @@ function validateNewAccountName(val) {
     err.style.display = "block";
     return false;
   }
-  const reserved = ["TelegramForcePortable","Backups","TelegramManager.app","tdata","modules"];
-  if (reserved.includes(val.trim())) {
+  if (_reservedNames.includes(val.trim())) {
     err.textContent = `"${val}" is a reserved name`;
     err.style.display = "block";
     return false;
@@ -3239,6 +3232,10 @@ async function initLockWithRetry() {
     const cfg = await api("/api/config");
     if (cfg && !cfg._networkError && cfg.success !== false) {
       showStatus('');
+      if (Array.isArray(cfg.reserved_names) && cfg.reserved_names.length) {
+        _reservedNames = cfg.reserved_names;
+      }
+      (cfg.path_warnings || []).forEach(w => toast("⚠ " + w, "error", 15000));
       // Real config in hand: lock if a password is set, otherwise unlock.
       if (cfg.lock_password_hash) {
         initLock(cfg);

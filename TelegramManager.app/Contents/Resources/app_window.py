@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """
-Telegram Manager - Native macOS Window
+Telegram Manager - Native macOS Window (FALLBACK ONLY)
+
+NOT USED when the compiled Swift launcher exists (the normal case) —
+launcher.sh builds and prefers launcher_swift; this PyObjC window is the
+fallback if Swift compilation fails. It duplicates the config-path logic of
+launcher.sh/launcher.swift; keep the three in sync if paths ever change.
+
 Uses PyObjC + WebKit to create a real app window (not a browser tab).
 """
 

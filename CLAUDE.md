@@ -25,6 +25,12 @@ swiftc "TelegramManager.app/Contents/Resources/launcher.swift" \
 tail -f data/manager.log
 ```
 
+**Run tests + syntax check (do both before committing):**
+```bash
+python3 -m unittest discover -s tests -q
+python3 -m py_compile "TelegramManager.app/Contents/Resources/server.py"
+```
+
 ## Directory Layout
 
 ```
@@ -35,19 +41,25 @@ TelegramManager_backup_v3/       ← PARENT_DIR
         launcher.sh              ← entry point: compiles Swift, falls back to Chrome
         launcher_swift           ← compiled Swift binary (gitignored artifact)
       Resources/
-        server.py                ← backend (Python, ~1100+ lines)
+        server.py                ← backend (Python, ~3300 lines)
         app_window.py            ← PyObjC fallback window (unused when Swift binary exists)
-        index.html               ← frontend (single-file, inline CSS+JS)
+        index.html               ← frontend (single-file, inline CSS+JS, ~3700 lines)
         launcher.swift           ← Swift WKWebView window source
   TG/                            ← ROOT_DIR — account folders live here
-  data/                          ← DATA_DIR — config, logs, backups, avatars, _apps/
+  data/                          ← DATA_DIR — config, logs, backups, _apps/
     manager_config.json          ← runtime config (port, feature flags, scan dirs)
-    manager_data.json            ← per-account metadata (notes, usernames, order, etc.)
-    Telegram.app                 ← shared Telegram master (zero-config placement)
+    Telegram.app                 ← shared Telegram master (zero-config placement, optional)
     _apps/macOS/Telegram.app     ← canonical shared master (set via Setup button)
-    avatars/                     ← MD5-keyed avatar JPEGs
     Backups/                     ← account backup folders (date/name/tdata/)
+  tests/                         ← unittest suite (expects to be sibling of the .app)
+  manager_config.json            ← auto-generated port mirror for the launcher — do not delete
+
+~/Library/Application Support/TelegramManager/
+    manager_data.json            ← per-account metadata (notes, usernames, order, …)
+    manager_workspaces.json      ← workspaces
 ```
+
+**Shared master MUST be Telegram Desktop** (`com.tdesktop.Telegram`, from desktop.telegram.org). The native macOS Telegram (`ru.keepcoder.Telegram`) ignores `TelegramForcePortable` and opens the user's personal session; `_wrong_app_type_error()` rejects it in setup/update.
 
 ## Path Resolution (Critical)
 
@@ -74,8 +86,8 @@ Single-file, no build toolchain. All CSS and JS are inline. Communicates with th
 An "account" is a folder containing `TelegramForcePortable/tdata/`. Each account gets its own cloned `Telegram.app` bundle on open (APFS copy-on-write via `cp -cR`), which is removed again when Telegram quits (watcher thread). The shared master lives in `data/_apps/macOS/Telegram.app` or `data/Telegram.app`.
 
 **Shared state files (all atomic-write via `.tmp` + `os.replace`):**
-- `manager_config.json` — app settings (port, Session Keeper, cache threshold, extra scan dirs)
-- `manager_data.json` — per-account metadata keyed by absolute folder path
+- `data/manager_config.json` — app settings (port, Session Keeper, cache threshold, extra scan dirs)
+- `~/Library/Application Support/TelegramManager/manager_data.json` — per-account metadata keyed by absolute folder path (migrated out of `data/`; legacy location read once then removed)
 
 **Key server.py subsystems:**
 - `scan_accounts()` / `scan_accounts_cached()` — recursive directory walk with 4 s cache and double-checked locking. Only walks `tdata/` per account (fast); full-disk sizes are handled by the separate disk stats cache.
@@ -85,7 +97,7 @@ An "account" is a folder containing `TelegramForcePortable/tdata/`. Each account
 - `_run_keeper_pass(interval_days, open_secs)` — shared keeper logic used by both the scheduled loop (`run_keeper_loop`) and the manual trigger (`trigger_keeper_now`).
 - `_run_as_admin()` — writes shell commands to a temp file and runs via `osascript do shell script ... with administrator privileges` (avoids embedding user-controlled strings in AppleScript).
 - `_as_str()` / `_sq()` — AppleScript string escaping helpers (AppleScript has no backslash escapes inside string literals).
-- `grab_avatar_from_window()` — uses AppleScript + `screencapture` to screenshot a running Telegram window.
+- `backup_account()` / `restore_backup()` — crash-safe: backups copy into `<dir>.partial` then atomic-rename; restores copy to `tdata.new` then rename-swap. Backup paths from clients must resolve exactly 2 levels under `Backups/` (`_resolve_backup_dir`).
 
 ## WKWebView Constraints
 
@@ -93,7 +105,7 @@ The Swift launcher (`launcher.swift`) hosts the UI in a `WKWebView`. Critical co
 
 - **`window.confirm()` / `alert()` / `prompt()` require `WKUIDelegate`** — without it they silently return `false`/`undefined`. `WKUIDelegate` is now implemented in `launcher.swift` (`runJavaScriptConfirmPanelWithMessage`). Any change to `launcher.swift` requires recompiling the binary (see command above).
 - **Do not add new `confirm()` calls for non-critical actions** — prefer removing the guard and relying on toast feedback + clear button labelling. Reserve `confirm()` for truly destructive irreversible actions (e.g. `importConfig` which overwrites all metadata).
-- **CSS variable `--danger` does not exist** — use `--red` for error/destructive states. Defined CSS variables: `--red`, `--green`, `--yellow`, `--accent`, `--text`, `--text-dim`, `--border`, `--card`, `--card-hover`, `--muted`.
+- **CSS variables `--danger` and `--card` do not exist** — use `--red` for error/destructive states and `--card-bg` for card backgrounds. Defined CSS variables: `--red`, `--green`, `--yellow`, `--orange`, `--accent`, `--accent-hover`, `--bg`, `--text`, `--text-dim`, `--border`, `--card-bg`, `--card-hover`, `--muted`, `--toolbar-bg`, `--group-accent`, `--group-header-bg`.
 
 ## Password Lock
 
@@ -118,6 +130,8 @@ Lock logic lives entirely in `index.html` JS (`initLock`, `lockApp`, `tryUnlock`
 | `keeper_interval_days` | 30 | Days between keeper opens |
 | `keeper_open_seconds` | 120 | Seconds to keep account open during keeper cycle |
 | `auto_clear_cache_mb` | 0 | Auto-clear media cache on close if over this size (0 = disabled) |
+| `backup_keep_per_account` | 0 | Backups kept per account, oldest pruned (0 = keep all) |
+| `app_source` | `""` | Legacy app-source path; set only via the approved picker, empty = auto-detect |
 
 ## Size Reporting
 
@@ -131,6 +145,7 @@ The following features were removed because they were broken or caused session c
 
 - **Device Name** (`apply_device_name`, `_patch_app_for_device_name`) — patched Telegram binary with `dd`, broke tdata by triggering APFS CoW split and ad-hoc re-signing which changed the app's code identity.
 - **Grab Usernames** (`grab_usernames`) — AppleScript accessibility scraping; unreliable and not useful.
+- **Avatar grabbing** (`grab_avatar_from_window`, `data/avatars/`) — removed; do not re-document.
 
 ## Security Patterns
 

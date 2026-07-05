@@ -31,6 +31,13 @@ _tg_sub          = os.path.join(_PARENT_DIR, "TG")
 ROOT_DIR         = _tg_sub if os.path.isdir(_tg_sub) else _PARENT_DIR
 _data_sub        = os.path.join(_PARENT_DIR, "data")
 DATA_DIR         = _data_sub if os.path.isdir(_data_sub) else _PARENT_DIR
+# A missing TG/ or data/ silently rescans the wrong tree and resets config
+# (including the lock password) — collect warnings to log and show in the UI.
+PATH_WARNINGS = []
+if ROOT_DIR == _PARENT_DIR:
+    PATH_WARNINGS.append(f"TG/ folder not found — scanning the whole parent dir instead: {_PARENT_DIR}")
+if DATA_DIR == _PARENT_DIR:
+    PATH_WARNINGS.append(f"data/ folder not found — config/backups fall back to: {_PARENT_DIR}")
 PRIVATE_STATE_DIR = os.path.expanduser("~/Library/Application Support/TelegramManager")
 METADATA_FILE    = os.path.join(PRIVATE_STATE_DIR, "manager_data.json")
 CONFIG_FILE      = os.path.join(DATA_DIR, "manager_config.json")
@@ -275,8 +282,10 @@ def save_config(cfg):
             with open(mirror_tmp, "w") as f:
                 json.dump({"port": cfg.get("port", 8477)}, f)
             os.replace(mirror_tmp, mirror)
-        except OSError:
-            pass
+        except OSError as e:
+            # The Swift launcher reads this mirror to find the port — a failed
+            # write means the next launch may connect to the wrong port.
+            _log.warning("save_config: could not mirror port to %s: %s", _PARENT_DIR, e)
 
 def load_metadata():
     data, source = _load_json_file_with_fallbacks(
@@ -2055,6 +2064,14 @@ def setup_account(folder_path):
 
 @serialize_account_op(lambda folder_path, account_name: folder_path, (False, _BUSY_MSG, ""))
 def backup_account(folder_path, account_name):
+    # Two accounts with the same folder name in different groups would write
+    # to the same Backups/<date>/<name> dir (and prune each other) — suffix
+    # the parent folder name when the basename is ambiguous.
+    basename = os.path.basename(folder_path)
+    dupes = [a for a in scan_accounts() if os.path.basename(a["path"]) == basename]
+    if len(dupes) > 1:
+        parent = os.path.basename(os.path.dirname(folder_path))
+        account_name = f"{account_name} ({parent})"
     _log.info("Backing up account %r from %s", account_name, folder_path)
     date_str   = datetime.now().strftime("%Y-%m-%d_%H-%M")
     backup_dir = os.path.join(DATA_DIR, "Backups", date_str, account_name)
@@ -2492,7 +2509,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                 a["last_backup"] = last_map.get(a["name"], "")
             self.send_json(accs)
         elif path == "/api/config":
-            self.send_json({**config, "root_dir": ROOT_DIR})
+            self.send_json({**config, "root_dir": ROOT_DIR,
+                            "path_warnings": PATH_WARNINGS,
+                            "reserved_names": sorted(SKIP_NAMES)})
         elif path == "/api/backups":
             self.send_json(list_backups())
         elif path == "/api/workspaces":
@@ -3272,6 +3291,8 @@ if __name__ == "__main__":
         _log.warning("Invalid port %r in config, falling back to 8477", port)
         port = 8477
     _log.info("Server starting on 127.0.0.1:%d  (ROOT_DIR=%s)", port, ROOT_DIR)
+    for w in PATH_WARNINGS:
+        _log.warning("PATH FALLBACK: %s", w)
     server = ThreadedHTTPServer(("127.0.0.1", port), RequestHandler)
     try:
         server.serve_forever()
