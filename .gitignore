@@ -17,3 +17,4 @@ TelegramManager.app/Contents/_CodeSignature/
 # ── Local tooling / OS noise ─────────────────────────────────────────────
 .claude/
 .DS_Store
+__pycache__/
