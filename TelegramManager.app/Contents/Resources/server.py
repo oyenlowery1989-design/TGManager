@@ -467,6 +467,91 @@ def clear_media_cache(account_path, threshold_mb=0):
     return True, size
 
 
+# Regenerable cache directory names found INSIDE tdata/user_data* (media/file
+# caches plus the Chromium caches of Telegram's embedded bot/mini-app WebView).
+# None of these hold session/login data — Telegram rebuilds them on demand.
+# Session data lives in key_datas, settings*, and the hex account dirs, which we
+# never touch: cache clearing only ever descends into user_data* subtrees.
+CACHE_DIR_NAMES = {
+    "media_cache", "cache", "Cache", "Cache_Data", "GPUCache", "Code Cache",
+    "ShaderCache", "GrShaderCache", "GraphiteDawnCache", "DawnGraphiteCache",
+    "DawnWebGPUCache", "component_crx_cache",
+}
+# Top-level regenerable dirs (re-downloaded on next launch).
+CACHE_TOPLEVEL_NAMES = ("emoji", "dumps")
+# Basenames excluded from backups (superset — a backup only needs the session).
+BACKUP_EXCLUDE_DIR_NAMES = sorted(CACHE_DIR_NAMES | set(CACHE_TOPLEVEL_NAMES))
+
+
+def _find_cache_dirs(tdata):
+    """Return the top-most cache directories under tdata, scoped to user_data*
+    subtrees and the known top-level cache dirs — never the session dirs."""
+    targets = []
+    for name in CACHE_TOPLEVEL_NAMES:
+        p = os.path.join(tdata, name)
+        if os.path.isdir(p):
+            targets.append(p)
+    try:
+        roots = [os.path.join(tdata, n) for n in os.listdir(tdata)
+                 if n.startswith("user_data") and os.path.isdir(os.path.join(tdata, n))]
+    except OSError:
+        roots = []
+    for root in roots:
+        for dp, dirnames, _ in os.walk(root, topdown=True):
+            for d in list(dirnames):
+                if d in CACHE_DIR_NAMES:
+                    targets.append(os.path.join(dp, d))
+                    dirnames.remove(d)   # don't descend into a dir we'll delete
+    return targets
+
+
+def clear_account_caches(account_path, threshold_mb=0):
+    """Delete all regenerable caches inside the account's tdata (media, file,
+    emoji and the bot-WebView Chromium caches) — never session/login data.
+    Refuses while Telegram is running. threshold_mb>0 clears only when the
+    total exceeds it; 0 = always. Returns (cleared, freed_bytes)."""
+    tdata = os.path.join(account_path, "TelegramForcePortable", "tdata")
+    if not os.path.isdir(tdata):
+        return False, 0
+    if find_telegram_pid(account_path):
+        _log.info("clear_account_caches: skipped — Telegram running for %s", account_path)
+        return False, 0
+    targets = _find_cache_dirs(tdata)
+    total = sum(get_folder_size(t) for t in targets)
+    if threshold_mb > 0 and total < threshold_mb * 1024 * 1024:
+        return False, 0
+    for t in targets:
+        subprocess.run(["rm", "-rf", t], capture_output=True, timeout=120)
+    invalidate_tdata_size(account_path)
+    _log.info("Cleared %d cache dir(s) for %s (freed %s)",
+              len(targets), os.path.basename(account_path), human_size(total))
+    return True, total
+
+
+def _copy_tdata_excluding_cache(src, dst):
+    """Copy tdata src→dst for a backup, skipping regenerable cache dirs so
+    backups stay small. Uses rsync --exclude; falls back to a full cp -R (a
+    complete, if larger, backup) if rsync is missing or errors. Returns
+    (ok, error_message)."""
+    os.makedirs(dst, exist_ok=True)
+    cmd = ["rsync", "-a"]
+    for name in BACKUP_EXCLUDE_DIR_NAMES:
+        cmd += ["--exclude", name + "/"]   # trailing slash = directories only
+    cmd += [src.rstrip("/") + "/", dst.rstrip("/") + "/"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=1800)
+        if r.returncode == 0:
+            return True, ""
+        _log.warning("backup rsync rc=%d, falling back to cp: %s",
+                     r.returncode, r.stderr.decode(errors="replace").strip()[:200])
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        _log.warning("backup rsync unavailable (%s); falling back to cp", e)
+    subprocess.run(["rm", "-rf", dst], capture_output=True)
+    r = subprocess.run(["cp", "-R", src, dst], capture_output=True, timeout=1800)
+    return (r.returncode == 0), ("" if r.returncode == 0
+                                 else r.stderr.decode(errors="replace").strip()[:200])
+
+
 def scan_accounts():
     """Recursively find all account folders across ROOT_DIR and extra_scan_dirs."""
     accounts = []
@@ -799,9 +884,9 @@ def _app_watcher_loop():
                         _log.info("Watcher: removing idle cloned app for %s", acc["name"])
                         subprocess.run(["rm", "-rf", app], capture_output=True)
                         invalidate_scan_cache()
-                # Auto-clear media cache if over threshold
+                # Auto-clear caches (media + WebView) if total is over threshold
                 if threshold_mb > 0:
-                    clear_media_cache(p, threshold_mb)
+                    clear_account_caches(p, threshold_mb)
                 idle_counts[p] = 0
 
             # Drop idle counters for accounts that no longer exist
@@ -1866,10 +1951,11 @@ def backup_account(folder_path, account_name):
         _log.warning("backup_account: refused — Telegram is running for %s", folder_path)
         return False, "Close Telegram for this account before backing up", ""
     os.makedirs(backup_dir, exist_ok=True)
-    r = subprocess.run(["cp", "-R", tdata_src, os.path.join(backup_dir, "tdata")],
-                       capture_output=True)
-    if r.returncode != 0:
-        return False, f"Copy failed: {r.stderr.decode(errors='replace').strip()}", ""
+    ok, err = _copy_tdata_excluding_cache(tdata_src, os.path.join(backup_dir, "tdata"))
+    if not ok:
+        # Don't leave a partial backup that list_backups() would offer as valid.
+        subprocess.run(["rm", "-rf", backup_dir], capture_output=True)
+        return False, f"Copy failed: {err}", ""
     _log.info("Backup complete: %s", backup_dir)
     prune_backups(account_name)
     _backup_map_cache["ts"] = 0.0
@@ -2450,6 +2536,24 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self.send_json({"success": True})
             else:
                 self.send_json({"success": False, "message": "Account is not running"})
+
+        elif path == "/api/clear-cache":
+            acc_path = data.get("path", "")
+            if not is_safe_path(acc_path):
+                self.send_json({"success": False, "message": "Invalid path"})
+                return
+            cleared, freed = clear_account_caches(acc_path)
+            if cleared:
+                invalidate_scan_cache()
+                self.send_json({"success": True, "freed": freed,
+                                "freed_human": human_size(freed),
+                                "message": f"Cleared {human_size(freed)} of cache"})
+            elif find_telegram_pid(acc_path):
+                self.send_json({"success": False,
+                                "message": "Close Telegram for this account before clearing its cache"})
+            else:
+                self.send_json({"success": True, "freed": 0,
+                                "freed_human": "0 B", "message": "No cache to clear"})
 
         elif path == "/api/setup":
             acc_path = data.get("path", "")
