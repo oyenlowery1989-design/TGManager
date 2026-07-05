@@ -2,6 +2,7 @@
 """Telegram Manager - Backend Server v2"""
 
 import copy
+import functools
 import json
 import os
 import shlex
@@ -296,6 +297,42 @@ _config_lock = threading.RLock()
 # while save_workspaces() re-acquires it internally without deadlocking.
 _ws_lock     = threading.RLock()
 
+# One lock per account path, so open/backup/restore for the SAME account can't
+# interleave (double-launch against one tdata, torn backup, tdata-less restore).
+# Different accounts stay fully parallel. kill/close intentionally stays
+# lock-free so an account can always be force-closed, even mid-backup.
+_account_op_locks = {}
+_account_op_locks_guard = threading.Lock()
+
+def _account_path_lock(path):
+    key = os.path.realpath(path)
+    with _account_op_locks_guard:
+        lk = _account_op_locks.get(key)
+        if lk is None:
+            lk = _account_op_locks[key] = threading.Lock()
+    return lk
+
+def serialize_account_op(get_path, busy_result):
+    """Decorate an account operation so it holds that account's lock for its
+    whole run. get_path(*args) picks the account path from the call; a caller
+    that can't get the lock immediately gets busy_result (shaped to match the
+    function's normal return) instead of blocking."""
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(*a, **k):
+            lk = _account_path_lock(get_path(*a, **k))
+            if not lk.acquire(blocking=False):
+                _log.info("serialize_account_op: %s busy for %s", fn.__name__, get_path(*a, **k))
+                return busy_result
+            try:
+                return fn(*a, **k)
+            finally:
+                lk.release()
+        return wrapper
+    return deco
+
+_BUSY_MSG = "Another operation is already in progress for this account — try again in a moment."
+
 def save_metadata(meta):
     """Atomic write: write to .tmp then rename, so a crash can't corrupt the file."""
     with _meta_lock:
@@ -425,6 +462,7 @@ def clear_media_cache(account_path, threshold_mb=0):
     if threshold_mb > 0 and size < threshold_mb * 1024 * 1024:
         return False, 0
     subprocess.run(["rm", "-rf", cache_path], capture_output=True)
+    invalidate_tdata_size(account_path)
     _log.info("Cleared media_cache for %s (freed %s)", os.path.basename(account_path), human_size(size))
     return True, size
 
@@ -495,7 +533,7 @@ def scan_accounts():
                     status = "broken"        # no tdata at all
 
                 tdata_actual = tdata_path if has_tdata else (raw_tdata if has_raw_tdata else None)
-                tdata_size   = get_folder_size(tdata_actual) if tdata_actual else 0
+                tdata_size   = cached_tdata_size(tdata_actual) if tdata_actual else 0
                 health       = check_health(full_path, has_app, has_tdata, tdata_actual)
 
                 accounts.append({
@@ -549,6 +587,33 @@ def get_folder_size(path):
     except OSError:
         pass
     return total
+
+# Per-account tdata size cache. get_folder_size() is a full tree walk; the
+# account scan ran it for every account on every scan, and the UI polls faster
+# than the scan-cache TTL, so a big install re-walked every tdata continuously.
+# A tdata's size only changes when the account is opened, closed, or its cache
+# is cleared — so cache it and invalidate on exactly those events.
+_tdata_size_cache = {}          # realpath(tdata) -> (size_bytes, ts)
+_tdata_size_lock  = threading.Lock()
+_TDATA_SIZE_TTL   = 60
+
+def cached_tdata_size(tdata_path):
+    key = os.path.realpath(tdata_path)
+    now = time.time()
+    with _tdata_size_lock:
+        ent = _tdata_size_cache.get(key)
+        if ent and now - ent[1] < _TDATA_SIZE_TTL:
+            return ent[0]
+    size = get_folder_size(tdata_path)   # walk outside the lock
+    with _tdata_size_lock:
+        _tdata_size_cache[key] = (size, now)
+    return size
+
+def invalidate_tdata_size(account_path):
+    """Drop the cached size for an account's tdata after it changed."""
+    tdata = os.path.join(account_path, "TelegramForcePortable", "tdata")
+    with _tdata_size_lock:
+        _tdata_size_cache.pop(os.path.realpath(tdata), None)
 
 def human_size(n):
     """Return a human-readable size string using decimal units (1 GB = 1,000,000,000 bytes),
@@ -820,6 +885,7 @@ def invalidate_scan_cache():
     with _scan_cache_lock:
         _scan_cache["data"] = None
 
+@serialize_account_op(lambda path: path, (False, _BUSY_MSG))
 def open_account(path):
     """Open the Telegram account at path. Returns (ok, message)."""
     _log.info("Opening account: %s", path)
@@ -868,6 +934,7 @@ def open_account(path):
         metadata.setdefault("last_opened", {})[path] = datetime.now().isoformat()
         save_metadata(metadata)
 
+    invalidate_tdata_size(path)   # a running account writes tdata; drop stale size
     return True, ""
 
 
@@ -1188,6 +1255,7 @@ def prune_backups(account_name):
             _log.warning("prune_backups: could not remove %s: %s", b["backup_path"], msg)
 
 
+@serialize_account_op(lambda backup_path, account_path: account_path, (False, _BUSY_MSG))
 def restore_backup(backup_path, account_path):
     """Copy tdata from a backup folder back into the account's TelegramForcePortable/."""
     _log.info("Restoring backup from %s into %s", backup_path, account_path)
@@ -1226,6 +1294,7 @@ def restore_backup(backup_path, account_path):
                 _log.error("restore_backup: rollback also failed: %s", undo_e)
         return False, "Copy failed — original tdata has been restored"
 
+    invalidate_tdata_size(account_path)   # tdata was just replaced
     _log.info("Backup restored successfully")
     return True, "Restored successfully. The previous tdata was kept as a .bak folder."
 
@@ -1387,6 +1456,7 @@ def kill_account(account_path):
         def _cleanup(p):
             time.sleep(2)
             remove_cloned_app(p)
+            invalidate_tdata_size(p)   # tdata settled (and cache may auto-clear on close)
             invalidate_scan_cache()
         threading.Thread(target=_cleanup, args=(account_path,), daemon=True).start()
         return True
@@ -1782,6 +1852,7 @@ def setup_account(folder_path):
 
     return True, "Setup complete"
 
+@serialize_account_op(lambda folder_path, account_name: folder_path, (False, _BUSY_MSG, ""))
 def backup_account(folder_path, account_name):
     _log.info("Backing up account %r from %s", account_name, folder_path)
     date_str   = datetime.now().strftime("%Y-%m-%d_%H-%M")

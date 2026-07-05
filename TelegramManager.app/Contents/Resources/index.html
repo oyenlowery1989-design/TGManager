@@ -2030,8 +2030,16 @@ document.addEventListener("keydown", e => { if (e.key === "Escape") { hideCtxMen
 
 function filterAccounts(val) { searchFilter = val; renderAccounts(); }
 
+const _openingPaths = new Set();
 async function openAccount(path) {
-  const r = await api("/api/open", "POST", { path });
+  if (_openingPaths.has(path)) return;   // ignore double-click; server also serializes
+  _openingPaths.add(path);
+  let r;
+  try {
+    r = await api("/api/open", "POST", { path });
+  } finally {
+    _openingPaths.delete(path);
+  }
   if (!r.success) {
     toast(r.message || "Failed to open account", "error");
     return;
