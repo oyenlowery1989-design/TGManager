@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0088cc"/>
+      <stop offset="100%" style="stop-color:#00c6ff"/>
+    </linearGradient>
+    <linearGradient id="inner" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a1a2e"/>
+      <stop offset="100%" style="stop-color:#16162a"/>
+    </linearGradient>
+  </defs>
+  <!-- Rounded square background -->
+  <rect x="16" y="16" width="480" height="480" rx="110" ry="110" fill="url(#bg)"/>
+  <!-- Inner dark circle -->
+  <circle cx="256" cy="256" r="180" fill="url(#inner)" opacity="0.3"/>
+  <!-- Telegram paper plane -->
+  <path d="M389.2 150.6L340.8 382.2c-3.6 16.2-13.2 20.2-26.8 12.6l-74-54.6-35.6 34.4c-4 4-7.2 7.2-14.8 7.2l5.2-75.6 137.6-124.4c6-5.2-1.2-8.2-9.2-3L168.2 291l-72.4-22.6c-15.8-5-16-15.8 3.2-23.4l283.2-109.2c13.2-4.8 24.6 3.2 20.4 23.4l-13.4-8.6z"
+    fill="white" transform="translate(-10, 5)"/>
+  <!-- Small grid dots suggesting multiple accounts -->
+  <circle cx="130" cy="420" r="14" fill="rgba(255,255,255,0.6)"/>
+  <circle cx="170" cy="420" r="14" fill="rgba(255,255,255,0.4)"/>
+  <circle cx="210" cy="420" r="14" fill="rgba(255,255,255,0.25)"/>
+</svg>

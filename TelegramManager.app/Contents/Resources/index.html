@@ -1,0 +1,3613 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Telegram Manager</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg: #111111;
+    --card-bg: #1a1a1a;
+    --card-hover: #202020;
+    --accent: #5288c1;
+    --accent-hover: #6499ce;
+    --green: #4fae4e;
+    --red: #e05252;
+    --yellow: #fabb39;
+    --orange: #f08c39;
+    --text: #d4d4d4;
+    --text-dim: #697b97;
+    --muted: #697b97;
+    --border: #252525;
+    --toolbar-bg: #0d0d0d;
+    --group-header-bg: #090909;
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+
+  /* ── Header ────────────────────────────────────────────────────────────── */
+  .header {
+    background: var(--toolbar-bg);
+    border-bottom: 1px solid var(--border);
+    padding: 0 20px;
+    height: 44px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+
+  .header-logo {
+    width: 28px;
+    height: 28px;
+    background: var(--accent);
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 15px;
+    flex-shrink: 0;
+  }
+
+  .header h1 {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text);
+    white-space: nowrap;
+  }
+
+  .header-stats {
+    font-size: 11px;
+    color: var(--text-dim);
+    flex: 1;
+    white-space: nowrap;
+  }
+
+  /* ── Toolbar ─────────────────────────────────────────────────────────────── */
+  .toolbar {
+    background: var(--toolbar-bg);
+    border-bottom: 1px solid var(--border);
+    padding: 8px 20px;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+
+  .btn {
+    padding: 6px 12px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: transparent;
+    color: var(--text);
+    font-size: 12px;
+    cursor: pointer;
+    transition: background 0.12s, border-color 0.12s;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
+  }
+
+  .btn:hover { background: var(--card-hover); }
+
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn.primary:hover { background: var(--accent-hover); }
+
+  .btn.danger { border-color: var(--red); color: var(--red); }
+  .btn.danger:hover { background: rgba(224,82,82,0.12); }
+
+  .btn.success { border-color: var(--green); color: var(--green); }
+  .btn.success:hover { background: rgba(79,174,78,0.12); }
+
+  .btn.warning { border-color: var(--yellow); color: var(--yellow); }
+  .btn.warning:hover { background: rgba(250,187,57,0.12); }
+
+  .btn:disabled { opacity: 0.35; cursor: not-allowed; pointer-events: none; }
+
+  .toolbar-spacer { flex: 1; }
+
+  /* Second toolbar row (always visible) */
+  .toolbar-expanded {
+    display: flex;
+    background: var(--toolbar-bg);
+    border-bottom: 1px solid var(--border);
+    padding: 6px 20px;
+    gap: 6px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .toolbar-sep {
+    width: 1px;
+    height: 18px;
+    background: var(--border);
+    flex-shrink: 0;
+  }
+
+  /* Tooltips — data-tip="..." on any element */
+  [data-tip] { position: relative; }
+  [data-tip]::after {
+    content: attr(data-tip);
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    background: #0d0d0d;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    font-size: 11px;
+    line-height: 1.4;
+    padding: 4px 10px;
+    border-radius: 4px;
+    white-space: nowrap;
+    pointer-events: none;
+    visibility: hidden;
+    opacity: 0;
+    transition: opacity 0.12s, visibility 0.12s;
+    z-index: 600;
+  }
+  [data-tip]:hover::after {
+    visibility: visible;
+    opacity: 1;
+    transition-delay: 0.55s;
+  }
+
+  .search-box {
+    padding: 7px 13px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: rgba(255,255,255,0.05);
+    color: var(--text);
+    font-size: 12px;
+    width: 200px;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+  .search-box:focus { border-color: var(--accent); }
+  .search-box::placeholder { color: var(--text-dim); }
+
+  /* Content */
+  #content { padding: 20px 20px 40px; }
+
+  /* Group section */
+  .group-section { margin-bottom: 20px; }
+
+  .group-section.dragging-group { opacity: 0.4; }
+  .group-section.drag-over-group > .group-header { border-color: var(--accent); background: rgba(82,136,193,0.1); }
+
+  .group-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 10px;
+    background: var(--group-header-bg);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    margin-bottom: 8px;
+    user-select: none;
+    cursor: pointer;
+    transition: background 0.12s;
+  }
+
+  .group-header:hover { background: #1a1a1a; }
+
+  .group-drag-handle {
+    color: var(--border);
+    font-size: 13px;
+    cursor: grab;
+    padding: 0 2px;
+    opacity: 0;
+    transition: opacity 0.15s;
+    flex-shrink: 0;
+  }
+
+  .group-header:hover .group-drag-handle { opacity: 1; }
+
+  .group-arrow {
+    font-size: 11px;
+    color: var(--text-dim);
+    transition: transform 0.2s;
+    flex-shrink: 0;
+    width: 14px;
+    text-align: center;
+  }
+
+  .group-section.collapsed .group-arrow { transform: rotate(-90deg); }
+
+  .group-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--accent);
+    letter-spacing: 0.3px;
+    flex: 1;
+  }
+
+  .group-pills {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+
+  .group-open-btn {
+    padding: 3px 10px;
+    border-radius: 6px;
+    font-size: 11px;
+    border: 1px solid var(--accent);
+    color: var(--accent);
+    background: transparent;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.15s, background 0.15s;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .group-header:hover .group-open-btn { opacity: 1; }
+  .group-open-btn:hover { background: rgba(82,136,193,0.15); }
+
+  .group-pill {
+    padding: 2px 9px;
+    border-radius: 20px;
+    font-size: 11px;
+    font-weight: 500;
+  }
+
+  .group-pill.total   { background: rgba(255,255,255,0.06); color: var(--text-dim); }
+  .group-pill.running { background: rgba(79,174,78,0.15); color: var(--green); }
+
+  /* Collapse animation */
+  .group-body {
+    overflow: hidden;
+    transition: max-height 0.25s ease, opacity 0.2s ease;
+    max-height: 4000px;
+    opacity: 1;
+  }
+
+  .group-section.collapsed .group-body {
+    max-height: 0;
+    opacity: 0;
+  }
+
+  .group-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(272px, 1fr));
+    gap: 14px;
+  }
+
+  /* Cards */
+  .card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 14px;
+    transition: background 0.15s, border-color 0.15s;
+    position: relative;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    cursor: default;
+  }
+
+  .card:hover {
+    background: var(--card-hover);
+  }
+
+  .card.running { border-color: var(--green); }
+  .card.broken  { border-color: var(--red); opacity: 0.7; }
+  .card.needs-setup { border-color: var(--yellow); }
+
+  /* Drag handle */
+  .drag-handle {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    font-size: 14px;
+    color: var(--border);
+    cursor: grab;
+    line-height: 1;
+    user-select: none;
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+
+  .card:hover .drag-handle { opacity: 1; }
+  .card.dragging { opacity: 0.4; border-style: dashed; }
+
+  /* Card header row */
+  .card-top {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+
+  .card-icon {
+    width: 52px;
+    height: 52px;
+    border-radius: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 24px;
+    flex-shrink: 0;
+  }
+
+
+  .card-icon.ready      { background: var(--accent); }
+  .card-icon.broken     { background: var(--red); }
+  .card-icon.needs_setup { background: var(--yellow); }
+  .card-icon.no_data    { background: #333; }
+
+  .card-icon { position: relative; overflow: hidden; }
+
+  .card-header-text { flex: 1; min-width: 0; }
+
+  .card-name {
+    font-size: 14px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-bottom: 2px;
+  }
+
+  .card-relpath {
+    font-size: 11px;
+    color: var(--text-dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .status-badge {
+    padding: 2px 7px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 500;
+    flex-shrink: 0;
+  }
+
+  .status-badge.ready      { color: var(--green); }
+  .status-badge.running    { color: var(--green); font-weight: 600; }
+  .status-badge.broken     { color: var(--red); }
+  .status-badge.needs-setup { color: var(--yellow); }
+  .status-badge.no-data    { color: var(--text-dim); }
+
+  /* Username line */
+  .card-username {
+    font-size: 12px;
+    color: var(--accent);
+    font-family: 'SF Mono', 'Menlo', monospace;
+    margin-bottom: 8px;
+    min-height: 16px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .card-username:empty { display: none; }
+
+  /* Meta row */
+  .card-meta {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-bottom: 10px;
+  }
+
+  /* Note */
+  .card-note {
+    width: 100%;
+    background: rgba(255,255,255,0.03);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    color: var(--text-dim);
+    font-size: 11px;
+    padding: 6px 9px;
+    resize: none;
+    outline: none;
+    font-family: inherit;
+    transition: border-color 0.2s, color 0.2s;
+    min-height: 44px;
+    margin-bottom: 10px;
+  }
+
+  .card-note:focus { border-color: var(--accent); color: var(--text); }
+  .card-note::placeholder { color: #555; }
+
+  /* Card actions */
+  .card-actions {
+    display: flex;
+    gap: 5px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+    margin-top: auto;
+  }
+
+  .card-actions .btn {
+    flex: 1;
+    justify-content: center;
+    padding: 5px 8px;
+    font-size: 11px;
+  }
+
+  /* Toast */
+  .toast-container {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    z-index: 1000;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    pointer-events: none;
+  }
+
+  .toast {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 9px 10px 9px 14px;
+    border-radius: 5px;
+    font-size: 12px;
+    border: 1px solid;
+    pointer-events: all;
+    user-select: text;
+    max-width: 360px;
+  }
+
+  .toast-msg {
+    flex: 1;
+    line-height: 1.4;
+  }
+
+  .toast-copy {
+    flex-shrink: 0;
+    background: none;
+    border: none;
+    cursor: pointer;
+    opacity: 0.5;
+    font-size: 13px;
+    padding: 2px 4px;
+    border-radius: 3px;
+    color: inherit;
+    line-height: 1;
+    transition: opacity 0.1s;
+  }
+  .toast-copy:hover { opacity: 1; }
+
+  .toast.success { background: rgba(79,174,78,0.18); color: var(--green); border-color: var(--green); }
+  .toast.error   { background: rgba(224,82,82,0.18); color: var(--red); border-color: var(--red); }
+  .toast.info    { background: rgba(82,136,193,0.18); color: var(--accent); border-color: var(--accent); }
+  .toast.warning { background: rgba(250,187,57,0.18); color: var(--yellow); border-color: var(--yellow); }
+
+  /* Server-disconnected banner */
+  #disconnect-banner {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    z-index: 8000;
+    display: none;
+    padding: 6px 12px;
+    text-align: center;
+    font-size: 12px;
+    background: rgba(224,82,82,0.18);
+    color: var(--red);
+    border-bottom: 1px solid var(--red);
+  }
+  #disconnect-banner.visible { display: block; }
+
+
+  /* Loading */
+  .loading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 55vh;
+    font-size: 15px;
+    color: var(--text-dim);
+  }
+
+  .spinner {
+    width: 22px;
+    height: 22px;
+    border: 3px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.75s linear infinite;
+    margin-right: 10px;
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Settings modal */
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.65);
+    z-index: 200;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .modal-overlay.active { display: flex; }
+
+  .modal {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 20px;
+    width: 480px;
+    max-width: 92vw;
+  }
+
+  .modal h2 { font-size: 17px; margin-bottom: 18px; }
+
+  .modal label {
+    display: block;
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-bottom: 5px;
+  }
+
+  .modal input[type="text"] {
+    width: 100%;
+    padding: 9px 13px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: rgba(255,255,255,0.05);
+    color: var(--text);
+    font-size: 13px;
+    margin-bottom: 14px;
+    outline: none;
+  }
+
+  .modal input[type="text"]:focus { border-color: var(--accent); }
+
+  .modal-info {
+    font-size: 12px;
+    color: var(--text-dim);
+    background: rgba(255,255,255,0.03);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 13px;
+    margin-bottom: 16px;
+    line-height: 1.6;
+  }
+
+  .modal-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    margin-top: 6px;
+  }
+
+  /* Empty */
+  .empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 55vh;
+    color: var(--text-dim);
+    text-align: center;
+    padding: 24px;
+  }
+
+  .empty-state-icon { font-size: 46px; margin-bottom: 14px; }
+  .empty-state h2 { font-size: 19px; margin-bottom: 8px; color: var(--text); }
+  .empty-state p { font-size: 13px; max-width: 380px; line-height: 1.6; }
+
+  /* Drop zone */
+  .group-grid.drag-over > .card { border-color: #282828; }
+  .drop-placeholder {
+    border: 2px dashed var(--accent);
+    border-radius: 13px;
+    background: rgba(82,136,193,0.05);
+    min-height: 80px;
+  }
+
+  /* Color tag dot on card */
+  .card-color-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    cursor: pointer;
+    border: 2px solid rgba(255,255,255,0.15);
+    transition: transform 0.15s;
+    margin-top: 2px;
+  }
+  .card-color-dot:hover { transform: scale(1.4); }
+  .card-color-dot.empty { background: rgba(255,255,255,0.08); border-style: dashed; }
+
+  /* Color picker popup */
+  .color-picker {
+    position: absolute;
+    top: 14px;
+    right: 14px;
+    background: #1a1a1a;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 6px;
+    display: flex;
+    gap: 5px;
+    flex-wrap: wrap;
+    width: 110px;
+    z-index: 50;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+  }
+  .color-swatch {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    cursor: pointer;
+    border: 2px solid transparent;
+    transition: transform 0.12s, border-color 0.12s;
+  }
+  .color-swatch:hover { transform: scale(1.25); border-color: rgba(255,255,255,0.5); }
+  .color-swatch.none { background: rgba(255,255,255,0.08); border: 2px dashed #4a4a4a; }
+
+  /* Colored card left border */
+  .card[data-color] { border-left-width: 3px; }
+
+  /* Health indicator */
+  .health-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    margin-top: 3px;
+  }
+  .health-dot.ok   { background: var(--green); }
+  .health-dot.warn { background: var(--yellow); }
+  .health-dot.error { background: var(--red); }
+
+  /* Last opened */
+  .card-last-opened {
+    font-size: 10px;
+    color: #4a4a4a;
+    margin-top: 2px;
+  }
+
+  /* Editable username */
+  .card-username {
+    font-size: 12px;
+    color: var(--accent);
+    font-family: 'SF Mono', 'Menlo', monospace;
+    margin-bottom: 8px;
+    min-height: 18px;
+    cursor: text;
+    border-radius: 4px;
+    padding: 1px 4px;
+    margin-left: -4px;
+    transition: background 0.15s;
+    outline: none;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .card-username:hover  { background: rgba(255,255,255,0.05); }
+  .card-username:focus  { background: rgba(82,136,193,0.12); color: var(--text); }
+  .card-username:empty::before { content: attr(data-placeholder); color: #3d3d3d; font-style: italic; }
+
+  /* ── Lock screen ────────────────────────────────────────────────────────── */
+  #lock-screen {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    background: rgba(15,15,20,0.97);
+    align-items: center;
+    justify-content: center;
+    pointer-events: all;
+  }
+  #lock-screen.visible {
+    display: flex;
+  }
+  .lock-card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 36px 40px 32px;
+    width: 340px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+    box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+  }
+  .lock-card h2 {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+  }
+  .lock-card .lock-icon {
+    font-size: 36px;
+    line-height: 1;
+  }
+  #lock-password-input {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 10px 14px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: rgba(255,255,255,0.05);
+    color: var(--text);
+    font-size: 15px;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  #lock-password-input:focus { border-color: var(--accent); }
+  #lock-password-input.lock-error { border-color: var(--red); }
+  #lock-hint-link {
+    font-size: 12px;
+    color: var(--text-dim);
+    cursor: pointer;
+    text-decoration: underline;
+    align-self: flex-start;
+  }
+  #lock-hint-text {
+    font-size: 12px;
+    color: var(--yellow);
+    align-self: flex-start;
+    display: none;
+  }
+  .lock-recovery {
+    font-size: 10px;
+    color: var(--text-dim);
+    text-align: center;
+    line-height: 1.5;
+    margin-top: 6px;
+  }
+  @keyframes lock-shake {
+    0%,100% { transform: translateX(0); }
+    20%      { transform: translateX(-8px); }
+    40%      { transform: translateX(8px); }
+    60%      { transform: translateX(-5px); }
+    80%      { transform: translateX(5px); }
+  }
+  .lock-shake { animation: lock-shake 0.35s ease; }
+
+  /* Right-click context menu */
+  .ctx-menu {
+    position: fixed;
+    background: #1a1a1a;
+    border: 1px solid #2a2a2a;
+    border-radius: 6px;
+    padding: 3px;
+    z-index: 500;
+    min-width: 180px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+    display: none;
+  }
+  .ctx-menu.visible { display: block; }
+  .ctx-item {
+    padding: 8px 14px;
+    font-size: 13px;
+    border-radius: 7px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--text);
+    transition: background 0.12s;
+  }
+  .ctx-item:hover { background: rgba(255,255,255,0.08); }
+  .ctx-item.danger { color: var(--red); }
+  .ctx-item.danger:hover { background: rgba(224,82,82,0.1); }
+  .ctx-sep { height: 1px; background: var(--border); margin: 3px 6px; }
+
+  /* Workspace bar */
+  .workspace-bar {
+    background: var(--toolbar-bg);
+    border-bottom: 1px solid var(--border);
+    padding: 7px 20px;
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .workspace-chip {
+    padding: 4px 12px; border-radius: 20px; font-size: 12px;
+    border: 1px solid var(--border); background: transparent;
+    color: var(--text); cursor: pointer; display: flex; align-items: center; gap: 6px;
+    transition: all 0.15s;
+  }
+  .workspace-chip:hover { border-color: var(--accent); color: var(--accent); background: rgba(82,136,193,0.1); }
+  .workspace-chip .ws-del {
+    font-size: 11px; color: var(--text-dim); margin-left: 2px;
+    padding: 0 2px; border-radius: 3px;
+  }
+  .workspace-chip .ws-del:hover { color: var(--red); }
+  .workspace-label { font-size: 11px; color: var(--text-dim); }
+
+  /* Multi-select mode */
+  .select-mode .card { cursor: pointer; }
+  .select-mode .card:hover { border-color: var(--accent); }
+  .select-mode .card.selected { border-color: var(--accent); background: rgba(82,136,193,0.08); }
+  .card-checkbox {
+    position: absolute; top: 10px; left: 10px;
+    width: 18px; height: 18px; border-radius: 5px;
+    border: 2px solid var(--border); background: var(--card-bg);
+    display: none; align-items: center; justify-content: center;
+    font-size: 11px; pointer-events: none; z-index: 10;
+  }
+  .select-mode .card-checkbox { display: flex; }
+  .select-mode .card.selected .card-checkbox {
+    background: var(--accent); border-color: var(--accent); color: white;
+  }
+
+  /* Keeper status pill */
+  .keeper-pill {
+    font-size: 11px; padding: 3px 9px; border-radius: 20px;
+    border: 1px solid var(--green); color: var(--green);
+    background: rgba(79,174,78,0.08); display: inline-flex; align-items: center; gap: 5px;
+  }
+
+  /* Alert banner */
+  .alert-banner {
+    margin: 14px 20px 0;
+    padding: 11px 16px;
+    border-radius: 10px;
+    border: 1px solid;
+    font-size: 12px;
+    line-height: 1.7;
+    cursor: pointer;
+  }
+  .alert-banner.warn  { background: rgba(250,187,57,0.08);  border-color: var(--yellow); color: var(--yellow); }
+  .alert-banner.error { background: rgba(224,82,82,0.08);  border-color: var(--red);    color: var(--red); }
+  .alert-banner-title { font-weight: 700; margin-bottom: 2px; }
+  .alert-banner-items { color: var(--text-dim); }
+
+  /* Proxy badge on card */
+  .proxy-badge {
+    font-size: 10px;
+    color: #697b97;
+    margin-bottom: 6px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  /* Backup browser modal list */
+  .backup-list {
+    max-height: 340px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 14px;
+  }
+  .backup-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 13px;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+  }
+  .backup-item:last-child { border-bottom: none; }
+  .backup-item:hover { background: rgba(255,255,255,0.03); }
+  .backup-item-info { flex: 1; min-width: 0; }
+  .backup-item-name { font-weight: 600; color: var(--text); }
+  .backup-item-date { color: var(--text-dim); font-size: 11px; }
+  .backup-item-size { color: var(--text-dim); font-size: 11px; white-space: nowrap; }
+
+  /* Proxy modal */
+  .proxy-type-row {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+  .proxy-type-btn {
+    flex: 1;
+    padding: 7px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 12px;
+    cursor: pointer;
+    text-align: center;
+    transition: all 0.15s;
+  }
+  .proxy-type-btn.active { border-color: var(--accent); color: var(--accent); background: rgba(82,136,193,0.1); }
+
+  /* Modal checkbox row */
+  .modal-check-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 14px;
+  }
+  .modal-check-row label { margin: 0; font-size: 12px; color: var(--text-dim); cursor: pointer; }
+  .modal-check-row input { width: 14px; height: 14px; cursor: pointer; }
+
+  /* Restore confirm selector */
+  .account-select {
+    width: 100%;
+    padding: 9px 13px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: rgba(255,255,255,0.05);
+    color: var(--text);
+    font-size: 12px;
+    margin-bottom: 14px;
+    outline: none;
+  }
+
+  /* ── Settings tabs ──────────────────────────────────────────────────────── */
+  .settings-tabs {
+    display: flex;
+    gap: 2px;
+    border-bottom: 1px solid var(--border);
+    margin: -4px -4px 18px;
+    padding: 0 4px;
+  }
+
+  .settings-tab {
+    padding: 8px 16px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-dim);
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    cursor: pointer;
+    transition: color 0.15s, border-color 0.15s;
+    white-space: nowrap;
+  }
+
+  .settings-tab:hover { color: var(--text); }
+
+  .settings-tab.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+  }
+
+  .settings-panel { display: none; }
+  .settings-panel.active { display: block; }
+
+  .settings-section-title {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: var(--text-dim);
+    margin: 16px 0 8px;
+  }
+
+  .settings-section-title:first-child { margin-top: 0; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-logo">✈</div>
+  <h1>Telegram Manager</h1>
+  <div class="header-stats" id="stats"></div>
+</div>
+
+<div class="toolbar">
+  <button class="btn primary" onclick="openAll()" id="btn-open-all" data-tip="Launch Telegram for all ready accounts">▶ Open All</button>
+  <button class="btn danger" onclick="closeAll()" id="btn-close-all" data-tip="Kill all running Telegram instances">■ Close All</button>
+  <button class="btn success" onclick="showNewAccountModal()" id="btn-new-account" data-tip="Create a new account folder and log in">＋ New</button>
+
+  <div class="toolbar-spacer"></div>
+  <input type="text" class="search-box" placeholder="Search accounts…" oninput="filterAccounts(this.value)" id="search">
+  <button class="btn" onclick="refresh()" data-tip="Reload account list from disk">↻</button>
+  <button class="btn" onclick="showSettings()" data-tip="Open settings">⚙ Settings</button>
+</div>
+
+<div class="toolbar-expanded" id="toolbar-overflow">
+  <button class="btn" onclick="openPinned()" id="btn-open-pinned" data-tip="Launch only pinned accounts">Open Pinned</button>
+  <button class="btn" onclick="setupAll()" data-tip="Copy Telegram.app into accounts that are missing it">Setup</button>
+  <button class="btn" onclick="updateAll()" data-tip="Replace all per-account Telegram.app copies with the latest version from your source">Update All</button>
+  <div class="toolbar-sep"></div>
+  <button class="btn" onclick="backupAll()" data-tip="Save a backup of every account's session data (tdata)">Backup All</button>
+  <button class="btn" onclick="showBackupBrowser()" data-tip="View saved backups and restore one to an account">Browse Backups</button>
+  <button class="btn" onclick="fixDockNames()" data-tip="Rename each account's app bundle so it shows the account name in the Dock">Fix Dock Names</button>
+  <div class="toolbar-sep"></div>
+  <button class="btn" onclick="toggleSelectMode()" id="btn-select" data-tip="Select multiple accounts to open together or save as a workspace">Select Mode</button>
+</div>
+
+<div class="workspace-bar" id="workspace-bar" style="display:none"></div>
+
+<div id="select-banner" style="display:none;background:rgba(82,136,193,0.1);border-bottom:1px solid var(--accent);padding:8px 20px;font-size:12px;color:var(--accent);display:none;align-items:center;gap:10px">
+  <span id="select-count">0 selected</span>
+  <button class="btn primary" style="padding:4px 12px;font-size:11px" onclick="showSaveWorkspace()">💾 Save as Workspace</button>
+  <button class="btn" style="padding:4px 12px;font-size:11px" onclick="openSelected()">▶ Open Selected</button>
+  <button class="btn" style="padding:4px 12px;font-size:11px;margin-left:auto" onclick="toggleSelectMode()">✕ Done</button>
+</div>
+
+<div id="content">
+  <div class="loading"><div class="spinner"></div> Loading accounts…</div>
+</div>
+
+<div class="toast-container" id="toasts"></div>
+
+<!-- Lock screen -->
+<div id="disconnect-banner"></div>
+
+<div id="lock-screen">
+  <div class="lock-card">
+    <div class="lock-icon">🔒</div>
+    <h2>TelegramManager</h2>
+    <input type="password" id="lock-password-input" placeholder="Enter password…"
+           autocomplete="current-password"
+           onkeydown="if(event.key==='Enter') tryUnlock()">
+    <span id="lock-hint-link" style="display:none" onclick="showLockHint()">Show hint</span>
+    <span id="lock-hint-text"></span>
+    <span id="lock-status" style="display:none;font-size:12px;color:var(--text-dim)"></span>
+    <button class="btn primary" style="width:100%;padding:10px" onclick="tryUnlock()">Unlock</button>
+    <p class="lock-recovery">Forgot your password? Edit <code>manager_config.json</code> and remove the <code>lock_password_hash</code> key.</p>
+  </div>
+</div>
+
+<!-- Right-click context menu -->
+<div class="ctx-menu" id="ctx-menu">
+  <div class="ctx-item" id="ctx-open">▶ Open</div>
+  <div class="ctx-item danger" id="ctx-close">■ Close</div>
+  <div class="ctx-item" id="ctx-backup">↓ Backup</div>
+  <div class="ctx-item" id="ctx-backups-view">📂 Backups…</div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item" id="ctx-pin">📌 Pin</div>
+  <div class="ctx-item" id="ctx-rename">✏ Rename</div>
+  <div class="ctx-sep"></div>
+<div class="ctx-item" id="ctx-dock-name">Dock Name</div>
+  <div class="ctx-item" id="ctx-proxy">Proxy</div>
+  <div class="ctx-item" id="ctx-copy-path">Copy Path</div>
+  <div class="ctx-item" id="ctx-reveal">Show in Finder</div>
+  <div class="ctx-item" id="ctx-diagnose">Diagnose &amp; Repair</div>
+  <div class="ctx-item danger" id="ctx-remove-app" style="display:none">Remove App</div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item danger" id="ctx-delete">Delete</div>
+</div>
+
+<!-- Rename modal -->
+<div class="modal-overlay" id="rename-modal">
+  <div class="modal" style="width:380px">
+    <h2>✏ Rename Account</h2>
+    <label>New folder name:</label>
+    <input type="text" id="rename-input" placeholder="Account name…">
+    <p style="font-size:11px;color:var(--text-dim);margin-bottom:14px">
+      This renames the actual folder on disk. Notes, colors, and other data carry over automatically.
+    </p>
+    <div class="modal-actions">
+      <button class="btn" onclick="hideRename()">Cancel</button>
+      <button class="btn primary" onclick="confirmRename()">Rename</button>
+    </div>
+  </div>
+</div>
+
+<!-- Dock name modal -->
+<div class="modal-overlay" id="dock-name-modal">
+  <div class="modal" style="width:420px">
+    <h2>🏷 Set App / Dock Name</h2>
+    <label>Custom name shown in the Dock and Finder:</label>
+    <input type="text" id="dock-name-input" placeholder="e.g. Work Account, Personal, John…">
+    <p style="font-size:11px;color:var(--text-dim);margin-bottom:6px;line-height:1.6">
+      This renames the Telegram.app bundle inside the account folder so each instance
+      shows its own name in the Dock, Cmd+Tab switcher, and Finder — instead of all
+      showing "Telegram".<br>
+      Leave blank to reset to the account folder name.
+    </p>
+    <p style="font-size:11px;color:var(--yellow);margin-bottom:14px;line-height:1.6">
+      ⚠ The app bundle will be renamed on disk. Any running instance of this account
+      must be restarted for the Dock change to take effect.
+    </p>
+    <div class="modal-actions">
+      <button class="btn" onclick="hideDockNameModal()">Cancel</button>
+      <button class="btn danger" onclick="confirmDockName('')" style="border-color:var(--text-dim);color:var(--text-dim)">Reset</button>
+      <button class="btn primary" onclick="confirmDockName()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Save Workspace Modal -->
+<div class="modal-overlay" id="workspace-modal">
+  <div class="modal" style="width:380px">
+    <h2>💾 Save Workspace</h2>
+    <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px" id="ws-selected-summary"></p>
+    <label>Workspace name:</label>
+    <input type="text" id="ws-name-input" placeholder="e.g. Work, Morning, Client A…">
+    <label>Icon:</label>
+    <div id="ws-icon-picker" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="hideWorkspaceModal()">Cancel</button>
+      <button class="btn primary" onclick="confirmSaveWorkspace()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Delete Confirmation Modal -->
+<div class="modal-overlay" id="delete-modal">
+  <div class="modal" style="width:400px">
+    <h2 style="color:var(--red)">🗑 Move to Trash</h2>
+    <p style="font-size:13px;margin-bottom:10px">A backup of <strong>tdata</strong> will be saved first, then <strong id="delete-account-label"></strong> will be moved to the macOS Trash.</p>
+    <div class="modal-info" style="border-color:rgba(224,82,82,0.3);background:rgba(224,82,82,0.05)">
+      The entire account folder (Telegram.app + tdata) will be moved to Trash.<br>
+      You can recover it from Trash if needed.
+    </div>
+    <div class="modal-actions" style="margin-top:16px">
+      <button class="btn" onclick="hideDeleteModal()">Cancel</button>
+      <button class="btn danger" onclick="confirmDelete()">Move to Trash</button>
+    </div>
+  </div>
+</div>
+
+<!-- New Account Modal -->
+<div class="modal-overlay" id="new-account-modal">
+  <div class="modal" style="width:440px">
+    <h2>➕ New Account</h2>
+    <p style="font-size:13px;color:var(--muted);margin-bottom:16px">
+      Creates a new folder, copies Telegram.app into it, and opens it so you can log in.
+    </p>
+
+    <label>Account name</label>
+    <input type="text" id="new-account-name" placeholder="e.g. John Work, Client A, @username…"
+           oninput="validateNewAccountName(this.value)"
+           onkeydown="if(event.key==='Enter') confirmNewAccount()">
+    <div id="new-account-name-error" style="font-size:12px;color:var(--red);margin:-6px 0 10px;display:none"></div>
+
+    <label>Folder group</label>
+    <select id="new-account-group" style="width:100%;padding:8px 10px;background:var(--card-bg);color:var(--text);border:1px solid var(--border);border-radius:6px;margin-bottom:14px;font-size:13px">
+      <option value="">Loading…</option>
+    </select>
+    <p style="font-size:11px;color:var(--muted);margin-bottom:16px;line-height:1.6">
+      The account folder will be created inside the selected group folder.<br>
+      Telegram will open immediately — log in with your phone number, then close it.<br>
+      The account will appear in the dashboard and be ready to use.
+    </p>
+
+    <div id="new-account-creating" style="display:none;text-align:center;padding:14px 0;color:var(--muted);font-size:13px">
+      ⏳ Creating account and copying Telegram.app…
+    </div>
+
+    <div class="modal-actions" id="new-account-actions">
+      <button class="btn" onclick="hideNewAccountModal()">Cancel</button>
+      <button class="btn primary" id="btn-create-account" onclick="confirmNewAccount()">Create &amp; Open</button>
+    </div>
+  </div>
+</div>
+
+<!-- Diagnose & Repair Modal -->
+<div class="modal-overlay" id="diagnose-modal">
+  <div class="modal" style="width:560px;max-height:82vh;overflow-y:auto">
+    <h2>🔧 Diagnose &amp; Repair</h2>
+    <p style="font-size:13px;color:var(--muted);margin-bottom:12px" id="diagnose-account-label"></p>
+
+    <div id="diagnose-loading" style="text-align:center;padding:30px;color:var(--muted)">
+      Scanning account…
+    </div>
+
+    <div id="diagnose-results" style="display:none">
+
+      <!-- Issues / Warnings / Info -->
+      <div id="diagnose-issues-wrap"></div>
+
+      <!-- Info lines -->
+      <div id="diagnose-info-wrap" style="margin-top:8px"></div>
+
+      <!-- Repair actions -->
+      <div id="diagnose-repair-wrap" style="display:none;margin-top:16px">
+        <h3 style="font-size:13px;margin-bottom:8px;color:var(--muted)">REPAIR ACTIONS</h3>
+        <div id="diagnose-action-list"></div>
+        <div class="modal-actions" style="margin-top:14px">
+          <button class="btn" onclick="hideDiagnoseModal()">Cancel</button>
+          <button class="btn primary" id="diagnose-repair-btn" onclick="runRepair()">Apply Fixes</button>
+        </div>
+      </div>
+
+      <!-- Repair results -->
+      <div id="diagnose-repair-results" style="display:none;margin-top:14px"></div>
+
+      <!-- No issues found -->
+      <div id="diagnose-ok" style="display:none;text-align:center;padding:20px">
+        <div style="font-size:28px">✅</div>
+        <div style="margin-top:8px;font-size:14px;font-weight:600">No problems found</div>
+        <div style="margin-top:4px;font-size:13px;color:var(--muted)">The account looks healthy. Try opening it again.</div>
+      </div>
+
+      <div class="modal-actions" id="diagnose-close-row" style="margin-top:16px">
+        <button class="btn" onclick="hideDiagnoseModal()">Close</button>
+        <button class="btn" onclick="rerunDiagnose()" style="margin-left:auto">↺ Re-scan</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Backup Browser Modal -->
+<div class="modal-overlay" id="backup-modal">
+  <div class="modal" style="width:560px">
+    <h2>📂 Backup Browser</h2>
+    <input type="text" id="backup-filter" placeholder="Filter by account…" oninput="renderBackupList()" style="width:100%;box-sizing:border-box;padding:8px 12px;margin-bottom:10px;border:1px solid var(--border);border-radius:8px;background:rgba(255,255,255,0.05);color:var(--text);font-size:13px;outline:none">
+    <div id="backup-list-wrap">
+      <div class="backup-list" id="backup-list"><div style="padding:20px;text-align:center;color:var(--text-dim)">Loading backups…</div></div>
+    </div>
+    <p style="font-size:11px;color:var(--text-dim);line-height:1.6;margin-bottom:14px">
+      Click <strong>Restore</strong> on any backup to replace that account's current tdata.<br>
+      The existing tdata is kept as a <code>.bak</code> folder — nothing is permanently deleted.
+    </p>
+    <div class="modal-actions">
+      <button class="btn" onclick="hideBackupBrowser()">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Restore confirm modal -->
+<div class="modal-overlay" id="restore-modal">
+  <div class="modal" style="width:440px">
+    <h2>♻ Restore Backup</h2>
+    <p style="font-size:13px;margin-bottom:12px">Restore <strong id="restore-backup-label"></strong> to account:</p>
+    <select class="account-select" id="restore-account-select"></select>
+    <p style="font-size:11px;color:var(--yellow);margin-bottom:14px;line-height:1.6">
+      ⚠ The account's current tdata will be moved to a .bak folder first.<br>
+      Make sure Telegram is not running for that account before restoring.
+    </p>
+    <div class="modal-actions">
+      <button class="btn" onclick="hideRestoreModal()">Cancel</button>
+      <button class="btn primary" onclick="confirmRestore()">Restore</button>
+    </div>
+  </div>
+</div>
+
+<!-- Proxy Modal -->
+<div class="modal-overlay" id="proxy-modal">
+  <div class="modal" style="width:440px">
+    <h2>🔌 Set Proxy</h2>
+    <label>Proxy type:</label>
+    <div class="proxy-type-row">
+      <div class="proxy-type-btn active" data-type="socks5" onclick="selectProxyType('socks5')">SOCKS5</div>
+      <div class="proxy-type-btn" data-type="socks4" onclick="selectProxyType('socks4')">SOCKS4</div>
+      <div class="proxy-type-btn" data-type="http" onclick="selectProxyType('http')">HTTP</div>
+    </div>
+    <label>Host / IP:</label>
+    <input type="text" id="proxy-host" placeholder="127.0.0.1 or proxy.example.com">
+    <label>Port:</label>
+    <input type="text" id="proxy-port" placeholder="1080" style="margin-bottom:10px">
+    <label>Username (optional):</label>
+    <input type="text" id="proxy-user" placeholder="Leave blank if not required">
+    <label>Password (optional):</label>
+    <input type="text" id="proxy-pass" placeholder="Leave blank if not required">
+    <p style="font-size:11px;color:var(--text-dim);background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:7px;padding:9px 12px;margin-bottom:14px;line-height:1.6">
+      Applied by temporarily setting the macOS system proxy when this account opens.<br>
+      Restores your normal network settings after 35 seconds.<br>
+      <span style="color:var(--yellow)">⚠ Requires your Mac admin password once per launch.</span>
+    </p>
+    <div class="modal-actions">
+      <button class="btn" onclick="hideProxyModal()">Cancel</button>
+      <button class="btn danger" onclick="saveProxy(null)" style="border-color:var(--text-dim);color:var(--text-dim)">Clear</button>
+      <button class="btn primary" onclick="saveProxy()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Settings Modal -->
+<div class="modal-overlay" id="settings-modal">
+  <div class="modal" style="width:520px">
+    <h2>⚙ Settings</h2>
+
+    <!-- Tab bar -->
+    <div class="settings-tabs">
+      <button class="settings-tab active" onclick="switchSettingsTab('general',this)">General</button>
+      <button class="settings-tab" onclick="switchSettingsTab('keeper',this)">Keeper</button>
+      <button class="settings-tab" onclick="switchSettingsTab('advanced',this)">Advanced</button>
+      <button class="settings-tab" onclick="switchSettingsTab('security',this)">Security</button>
+    </div>
+
+    <!-- Tab: General -->
+    <div class="settings-panel active" id="stab-general">
+      <div class="modal-info" id="cfg-root-display"></div>
+      <p class="settings-section-title">Telegram app source</p>
+      <label>Path to Telegram.app used when creating accounts:</label>
+      <input type="text" id="cfg-app-source" placeholder="/Applications/Telegram.app">
+      <p class="settings-section-title">Extra scan folders</p>
+      <label style="color:var(--text-dim);font-size:11px">One per line — scanned in addition to the root folder:</label>
+      <textarea id="cfg-extra-dirs" rows="3" style="width:100%;padding:9px 13px;border:1px solid var(--border);border-radius:6px;background:rgba(255,255,255,0.05);color:var(--text);font-size:12px;font-family:monospace;resize:vertical;outline:none;margin-bottom:0" placeholder="/Volumes/MySSD/Accounts&#10;~/Documents/Telegrams"></textarea>
+    </div>
+
+    <!-- Tab: Keeper -->
+    <div class="settings-panel" id="stab-keeper">
+      <p class="settings-section-title">Session Keeper</p>
+      <div class="modal-check-row" style="margin-bottom:14px">
+        <input type="checkbox" id="cfg-keeper-enabled">
+        <label for="cfg-keeper-enabled">Auto-open accounts every N days to keep sessions alive</label>
+      </div>
+      <div style="display:flex;gap:14px;margin-bottom:14px">
+        <div style="flex:1">
+          <label>Open interval (days):</label>
+          <input type="number" id="cfg-keeper-days" min="1" max="365" style="width:90px;padding:7px 10px;border:1px solid var(--border);border-radius:8px;background:rgba(255,255,255,0.05);color:var(--text);font-size:13px;outline:none">
+        </div>
+        <div style="flex:1">
+          <label>Keep open for (seconds):</label>
+          <input type="number" id="cfg-keeper-secs" min="30" max="600" style="width:90px;padding:7px 10px;border:1px solid var(--border);border-radius:8px;background:rgba(255,255,255,0.05);color:var(--text);font-size:13px;outline:none">
+        </div>
+      </div>
+      <div id="keeper-status-line" style="font-size:11px;color:var(--text-dim);margin-bottom:12px"></div>
+      <button class="btn" style="font-size:11px;padding:5px 14px" onclick="runKeeperNow()">▶ Run Now</button>
+    </div>
+
+    <!-- Tab: Advanced -->
+    <div class="settings-panel" id="stab-advanced">
+      <p class="settings-section-title">Proxy</p>
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+        <input type="checkbox" id="cfg-proxy-apply" style="width:14px;height:14px;cursor:pointer">
+        <label for="cfg-proxy-apply" style="font-size:12px">Apply account proxy system-wide when opening (admin prompt, auto-restores after 35 s)</label>
+      </div>
+      <p style="font-size:11px;color:var(--text-dim);margin-bottom:4px;line-height:1.5">Off = proxies are stored and shown on cards only; set the proxy inside Telegram itself.</p>
+
+      <p class="settings-section-title" style="margin-top:20px">Shared App (saves ~435 MB per account)</p>
+      <div id="shared-app-status" style="font-size:12px;color:var(--text-dim);background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:7px;padding:9px 12px;margin-bottom:10px;line-height:1.7">Loading…</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:4px">
+        <button class="btn primary" style="font-size:11px;padding:5px 12px" onclick="setupSharedApp()">⚡ Set Up Shared App</button>
+        <button class="btn" style="font-size:11px;padding:5px 12px" onclick="setupSharedAppPick()" data-tip="Pick a Telegram.app with a file dialog and use it as the shared master">📂 Choose App…</button>
+        <button class="btn danger" style="font-size:11px;padding:5px 12px" onclick="removeAllAccountApps()">🗑 Remove All Account Apps</button>
+      </div>
+
+      <p class="settings-section-title" style="margin-top:20px">Media Cache</p>
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+        <input type="checkbox" id="cfg-cache-auto" style="width:14px;height:14px;cursor:pointer">
+        <label for="cfg-cache-auto" style="font-size:12px">Auto-clear media cache on close if larger than</label>
+        <input type="number" id="cfg-cache-mb" min="50" max="10000" step="50" value="500" style="width:70px;padding:5px 8px;border:1px solid var(--border);border-radius:8px;background:rgba(255,255,255,0.05);color:var(--text);font-size:13px;outline:none">
+        <span style="font-size:12px;color:var(--text-dim)">MB</span>
+      </div>
+      <p style="font-size:11px;color:var(--text-dim);margin-bottom:4px;line-height:1.5">Photos, videos and stickers re-download on demand. Safe to clear — no messages are lost.</p>
+
+      <p class="settings-section-title" style="margin-top:20px">Backups</p>
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+        <label for="cfg-backup-keep" style="font-size:12px">Backups kept per account (0 = keep all)</label>
+        <input type="number" id="cfg-backup-keep" min="0" max="100" style="width:70px;padding:5px 8px;border:1px solid var(--border);border-radius:8px;background:rgba(255,255,255,0.05);color:var(--text);font-size:13px;outline:none">
+      </div>
+
+      <p class="settings-section-title" style="margin-top:20px">Config Backup &amp; Restore</p>
+      <p style="font-size:11px;color:var(--text-dim);margin-bottom:10px;line-height:1.6">Export all metadata, settings, and workspaces to a JSON file. Import to restore on a new machine.</p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <button class="btn" style="font-size:11px;padding:5px 12px" onclick="exportConfig()">⬇ Export Config</button>
+        <label class="btn" style="font-size:11px;padding:5px 12px;cursor:pointer;margin:0">
+          ⬆ Import Config
+          <input type="file" accept=".json" style="display:none" onchange="importConfig(this)">
+        </label>
+      </div>
+    </div>
+
+    <!-- Tab: Security -->
+    <div class="settings-panel" id="stab-security">
+      <p class="settings-section-title">Password Lock</p>
+      <div id="sec-status-line" style="font-size:13px;margin-bottom:14px;color:var(--text-dim)">Loading…</div>
+      <div id="sec-action-btns" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px"></div>
+
+      <!-- Inline password form (hidden by default) -->
+      <div id="sec-form" style="display:none">
+        <div id="sec-current-wrap" style="margin-bottom:10px">
+          <label>Current password:</label>
+          <input type="password" id="sec-current-pw" placeholder="Current password" style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:8px;background:rgba(255,255,255,0.05);color:var(--text);font-size:13px;outline:none;box-sizing:border-box">
+        </div>
+        <div style="margin-bottom:10px">
+          <label>New password:</label>
+          <input type="password" id="sec-new-pw" placeholder="New password" style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:8px;background:rgba(255,255,255,0.05);color:var(--text);font-size:13px;outline:none;box-sizing:border-box">
+        </div>
+        <div style="margin-bottom:10px">
+          <label>Confirm new password:</label>
+          <input type="password" id="sec-confirm-pw" placeholder="Confirm new password" style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:8px;background:rgba(255,255,255,0.05);color:var(--text);font-size:13px;outline:none;box-sizing:border-box">
+        </div>
+        <div style="margin-bottom:14px">
+          <label>Hint (optional — shown on lock screen):</label>
+          <input type="text" id="sec-hint" placeholder="e.g. My cat's name" style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:8px;background:rgba(255,255,255,0.05);color:var(--text);font-size:13px;outline:none;box-sizing:border-box">
+        </div>
+        <div id="sec-form-error" style="font-size:12px;color:var(--red);margin-bottom:8px;display:none"></div>
+        <div style="display:flex;gap:8px">
+          <button class="btn" onclick="hideSecurityForm()">Cancel</button>
+          <button class="btn primary" onclick="savePasswordForm()">Save Password</button>
+        </div>
+      </div>
+
+      <p class="settings-section-title" style="margin-top:20px">Auto-lock Timeout</p>
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+        <input type="number" id="cfg-lock-timeout" min="0" max="1440" value="5"
+               style="width:70px;padding:7px 10px;border:1px solid var(--border);border-radius:8px;background:rgba(255,255,255,0.05);color:var(--text);font-size:13px;outline:none">
+        <span style="font-size:13px">minutes &nbsp;<span style="color:var(--text-dim);font-size:11px">(0 = never auto-lock)</span></span>
+      </div>
+    </div>
+
+    <div class="modal-actions" style="margin-top:20px">
+      <button class="btn" onclick="hideSettings()">Cancel</button>
+      <button class="btn primary" onclick="saveSettings()">Save</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let accounts    = [];
+let searchFilter = "";
+let dragSrc     = null;
+let noteTimers  = {};
+let _keeperInfo = { enabled: false, interval_days: 30 };
+const API_BASE = (() => {
+  const path = window.location.pathname || "/";
+  if (path === "/") return "/";
+  return path.endsWith("/") ? path : path + "/";
+})();
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+async function api(path, method = "GET", body = null) {
+  const cleanPath = path.startsWith("/") ? path.slice(1) : path;
+  const url = API_BASE + cleanPath;
+  const opts = { method };
+  if (body) { opts.headers = { "Content-Type": "application/json" }; opts.body = JSON.stringify(body); }
+  try {
+    const res = await fetch(url, opts);
+    if (!res.ok) {
+      console.warn(`API ${method} ${url} → HTTP ${res.status}`);
+      return { success: false, message: `Server error ${res.status}` };
+    }
+    return await res.json();
+  } catch (err) {
+    console.warn(`API ${method} ${url} failed:`, err.message);
+    return { success: false, message: err.message, _networkError: true };
+  }
+}
+
+function toast(msg, type = "info", duration = 4000) {
+  const c = document.getElementById("toasts");
+  const el = document.createElement("div");
+  el.className = `toast ${type}`;
+
+  const msgEl = document.createElement("span");
+  msgEl.className = "toast-msg";
+  msgEl.textContent = msg;
+  el.appendChild(msgEl);
+
+  const copyBtn = document.createElement("button");
+  copyBtn.className = "toast-copy";
+  copyBtn.title = "Copy message";
+  copyBtn.textContent = "⎘";
+  copyBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    navigator.clipboard.writeText(msg).then(() => {
+      copyBtn.textContent = "✓";
+      setTimeout(() => { copyBtn.textContent = "⎘"; }, 1500);
+    });
+  });
+  el.appendChild(copyBtn);
+
+  // Pause auto-dismiss while hovering so there's time to click copy
+  let timer = setTimeout(() => el.remove(), duration);
+  el.addEventListener("mouseenter", () => clearTimeout(timer));
+  el.addEventListener("mouseleave", () => { timer = setTimeout(() => el.remove(), 2000); });
+
+  c.appendChild(el);
+}
+
+function esc(s) {
+  return String(s)
+    .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+    .replace(/"/g,"&quot;").replace(/'/g,"&#39;");
+}
+
+function pathKey(p) { return btoa(unescape(encodeURIComponent(p))).replace(/=/g,""); }
+
+function statusLabel(acc) {
+  if (acc.running) return "running";
+  return acc.status.replace(/_/g, " ");
+}
+
+function statusClass(acc) {
+  if (acc.running) return "running";
+  return acc.status.replace(/_/g, "-");
+}
+
+// ── Rendering ──────────────────────────────────────────────────────────────
+
+function renderAccounts() {
+  const content = document.getElementById("content");
+
+  const filtered = accounts.filter(a => {
+    if (!searchFilter) return true;
+    const q = searchFilter.toLowerCase();
+    return a.name.toLowerCase().includes(q)
+        || (a.username||"").toLowerCase().includes(q)
+        || (a.note||"").toLowerCase().includes(q)
+        || a.rel_path.toLowerCase().includes(q);
+  });
+
+  if (accounts.length === 0) {
+    content.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-state-icon">📂</div>
+        <h2>No accounts found</h2>
+        <p>Place TelegramManager.app at the root of your accounts folder, then make sure each account folder has a <code>TelegramForcePortable/tdata</code> inside.</p>
+        <button class="btn primary" style="margin-top:16px" onclick="showSettings()">⚙ Open Settings</button>
+      </div>`;
+    return;
+  }
+
+  if (filtered.length === 0) {
+    content.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-state-icon">🔍</div>
+        <h2>No matches</h2>
+        <p>No accounts match "<strong>${esc(searchFilter)}</strong>".</p>
+      </div>`;
+    return;
+  }
+
+  // Separate pinned — they get their own top section AND stay in their original folder
+  const pinned = filtered.filter(a => a.pinned);
+
+  // All accounts go into their original groups (pinned included, rendered as ghost copies)
+  const groups = {};
+  filtered.forEach(acc => {
+    const g = acc.group || "Root";
+    if (!groups[g]) groups[g] = [];
+    groups[g].push(acc);
+  });
+
+  // Sort groups by saved order
+  const groupOrder = loadGroupOrder();
+  const sortedGroups = Object.keys(groups).sort((a, b) => {
+    const oa = groupOrder[a] !== undefined ? groupOrder[a] : 9999;
+    const ob = groupOrder[b] !== undefined ? groupOrder[b] : 9999;
+    return oa !== ob ? oa - ob : a.localeCompare(b);
+  });
+
+  const collapsed = loadCollapsed();
+
+  // Build the pinned section first
+  let pinnedSection = "";
+  if (pinned.length) {
+    const pinnedRunning = pinned.filter(a => a.running).length;
+    const pinnedCards   = pinned.map(acc => buildCard(acc)).join("");
+    const isPinnedCollapsed = collapsed.has("__pinned__");
+    pinnedSection = `
+      <div class="group-section${isPinnedCollapsed ? " collapsed" : ""}"
+           data-group="__pinned__"
+           style="--group-accent:#f0a500">
+        <div class="group-header" onclick="toggleGroup(event, '__pinned__')"
+             style="border-color:rgba(240,165,0,0.35);background:rgba(240,165,0,0.06)">
+          <span class="group-drag-handle" style="opacity:0;pointer-events:none">⠿</span>
+          <span class="group-arrow" style="color:#f0a500">▾</span>
+          <span class="group-name" style="color:#f0a500">📌 Pinned</span>
+          <div class="group-pills">
+            <span class="group-pill total">${pinned.length} account${pinned.length !== 1 ? "s" : ""}</span>
+            ${pinnedRunning ? `<span class="group-pill running">▶ ${pinnedRunning} running</span>` : ""}
+          </div>
+          <button class="group-open-btn" onclick="event.stopPropagation(); openPinned()"
+                  style="border-color:#f0a500;color:#f0a500">▶ Open Pinned</button>
+        </div>
+        <div class="group-body">
+          <div class="group-grid" data-group="__pinned__"
+               ondragover="onDragOver(event)"
+               ondrop="onDrop(event)"
+               ondragleave="onDragLeave(event)">
+            ${pinnedCards}
+          </div>
+        </div>
+      </div>`;
+  }
+
+  const sections = sortedGroups.map((group, idx) => {
+    const list = groups[group];
+    const running = list.filter(a => a.running).length;
+    const isCollapsed = collapsed.has(group);
+    const cards = list.map(acc => buildCard(acc, acc.pinned)).join("");
+
+    return `
+      <div class="group-section${isCollapsed ? " collapsed" : ""}"
+           data-group="${esc(group)}"
+           draggable="true"
+           ondragstart="onGroupDragStart(event)"
+           ondragend="onGroupDragEnd(event)"
+           ondragover="onGroupDragOver(event)"
+           ondrop="onGroupDrop(event)"
+           ondragleave="onGroupDragLeave(event)">
+        <div class="group-header" onclick="toggleGroup(event, ${esc(JSON.stringify(group))})">
+          <span class="group-drag-handle" onclick="event.stopPropagation()">⠿</span>
+          <span class="group-arrow">▾</span>
+          <span class="group-name">📁 ${esc(group === "Root" ? "Root" : group)}</span>
+          <div class="group-pills">
+            <span class="group-pill total">${list.length} account${list.length !== 1 ? "s" : ""}</span>
+            ${running ? `<span class="group-pill running">▶ ${running} running</span>` : ""}
+          </div>
+          <button class="group-open-btn" onclick="event.stopPropagation(); openGroup(${esc(JSON.stringify(group))})">▶ Open Group</button>
+        </div>
+        <div class="group-body">
+          <div class="group-grid" data-group="${esc(group)}"
+               ondragover="onDragOver(event)"
+               ondrop="onDrop(event)"
+               ondragleave="onDragLeave(event)">
+            ${cards}
+          </div>
+        </div>
+      </div>`;
+  }).join("");
+
+  content.innerHTML = pinnedSection + sections;
+  updateStats();
+
+  // Restore notes textarea content & attach save handlers
+  accounts.forEach(acc => {
+    const ta = document.getElementById("note-" + pathKey(acc.path));
+    if (ta) {
+      ta.value = acc.note || "";
+      ta.addEventListener("input", () => {
+        clearTimeout(noteTimers[acc.path]);
+        noteTimers[acc.path] = setTimeout(() => saveNote(acc.path, ta.value), 800);
+      });
+    }
+  });
+}
+
+const COLOR_PALETTE = [
+  "#e53935","#fb8c00","#fdd835","#43a047",
+  "#00acc1","#1e88e5","#8e24aa","#f06292","",
+];
+const COLOR_NAMES = {
+  "#e53935":"red","#fb8c00":"orange","#fdd835":"yellow","#43a047":"green",
+  "#00acc1":"cyan","#1e88e5":"blue","#8e24aa":"purple","#f06292":"pink","":"none",
+};
+
+function timeAgo(iso) {
+  if (!iso) return "";
+  const diff = Date.now() - new Date(iso).getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 2)   return "just now";
+  if (mins < 60)  return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24)   return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  if (days < 30)  return `${days}d ago`;
+  return new Date(iso).toLocaleDateString();
+}
+
+function backupAge(d) {
+  if (!d) return "no backup";
+  const [ds, ts] = d.split("_");
+  const t = new Date(ds + "T" + (ts || "00-00").replace("-", ":"));
+  if (isNaN(t)) return "";
+  const days = Math.floor((Date.now() - t.getTime()) / 86400000);
+  return days <= 0 ? "backup today" : "backup " + days + "d ago";
+}
+
+function keeperDue(acc) {
+  if (!_keeperInfo.enabled) return "";
+  if (!acc.last_opened) return "keeper due";
+  const t = new Date(acc.last_opened);
+  if (isNaN(t)) return "";
+  const daysLeft = _keeperInfo.interval_days - (Date.now() - t.getTime()) / 86400000;
+  return daysLeft <= 0 ? "keeper due" : "keeper in " + Math.ceil(daysLeft) + "d";
+}
+
+function buildCard(acc, pinnedCopy = false) {
+  const key = pathKey(acc.path);
+  const sBadge = statusClass(acc);
+  const sLabel = statusLabel(acc);
+  const parentPath = acc.rel_path !== acc.name
+    ? acc.rel_path.split(" / ").slice(0, -1).join(" / ") : "";
+  const color = acc.color || "";
+  const health = acc.health || { status: "ok", issues: [], expiry: "fresh" };
+  const lastOpened = timeAgo(acc.last_opened);
+  const expiryLabel = health.expiry === "expired" ? "⚠ Possibly expired" :
+                      health.expiry === "stale"   ? "💤 Inactive 30d+"   : "";
+
+  const actions = [];
+  if (acc.status === "ready") {
+    if (acc.running) {
+      actions.push(`<button class="btn success" disabled data-tip="Telegram is running for this account">▶ Running</button>`);
+      actions.push(`<button class="btn danger" onclick="event.stopPropagation(); closeAccount(${esc(JSON.stringify(acc.path))})" data-tip="Kill this Telegram instance">■ Close</button>`);
+    } else {
+      actions.push(`<button class="btn primary" onclick="event.stopPropagation(); openAccount(${esc(JSON.stringify(acc.path))})" data-tip="Launch Telegram for this account">▶ Open</button>`);
+    }
+    actions.push(`<button class="btn" onclick="event.stopPropagation(); backupAccount(${esc(JSON.stringify(acc.path))},${esc(JSON.stringify(acc.name))})" data-tip="Save a backup of this account's session data">↓ Backup</button>`);
+  } else if (acc.status === "needs_setup") {
+    actions.push(`<button class="btn warning" onclick="event.stopPropagation(); setupAccount(${esc(JSON.stringify(acc.path))})" data-tip="Copy Telegram.app into this account folder so it can be opened">⚙ Setup</button>`);
+  }
+
+  const healthTip = health.issues.length ? health.issues.join(", ") : "Healthy";
+  const colorStyle = color ? `border-left-color:${color}` : "";
+
+  // Ghost card — shown in original folder when account is pinned to top
+  if (pinnedCopy) {
+    return `
+      <div class="card" data-path="${esc(acc.path)}" style="${colorStyle};opacity:0.45;cursor:default"
+           oncontextmenu="showCtxMenu(event,'${esc(acc.path)}','${esc(acc.name)}',${acc.running})">
+        <div style="display:flex;align-items:center;gap:10px">
+          <div class="card-icon ${acc.status}" style="width:28px;height:28px;font-size:14px;border-radius:8px;flex-shrink:0;pointer-events:none">
+            ✈
+          </div>
+          <span style="font-size:13px;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+                title="${esc(acc.name)}">${esc(acc.name)}</span>
+          <span style="font-size:10px;color:#f0a500;white-space:nowrap;flex-shrink:0">📌 Pinned above</span>
+        </div>
+      </div>`;
+  }
+
+  const cardClasses = [
+    "card",
+    acc.running ? "running" : "",
+    acc.status === "broken" ? "broken" : "",
+    acc.status === "needs_setup" ? "needs-setup" : "",
+  ].filter(Boolean).join(" ");
+
+  const clickHandler = "";
+
+  return `
+    <div class="${cardClasses}" ${clickHandler}
+         draggable="true"
+         data-path="${esc(acc.path)}"
+         data-order="${acc.order}"
+         style="${colorStyle}"
+         ondragstart="onDragStart(event)"
+         ondragend="onDragEnd(event)"
+         oncontextmenu="showCtxMenu(event,'${esc(acc.path)}','${esc(acc.name)}',${acc.running})">
+      <span class="drag-handle" onclick="event.stopPropagation()">⠿</span>
+      <div class="card-checkbox">✓</div>
+      <div class="card-top">
+        <div class="card-icon ${acc.status}">
+          ✈
+        </div>
+        <div class="card-header-text">
+          <div class="card-name" title="${esc(acc.name)}">${acc.pinned ? '📌 ' : ''}${esc(acc.name)}</div>
+          ${parentPath ? `<div class="card-relpath" title="${esc(acc.rel_path)}">${esc(parentPath)}</div>` : ''}
+          ${lastOpened  ? `<div class="card-last-opened">⏱ ${lastOpened}</div>` : ''}
+          ${expiryLabel ? `<div class="card-last-opened" style="color:var(--yellow)">${expiryLabel}</div>` : ''}
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:5px;flex-shrink:0">
+          <span class="status-badge ${sBadge}">${sLabel}</span>
+<div style="display:flex;align-items:center;gap:5px">
+            <span class="health-dot ${health.status}" title="${esc(healthTip)}"></span>
+            <span class="card-color-dot ${color ? '' : 'empty'}"
+                  style="${color ? `background:${color}` : ''}"
+                  onclick="event.stopPropagation(); toggleColorPicker('${key}')"
+                  title="Set color tag"></span>
+          </div>
+        </div>
+      </div>
+      <div id="cpicker-${key}" style="display:none;position:relative">
+        <div class="color-picker">
+          ${COLOR_PALETTE.map(c => `<span class="color-swatch ${c ? '' : 'none'}"
+            style="${c ? `background:${c}` : ''}"
+            title="${COLOR_NAMES[c] || 'none'}"
+            onclick="event.stopPropagation(); setColor(${esc(JSON.stringify(key))},${esc(JSON.stringify(acc.path))},${esc(JSON.stringify(c))})"></span>`).join("")}
+        </div>
+      </div>
+      <div class="card-username" id="uname-${key}"
+           contenteditable="true"
+           spellcheck="false"
+           data-placeholder="@handle (tap to set)"
+           onclick="event.stopPropagation()"
+           onblur="saveUsername('${esc(acc.path)}', this.textContent.trim())"
+           onkeydown="if(event.key==='Enter'){event.preventDefault();this.blur();}"
+           >${esc(acc.username||"")}</div>
+      ${acc.dock_name ? `<div style="font-size:11px;color:var(--text-dim);margin-bottom:4px;padding:2px 0">🏷 ${esc(acc.dock_name)}</div>` : ''}
+      ${acc.proxy && acc.proxy.host ? `<div class="proxy-badge">🔌 ${esc((acc.proxy.type||'SOCKS5').toUpperCase())} ${esc(acc.proxy.host)}:${esc(String(acc.proxy.port||1080))}</div>` : ''}
+      <div class="card-meta">
+        <span title="${esc(health.issues.join(', ') || 'Healthy')}">Data: ${esc(acc.tdata_size_human)}</span>
+        ${(() => { const ba = backupAge(acc.last_backup); return ba ? `<span style="${acc.last_backup ? '' : 'color:var(--yellow)'}">${esc(ba)}</span>` : ''; })()}
+        ${(() => { const kd = keeperDue(acc); return kd ? `<span style="${kd === 'keeper due' ? 'color:var(--yellow)' : 'color:var(--text-dim)'}">${esc(kd)}</span>` : ''; })()}
+        ${acc.has_app
+          ? ''
+          : (acc.uses_shared_app
+              ? '<span style="color:var(--accent);font-size:10px" title="Uses shared Telegram.app — cloned on open">⚡ shared</span>'
+              : '<span style="color:var(--red)" title="Telegram.app missing — use Setup">App ✗</span>')}
+      </div>
+      <textarea id="note-${key}" class="card-note" placeholder="Add a note…" onclick="event.stopPropagation()" rows="2">${esc(acc.note||"")}</textarea>
+      ${actions.length ? `<div class="card-actions">${actions.join("")}</div>` : ""}
+    </div>`;
+}
+
+let _statsData = {};
+
+function updateStats() {
+  const total      = accounts.length;
+  const ready      = accounts.filter(a => a.status === "ready").length;
+  const running    = accounts.filter(a => a.running).length;
+  const needsSetup = accounts.filter(a => a.status === "needs_setup").length;
+  const issues     = accounts.filter(a => (a.health||{}).status === "error").length;
+  const pinned     = accounts.filter(a => a.pinned).length;
+  const notRunning = accounts.filter(a => a.status === "ready" && !a.running).length;
+
+  const parts = [`${ready} ready`];
+  if (running)    parts.push(`${running} running`);
+  if (needsSetup) parts.push(`${needsSetup} need setup`);
+  if (issues)     parts.push(`${issues} issues`);
+
+  if (_statsData.grand_total_human) {
+    const breakdown = [];
+    if (_statsData.total_disk_human)  breakdown.push(`accounts ${_statsData.total_disk_human}`);
+    if (_statsData.cache_total_human) breakdown.push(`cache ${_statsData.cache_total_human}`);
+    if (_statsData.backup_size_human) breakdown.push(`backups ${_statsData.backup_size_human}`);
+    parts.push(`${_statsData.grand_total_human} (${breakdown.join(" · ")})`);
+  }
+  document.getElementById("stats").textContent = parts.join(" · ");
+
+  // Show/hide toolbar buttons based on current state
+  setVisible("btn-close-all",   running > 0);
+  setVisible("btn-open-all",    notRunning > 0);
+  setVisible("btn-open-pinned", pinned > 0);
+}
+
+function setVisible(id, visible) {
+  const el = document.getElementById(id);
+  if (el) el.style.display = visible ? "" : "none";
+}
+
+// Show/hide the fixed "server disconnected" banner. Uses DOM methods (a
+// security hook forbids `innerHTML =` writes).
+function setServerDisconnected(down) {
+  const el = document.getElementById("disconnect-banner");
+  if (!el) return;
+  if (down) {
+    el.textContent = "⚠ Server disconnected — retrying…";
+    el.classList.add("visible");
+  } else {
+    el.classList.remove("visible");
+  }
+}
+
+// ── Actions ────────────────────────────────────────────────────────────────
+
+let _refreshing = false;   // guard against concurrent auto-refreshes
+
+async function refresh() {
+  if (_refreshing) return;
+  _refreshing = true;
+  try {
+    const [fresh, stats] = await Promise.all([
+      api("/api/accounts"),
+      api("/api/stats"),
+    ]);
+    // If server isn't ready yet, accounts will be undefined or a network error
+    if (!fresh || fresh._networkError || !Array.isArray(fresh)) {
+      if (fresh && fresh._networkError) setServerDisconnected(true);
+      _refreshing = false;
+      return;
+    }
+    setServerDisconnected(false);
+    accounts = fresh;
+    if (stats) _statsData = stats;
+    renderAccounts();
+    loadAlerts();
+  } finally {
+    _refreshing = false;
+  }
+}
+
+// ── Color picker ───────────────────────────────────────────────────────────
+
+function toggleColorPicker(key) {
+  const el = document.getElementById("cpicker-" + key);
+  if (!el) return;
+  const vis = el.style.display !== "none";
+  // close all others
+  document.querySelectorAll("[id^='cpicker-']").forEach(e => e.style.display = "none");
+  el.style.display = vis ? "none" : "block";
+}
+
+async function setColor(key, path, color) {
+  document.getElementById("cpicker-" + key).style.display = "none";
+  await api("/api/color", "POST", { path, color });
+  const acc = accounts.find(a => a.path === path);
+  if (acc) acc.color = color;
+  // Update card border live
+  const card = document.querySelector(`.card[data-path="${CSS.escape(path)}"]`);
+  if (card) card.style.borderLeftColor = color || "";
+  // Update color dot live
+  const dot = card && card.querySelector(".card-color-dot");
+  if (dot) {
+    dot.style.background = color || "";
+    dot.classList.toggle("empty", !color);
+  }
+}
+
+// Close color picker when clicking elsewhere
+document.addEventListener("click", () => {
+  document.querySelectorAll("[id^='cpicker-']").forEach(e => e.style.display = "none");
+});
+
+// ── Username (manual edit) ─────────────────────────────────────────────────
+
+let usernameTimers = {};
+
+async function saveUsername(path, username) {
+  clearTimeout(usernameTimers[path]);
+  usernameTimers[path] = setTimeout(async () => {
+    await api("/api/username", "POST", { path, username });
+    const acc = accounts.find(a => a.path === path);
+    if (acc) acc.username = username;
+  }, 600);
+}
+
+// ── Right-click context menu ───────────────────────────────────────────────
+
+let ctxTarget = null;
+
+function showCtxMenu(e, path, name, running) {
+  e.preventDefault();
+  e.stopPropagation();
+  ctxTarget = { path, name, running };
+
+  const menu = document.getElementById("ctx-menu");
+  menu.classList.add("visible");
+
+  // Position near cursor, keep inside viewport
+  let x = e.clientX, y = e.clientY;
+  menu.style.left = x + "px";
+  menu.style.top  = y + "px";
+  requestAnimationFrame(() => {
+    const r = menu.getBoundingClientRect();
+    if (r.right  > window.innerWidth)  menu.style.left = (x - r.width)  + "px";
+    if (r.bottom > window.innerHeight) menu.style.top  = (y - r.height) + "px";
+  });
+
+  // Wire items
+  const acc = accounts.find(a => a.path === path);
+
+  // Show/hide context items based on state
+  setVisible("ctx-open",    !running && !!(acc && acc.status === "ready"));  // Open only if ready and not running
+  setVisible("ctx-close",   running);                       // Kill only if running
+// Remove App: only if this account has its own copy AND shared master exists
+  const sharedStatusEl = document.getElementById("shared-app-status");
+  const sharedExists = !!(sharedStatusEl && sharedStatusEl.dataset.sharedExists);
+  setVisible("ctx-remove-app", !!(acc && acc.has_app && sharedExists));
+
+  document.getElementById("ctx-open").onclick = () => {
+    hideCtxMenu();
+    if (acc && acc.status === "ready") openAccount(path);
+    else toast("Account not ready to open", "warning");
+  };
+  document.getElementById("ctx-backup").onclick = () => {
+    hideCtxMenu(); backupAccount(path, name);
+  };
+  document.getElementById("ctx-backups-view").onclick = () => {
+    hideCtxMenu(); showBackupBrowser(name);
+  };
+const pinBtn = document.getElementById("ctx-pin");
+  const isPinned = acc && acc.pinned;
+  pinBtn.textContent = isPinned ? "📌 Unpin" : "📌 Pin";
+  pinBtn.onclick = () => { hideCtxMenu(); togglePin(path); };
+  document.getElementById("ctx-rename").onclick = () => {
+    hideCtxMenu(); showRename(path, name);
+  };
+  document.getElementById("ctx-dock-name").onclick = () => {
+    hideCtxMenu();
+    const acc2 = accounts.find(a => a.path === path);
+    showDockNameModal(path, acc2 ? acc2.dock_name : "");
+  };
+  document.getElementById("ctx-proxy").onclick = () => {
+    hideCtxMenu();
+    const acc2 = accounts.find(a => a.path === path);
+    showProxyModal(path, acc2 ? acc2.proxy : null);
+  };
+  document.getElementById("ctx-copy-path").onclick = () => {
+    hideCtxMenu();
+    navigator.clipboard.writeText(path).then(() => toast("Path copied", "info"));
+  };
+  document.getElementById("ctx-reveal").onclick = () => {
+    hideCtxMenu();
+    api("/api/reveal", "POST", { path })
+      .then(d => { if (!d.success) toast(d.message || "Failed to open folder", "error"); });
+  };
+  document.getElementById("ctx-close").onclick = () => {
+    hideCtxMenu();
+    closeAccount(path);
+  };
+  document.getElementById("ctx-delete").onclick = () => {
+    hideCtxMenu();
+    showDeleteModal(path, name);
+  };
+  document.getElementById("ctx-diagnose").onclick = () => {
+    hideCtxMenu();
+    showDiagnoseModal(path, name);
+  };
+  document.getElementById("ctx-remove-app").onclick = () => {
+    hideCtxMenu();
+    removeAccountApp(path, name);
+  };
+}
+
+function hideCtxMenu() {
+  document.getElementById("ctx-menu").classList.remove("visible");
+  ctxTarget = null;
+}
+
+document.addEventListener("click", () => { hideCtxMenu(); });
+document.addEventListener("keydown", e => { if (e.key === "Escape") { hideCtxMenu(); } });
+
+function filterAccounts(val) { searchFilter = val; renderAccounts(); }
+
+async function openAccount(path) {
+  const r = await api("/api/open", "POST", { path });
+  if (!r.success) {
+    toast(r.message || "Failed to open account", "error");
+    return;
+  }
+  toast("Opening…", "info");
+  setTimeout(async () => {
+    await refresh();
+    // Post-open liveness check: if still not running after refresh, warn
+    const acc = accounts.find(a => a.path === path);
+    if (acc && !acc.running) {
+      toast("Telegram launched but isn't running yet — it may have failed to start. Check the log for details.", "warning", 8000);
+    }
+  }, 3000);
+}
+
+async function openAll() {
+  const btn = document.getElementById("btn-open-all");
+  btn.disabled = true;
+  try {
+    toast("Opening all accounts…", "info");
+    const r = await api("/api/open-all", "POST");
+    if (r.success === false) toast(r.message || "Failed to open accounts", "error");
+    else toast(`Opened ${r.opened ?? 0} accounts`, "success");
+    setTimeout(refresh, 3000);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function openGroup(group) {
+  if (group === "__pinned_virtual__") {
+    return openPinned();
+  }
+  toast(`Opening "${group}" accounts…`, "info");
+  const r = await api("/api/open-group", "POST", { group });
+  toast(r.opened ? `Opened ${r.opened} account${r.opened !== 1 ? "s" : ""} from "${group}"` : `No ready accounts in "${group}"`, r.opened ? "success" : "warning");
+  setTimeout(refresh, 3000);
+}
+
+async function openPinned() {
+  const btn = document.getElementById("btn-open-pinned");
+  const pinned = accounts.filter(a => a.pinned);
+  if (!pinned.length) { toast("No pinned accounts", "warning"); return; }
+  btn.disabled = true;
+  try {
+    toast("Opening pinned accounts…", "info");
+    const r = await api("/api/open-pinned", "POST");
+    toast(r.opened ? `Opened ${r.opened} pinned account${r.opened !== 1 ? "s" : ""}` : "No pinned accounts ready to open", r.opened ? "success" : "warning");
+    setTimeout(refresh, 3000);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function closeAll() {
+  await api("/api/close-all", "POST");
+  toast("All closed", "success");
+  setTimeout(refresh, 1200);
+}
+
+async function closeAccount(path) {
+  const r = await api("/api/close-account", "POST", { path });
+  if (r.success) {
+    toast("Closed", "success");
+    setTimeout(refresh, 900);
+  } else {
+    toast("Could not close — process not found", "warning");
+  }
+}
+
+async function setupAccount(path) {
+  toast("Setting up…", "info");
+  const r = await api("/api/setup", "POST", { path });
+  toast(r.success ? "Set up!" : (r.message || "Failed"), r.success ? "success" : "error");
+  await refresh();
+}
+
+async function setupAll() {
+  toast("Setting up new accounts…", "info");
+  const r = await api("/api/setup-all", "POST");
+  toast(`Set up ${r.count} accounts`, "success");
+  await refresh();
+}
+
+async function updateAll() {
+  toast("Checking that all accounts are closed, then updating Telegram apps…", "info", 7000);
+  const r = await api("/api/update-all", "POST");
+  toast(r.message || (r.success ? "Done" : "Failed"), r.success ? "success" : "error");
+}
+
+async function backupAccount(path, name) {
+  toast(`Backing up ${name}…`, "info");
+  const r = await api("/api/backup", "POST", { path, name });
+  const msg = r.backup_path ? `${r.message} [${r.backup_path}]` : (r.message || (r.success ? "Done" : "Failed"));
+  toast(msg, r.success ? "success" : "error");
+}
+
+async function backupAll() {
+  const btn = document.querySelector('[onclick="backupAll()"]');
+  if (btn) { btn.disabled = true; btn.textContent = "↓ Backing up…"; }
+  toast("Backing up all accounts — this may take a moment…", "info", 8000);
+  const r = await api("/api/backup-all", "POST");
+  if (btn) { btn.disabled = false; btn.textContent = "↓ Backup All"; }
+  if (r && r.count !== undefined) {
+    const total = r.total ?? r.count;
+    const type = r.count === total ? "success" : "warning";
+    const suffix = r.count === total ? "✓" : "⚠";
+    toast(r.message || `${suffix} Backed up ${r.count}/${total} account${total !== 1 ? "s" : ""}`, type, 7000);
+  } else {
+    toast(r?.message || "Backup failed", "error");
+  }
+}
+
+async function saveNote(path, note) {
+  await api("/api/note", "POST", { path, note });
+  const acc = accounts.find(a => a.path === path);
+  if (acc) acc.note = note;
+}
+
+// ── Pin / Unpin ────────────────────────────────────────────────────────────
+
+async function togglePin(path) {
+  const r = await api("/api/pin", "POST", { path });
+  const acc = accounts.find(a => a.path === path);
+  if (acc) acc.pinned = r.pinned;
+  toast(r.pinned ? "📌 Pinned to top" : "Unpinned", "info");
+  // Re-sort accounts: pinned first
+  accounts.sort((a, b) => {
+    if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+    if (a.group !== b.group) return a.group.localeCompare(b.group);
+    if (a.order !== b.order) return a.order - b.order;
+    return a.name.localeCompare(b.name);
+  });
+  renderAccounts();
+}
+
+// ── Dock name modal ────────────────────────────────────────────────────────
+let dockNameTarget = null;
+
+function showDockNameModal(path, currentName) {
+  dockNameTarget = path;
+  const inp = document.getElementById("dock-name-input");
+  inp.value = currentName || "";
+  document.getElementById("dock-name-modal").classList.add("active");
+  setTimeout(() => { inp.focus(); inp.select(); }, 80);
+}
+
+function hideDockNameModal() {
+  document.getElementById("dock-name-modal").classList.remove("active");
+  dockNameTarget = null;
+}
+
+async function confirmDockName(forcedValue) {
+  if (!dockNameTarget) return;
+  const dock_name = forcedValue !== undefined ? forcedValue
+                    : document.getElementById("dock-name-input").value.trim();
+  const r = await api("/api/dock-name", "POST", { path: dockNameTarget, dock_name });
+  if (!r.success) { toast(r.message || "Failed to set dock name", "error"); return; }
+  const acc = accounts.find(a => a.path === dockNameTarget);
+  if (acc) acc.dock_name = dock_name;
+  hideDockNameModal();
+  toast(dock_name ? `App name set to "${dock_name}"` : "App name reset to folder name", "success");
+  renderAccounts();
+  setTimeout(refresh, 600);
+}
+
+document.getElementById("dock-name-modal").addEventListener("click", e => {
+  if (e.target === e.currentTarget) hideDockNameModal();
+});
+document.getElementById("dock-name-input").addEventListener("keydown", e => {
+  if (e.key === "Enter") confirmDockName();
+  if (e.key === "Escape") hideDockNameModal();
+});
+
+// ── Rename ─────────────────────────────────────────────────────────────────
+
+let renameTarget = null;
+
+function showRename(path, currentName) {
+  renameTarget = path;
+  const inp = document.getElementById("rename-input");
+  inp.value = currentName;
+  document.getElementById("rename-modal").classList.add("active");
+  setTimeout(() => { inp.focus(); inp.select(); }, 80);
+}
+
+function hideRename() {
+  document.getElementById("rename-modal").classList.remove("active");
+  renameTarget = null;
+}
+
+async function confirmRename() {
+  if (!renameTarget) return;
+  const new_name = document.getElementById("rename-input").value.trim();
+  if (!new_name) return;
+  const r = await api("/api/rename", "POST", { path: renameTarget, new_name });
+  hideRename();
+  if (r.success) {
+    toast(`Renamed to "${new_name}"`, "success");
+    await refresh();
+  } else {
+    toast(r.message || "Rename failed", "error");
+  }
+}
+
+document.getElementById("rename-modal").addEventListener("click", e => {
+  if (e.target === e.currentTarget) hideRename();
+});
+document.getElementById("rename-input").addEventListener("keydown", e => {
+  if (e.key === "Enter") confirmRename();
+  if (e.key === "Escape") hideRename();
+});
+
+// ── Workspaces ─────────────────────────────────────────────────────────────
+
+let selectedAccounts = new Set();
+let selectMode = false;
+let selectedWsIcon = "💼";
+
+function toggleSelectMode() {
+  selectMode = !selectMode;
+  selectedAccounts.clear();
+  const btn = document.getElementById("btn-select");
+  const banner = document.getElementById("select-banner");
+  if (btn) btn.classList.toggle("primary", selectMode);
+  if (banner) banner.style.display = selectMode ? "flex" : "none";
+  document.getElementById("content").classList.toggle("select-mode", selectMode);
+  updateSelectBanner();
+}
+
+function updateSelectBanner() {
+  const n = selectedAccounts.size;
+  const el = document.getElementById("select-count");
+  if (el) el.textContent = `${n} account${n !== 1 ? "s" : ""} selected`;
+}
+
+// Handle card click in select mode
+document.getElementById("content").addEventListener("click", e => {
+  if (!selectMode) return;
+  const card = e.target.closest(".card[data-path]");
+  if (!card) return;
+  const path = card.dataset.path;
+  if (selectedAccounts.has(path)) {
+    selectedAccounts.delete(path);
+    card.classList.remove("selected");
+  } else {
+    selectedAccounts.add(path);
+    card.classList.add("selected");
+  }
+  updateSelectBanner();
+});
+
+async function openSelected() {
+  if (!selectedAccounts.size) { toast("No accounts selected", "warning"); return; }
+  let opened = 0;
+  for (const path of selectedAccounts) {
+    const acc = accounts.find(a => a.path === path);
+    if (acc && acc.status === "ready" && !acc.running) {
+      await api("/api/open", "POST", { path });
+      opened++;
+      await new Promise(r => setTimeout(r, 1000));
+    }
+  }
+  toast(`Opened ${opened} account${opened !== 1 ? "s" : ""}`, "success");
+  toggleSelectMode();
+  setTimeout(refresh, 2000);
+}
+
+const WS_ICONS = ["💼","🌙","🌅","🔥","⭐","🎯","🏢","🌍","🤖","💡"];
+
+function showSaveWorkspace() {
+  if (!selectedAccounts.size) { toast("Select accounts first", "warning"); return; }
+  document.getElementById("ws-selected-summary").textContent =
+    `Saving ${selectedAccounts.size} account${selectedAccounts.size !== 1 ? "s" : ""} as a workspace.`;
+  document.getElementById("ws-name-input").value = "";
+  selectedWsIcon = WS_ICONS[0];
+
+  // Build icon picker dynamically (static HTML template literals don't evaluate)
+  const picker = document.getElementById("ws-icon-picker");
+  picker.innerHTML = WS_ICONS.map(e =>
+    `<span style="font-size:20px;cursor:pointer;padding:4px;border-radius:6px;border:1px solid ${e === selectedWsIcon ? "var(--accent)" : "transparent"}"
+      onclick="selectWsIcon(this,'${e}')">${e}</span>`
+  ).join("");
+
+  document.getElementById("workspace-modal").classList.add("active");
+  setTimeout(() => document.getElementById("ws-name-input").focus(), 80);
+}
+
+function hideWorkspaceModal() {
+  document.getElementById("workspace-modal").classList.remove("active");
+}
+
+function selectWsIcon(el, icon) {
+  selectedWsIcon = icon;
+  document.querySelectorAll("#ws-icon-picker span").forEach(s => {
+    s.style.borderColor = "transparent";
+  });
+  el.style.borderColor = "var(--accent)";
+}
+
+async function confirmSaveWorkspace() {
+  const name = document.getElementById("ws-name-input").value.trim();
+  if (!name) { toast("Enter a workspace name", "warning"); return; }
+  const r = await api("/api/workspace/save", "POST", {
+    name, icon: selectedWsIcon, accounts: [...selectedAccounts]
+  });
+  hideWorkspaceModal();
+  toggleSelectMode();
+  if (r.success) {
+    toast(`Workspace "${name}" saved`, "success");
+    loadWorkspaceBar();
+  }
+}
+
+document.getElementById("workspace-modal").addEventListener("click", e => {
+  if (e.target === e.currentTarget) hideWorkspaceModal();
+});
+document.getElementById("ws-name-input").addEventListener("keydown", e => {
+  if (e.key === "Enter") confirmSaveWorkspace();
+  if (e.key === "Escape") hideWorkspaceModal();
+});
+
+async function loadWorkspaceBar() {
+  const ws = await api("/api/workspaces");
+  const bar = document.getElementById("workspace-bar");
+  const names = Object.keys(ws);
+  if (!names.length) { bar.style.display = "none"; return; }
+  bar.style.display = "flex";
+  bar.innerHTML = `<span class="workspace-label">Workspaces:</span>` +
+    names.map(name => `
+      <div class="workspace-chip">
+        <span onclick="openWorkspace(${esc(JSON.stringify(name))})">${esc(ws[name].icon || "📁")} ${esc(name)}</span>
+        <span class="ws-del" onclick="deleteWorkspace(${esc(JSON.stringify(name))})" title="Delete workspace">✕</span>
+      </div>`).join("");
+}
+
+async function openWorkspace(name) {
+  toast(`Opening workspace "${name}"…`, "info");
+  const r = await api("/api/workspace/open", "POST", { name });
+  toast(r.opened ? `Opened ${r.opened} accounts` : "No ready accounts in workspace", r.opened ? "success" : "warning");
+  setTimeout(refresh, 2500);
+}
+
+async function deleteWorkspace(name) {
+  await api("/api/workspace/delete", "POST", { name });
+  toast(`Workspace "${name}" deleted`, "info");
+  loadWorkspaceBar();
+}
+
+// ── Session Keeper ─────────────────────────────────────────────────────────
+
+async function runKeeperNow() {
+  await api("/api/keeper/run-now", "POST");
+  toast("Keeper started — opening accounts due for keepalive…", "info");
+  setTimeout(loadKeeperStatus, 2000);
+}
+
+async function loadKeeperStatus() {
+  const s = await api("/api/keeper/status");
+  _keeperInfo = { enabled: !!s.enabled, interval_days: parseInt(s.interval_days, 10) || 30 };
+  if (accounts.length) renderAccounts();
+  const el = document.getElementById("keeper-status-line");
+  if (!el) return;
+  if (s.running) {
+    el.innerHTML = `<span class="keeper-pill">🔁 Running — ${esc(s.last_account || "…")}</span>`;
+  } else if (s.last_run) {
+    el.textContent = `Last run: ${new Date(s.last_run).toLocaleString()}  ·  Next check: ${s.next_check ? new Date(s.next_check).toLocaleString() : "—"}`;
+  } else {
+    el.textContent = "Not run yet.";
+  }
+}
+
+// ── Session Expiry Alerts ──────────────────────────────────────────────────
+
+async function loadAlerts() {
+  const alerts = await api("/api/alerts");
+  const bannerId = "alert-banner-zone";
+  let zone = document.getElementById(bannerId);
+  if (!zone) {
+    zone = document.createElement("div");
+    zone.id = bannerId;
+    const content = document.getElementById("content");
+    content.parentNode.insertBefore(zone, content);
+  }
+  zone.innerHTML = "";
+  if (!alerts || alerts.length === 0) return;
+
+  const expired = alerts.filter(a => a.expiry === "expired" || a.health_status === "error");
+  const stale   = alerts.filter(a => a.expiry === "stale" && a.health_status !== "error");
+
+  function makeBanner(cls, title, items) {
+    const el = document.createElement("div");
+    el.className = `alert-banner ${cls}`;
+    el.style.position = "relative";
+    el.innerHTML = `
+      <div class="alert-banner-title">${title}</div>
+      <div class="alert-banner-items">${items}</div>
+      <button onclick="event.stopPropagation();this.closest('.alert-banner').remove()"
+        style="position:absolute;top:8px;right:10px;background:none;border:none;color:inherit;font-size:16px;cursor:pointer;opacity:0.6;line-height:1"
+        title="Dismiss">×</button>`;
+    return el;
+  }
+
+  if (expired.length) {
+    const items = expired.map(a => `<span title="${esc(a.issues.join(', '))}">• ${esc(a.name)}</span>`).join("  ");
+    zone.appendChild(makeBanner("error",
+      `⚠ ${expired.length} account${expired.length > 1 ? "s" : ""} may have expired sessions`, items));
+  }
+
+  if (stale.length) {
+    const items = stale.map(a => `<span>• ${esc(a.name)}</span>`).join("  ");
+    zone.appendChild(makeBanner("warn",
+      `💤 ${stale.length} account${stale.length > 1 ? "s" : ""} inactive for 30+ days`, items));
+  }
+}
+
+// ── Delete account folder ──────────────────────────────────────────────────
+
+let deleteTarget = null;
+
+function showDeleteModal(path, name) {
+  deleteTarget = path;
+  document.getElementById("delete-account-label").textContent = name;
+  document.getElementById("delete-modal").classList.add("active");
+}
+
+function hideDeleteModal() {
+  document.getElementById("delete-modal").classList.remove("active");
+  deleteTarget = null;
+}
+
+async function confirmDelete() {
+  if (!deleteTarget) return;
+  const path = deleteTarget;
+  hideDeleteModal();
+  toast("Creating a backup first, then moving to Trash…", "info", 8000);
+  const r = await api("/api/delete", "POST", { path });
+  if (r.success) {
+    accounts = accounts.filter(a => a.path !== path);
+    // Clean up dangling debounce timers for the removed account
+    clearTimeout(noteTimers[path]);     delete noteTimers[path];
+    clearTimeout(usernameTimers[path]); delete usernameTimers[path];
+    const msg = r.backup_path ? `Moved to Trash ✓ (backup: ${r.backup_path})` : "Moved to Trash ✓";
+    toast(msg, "success");
+    renderAccounts();
+  } else {
+    toast(r.message || "Delete failed", "error");
+  }
+}
+
+document.getElementById("delete-modal").addEventListener("click", e => {
+  if (e.target === e.currentTarget) hideDeleteModal();
+});
+
+// ── New Account ────────────────────────────────────────────────────────────
+
+const BAD_NAME_CHARS = /[\/\\:*?"<>|]/;
+
+async function showNewAccountModal() {
+  // Reset form
+  document.getElementById("new-account-name").value = "";
+  document.getElementById("new-account-name-error").style.display = "none";
+  document.getElementById("new-account-creating").style.display = "none";
+  document.getElementById("new-account-actions").style.display = "flex";
+  document.getElementById("btn-create-account").disabled = false;
+
+  // Load group list from server
+  const sel = document.getElementById("new-account-group");
+  sel.innerHTML = '<option value="">Loading…</option>';
+  const groups = await api("/api/groups");
+  sel.innerHTML = groups.map(g =>
+    `<option value="${esc(g.path)}">${esc(g.name === "Root" ? "📂 Root (top level)" : "📁 " + g.name)}</option>`
+  ).join("");
+
+  document.getElementById("new-account-modal").classList.add("active");
+  setTimeout(() => document.getElementById("new-account-name").focus(), 80);
+}
+
+function hideNewAccountModal() {
+  document.getElementById("new-account-modal").classList.remove("active");
+}
+
+function validateNewAccountName(val) {
+  const err = document.getElementById("new-account-name-error");
+  if (!val.trim()) {
+    err.style.display = "none";
+    return true;
+  }
+  if (BAD_NAME_CHARS.test(val)) {
+    err.textContent = "Name cannot contain: / \\ : * ? \" < > |";
+    err.style.display = "block";
+    return false;
+  }
+  const reserved = ["TelegramForcePortable","Backups","TelegramManager.app","tdata","modules"];
+  if (reserved.includes(val.trim())) {
+    err.textContent = `"${val}" is a reserved name`;
+    err.style.display = "block";
+    return false;
+  }
+  err.style.display = "none";
+  return true;
+}
+
+async function confirmNewAccount() {
+  const name       = document.getElementById("new-account-name").value.trim();
+  const parentPath = document.getElementById("new-account-group").value;
+
+  if (!validateNewAccountName(name)) return;
+  if (!name) {
+    document.getElementById("new-account-name-error").textContent = "Enter an account name";
+    document.getElementById("new-account-name-error").style.display = "block";
+    return;
+  }
+
+  // Show progress
+  document.getElementById("new-account-creating").style.display = "block";
+  document.getElementById("new-account-actions").style.display = "none";
+
+  const r = await api("/api/create-account", "POST", {
+    name,
+    parent_path: parentPath,
+    open_after: true,
+  });
+
+  if (!r.success) {
+    // Show error, restore form
+    document.getElementById("new-account-creating").style.display = "none";
+    document.getElementById("new-account-actions").style.display = "flex";
+    const err = document.getElementById("new-account-name-error");
+    err.textContent = r.message || "Failed to create account";
+    err.style.display = "block";
+    return;
+  }
+
+  hideNewAccountModal();
+  toast(`✓ "${name}" created — Telegram is opening, log in now`, "success", 8000);
+  setTimeout(refresh, 3000);   // refresh after Telegram has had a moment to appear
+}
+
+document.getElementById("new-account-modal").addEventListener("click", e => {
+  if (e.target === e.currentTarget) hideNewAccountModal();
+});
+document.getElementById("new-account-name").addEventListener("keydown", e => {
+  if (e.key === "Escape") hideNewAccountModal();
+});
+
+// ── Backup Browser ─────────────────────────────────────────────────────────
+
+let restoreTarget = null; // { backup_path, label }
+let allBackups = [];
+
+async function showBackupBrowser(presetFilter) {
+  document.getElementById("backup-modal").classList.add("active");
+  document.getElementById("backup-filter").value = presetFilter || "";
+  const listEl = document.getElementById("backup-list");
+  listEl.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-dim)">Loading…</div>';
+  allBackups = await api("/api/backups");
+  renderBackupList();
+}
+
+function renderBackupList() {
+  const listEl = document.getElementById("backup-list");
+  const filter = (document.getElementById("backup-filter").value || "").trim().toLowerCase();
+  const backups = [];
+  for (const b of allBackups) {
+    if (filter && !b.account.toLowerCase().includes(filter)) continue;
+    backups.push(b);
+  }
+  if (!backups.length) {
+    listEl.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-dim)">No backups found in Backups/ folder.</div>';
+    return;
+  }
+  listEl.innerHTML = backups.map(b => `
+    <div class="backup-item">
+      <div class="backup-item-info">
+        <div class="backup-item-name">📁 ${esc(b.account)}</div>
+        <div class="backup-item-date">🕐 ${esc(b.date.replace(/_/g, " "))}</div>
+      </div>
+      <div class="backup-item-size">${esc(b.size_human)}</div>
+      <button class="btn primary" style="font-size:11px;padding:5px 10px"
+        onclick="showRestoreModal(${esc(JSON.stringify(b.backup_path))},${esc(JSON.stringify(b.account))},${esc(JSON.stringify(b.date))})">
+        ♻ Restore
+      </button>
+    </div>`).join("");
+  listEl.querySelectorAll(".backup-item").forEach((el, i) => {
+    const b = backups[i];
+    const delBtn = document.createElement("button");
+    delBtn.className = "btn danger";
+    delBtn.style.cssText = "font-size:11px;padding:5px 10px;margin-left:6px";
+    delBtn.textContent = "🗑";
+    delBtn.onclick = async (event) => {
+      event.stopPropagation();
+      if (!window.confirm(`Delete backup ${b.account} (${b.date})? This cannot be undone.`)) return;
+      const r = await api("/api/backup/delete", "POST", { backup_path: b.backup_path });
+      if (r.success) {
+        toast("Backup deleted", "success");
+        showBackupBrowser();
+      } else {
+        toast(r.message, "error");
+      }
+    };
+    el.appendChild(delBtn);
+  });
+}
+
+function hideBackupBrowser() {
+  document.getElementById("backup-modal").classList.remove("active");
+}
+
+function showRestoreModal(backupPath, account, date) {
+  restoreTarget = { backup_path: backupPath, label: `${account} (${date})` };
+  document.getElementById("restore-backup-label").textContent = restoreTarget.label;
+  // Populate account selector
+  const sel = document.getElementById("restore-account-select");
+  sel.innerHTML = accounts.map(a =>
+    `<option value="${esc(a.path)}">${esc(a.name)} — ${esc(a.group)}</option>`
+  ).join("");
+  // Pre-select matching account name
+  const match = accounts.find(a => a.name === account);
+  if (match) sel.value = match.path;
+  document.getElementById("restore-modal").classList.add("active");
+}
+
+function hideRestoreModal() {
+  document.getElementById("restore-modal").classList.remove("active");
+  restoreTarget = null;
+}
+
+async function confirmRestore() {
+  if (!restoreTarget) return;
+  const { backup_path, label } = restoreTarget;
+  const account_path = document.getElementById("restore-account-select").value;
+  hideRestoreModal();
+  hideBackupBrowser();
+  toast(`Restoring ${label}…`, "info");
+  const r = await api("/api/restore", "POST", { backup_path, account_path });
+  toast(r.message || (r.success ? "Restored!" : "Restore failed"), r.success ? "success" : "error");
+  if (r.success) await refresh();
+}
+
+document.getElementById("backup-modal").addEventListener("click", e => {
+  if (e.target === e.currentTarget) hideBackupBrowser();
+});
+document.getElementById("restore-modal").addEventListener("click", e => {
+  if (e.target === e.currentTarget) hideRestoreModal();
+});
+
+// ── Proxy ──────────────────────────────────────────────────────────────────
+
+let proxyTarget = null;
+let proxyType   = "socks5";
+
+function selectProxyType(type) {
+  proxyType = type;
+  document.querySelectorAll(".proxy-type-btn").forEach(b => {
+    b.classList.toggle("active", b.dataset.type === type);
+  });
+}
+
+function showProxyModal(path, currentProxy) {
+  proxyTarget = path;
+  selectProxyType((currentProxy && currentProxy.type) || "socks5");
+  document.getElementById("proxy-host").value = (currentProxy && currentProxy.host) || "";
+  document.getElementById("proxy-port").value = (currentProxy && currentProxy.port) || "";
+  document.getElementById("proxy-user").value = (currentProxy && currentProxy.user) || "";
+  document.getElementById("proxy-pass").value = (currentProxy && currentProxy.pass) || "";
+  document.getElementById("proxy-modal").classList.add("active");
+  setTimeout(() => document.getElementById("proxy-host").focus(), 80);
+}
+
+function hideProxyModal() {
+  document.getElementById("proxy-modal").classList.remove("active");
+  proxyTarget = null;
+}
+
+async function saveProxy(forcedNull) {
+  if (!proxyTarget) return;
+  let proxy = null;
+  if (forcedNull === null) {
+    proxy = null; // clear
+  } else {
+    const host = document.getElementById("proxy-host").value.trim();
+    const port = parseInt(document.getElementById("proxy-port").value.trim()) || 1080;
+    if (!host) { toast("Enter a host/IP", "warning"); return; }
+    proxy = {
+      type: proxyType,
+      host,
+      port,
+      user: document.getElementById("proxy-user").value.trim(),
+      pass: document.getElementById("proxy-pass").value.trim(),
+    };
+  }
+  await api("/api/proxy", "POST", { path: proxyTarget, proxy });
+  const acc = accounts.find(a => a.path === proxyTarget);
+  if (acc) acc.proxy = proxy;
+  hideProxyModal();
+  toast(proxy ? `🔌 Proxy set: ${proxy.type.toUpperCase()} ${proxy.host}:${proxy.port}` : "Proxy cleared", "success");
+  renderAccounts();
+}
+
+document.getElementById("proxy-modal").addEventListener("click", e => {
+  if (e.target === e.currentTarget) hideProxyModal();
+});
+
+
+// ── Settings ───────────────────────────────────────────────────────────────
+
+function showSettings() {
+  api("/api/config").then(cfg => {
+    document.getElementById("cfg-root-display").textContent =
+      "Root folder: " + (cfg.root_dir || "(auto-detected)");
+    document.getElementById("cfg-app-source").value = cfg.app_source || "";
+    document.getElementById("cfg-extra-dirs").value = (cfg.extra_scan_dirs || []).join("\n");
+    document.getElementById("cfg-keeper-enabled").checked = !!cfg.keeper_enabled;
+    document.getElementById("cfg-proxy-apply").checked = !!cfg.proxy_system_apply;
+    document.getElementById("cfg-keeper-days").value = cfg.keeper_interval_days || 30;
+    document.getElementById("cfg-keeper-secs").value = cfg.keeper_open_seconds || 120;
+    const cacheMb = cfg.auto_clear_cache_mb || 0;
+    document.getElementById("cfg-cache-auto").checked = cacheMb > 0;
+    document.getElementById("cfg-cache-mb").value = cacheMb > 0 ? cacheMb : 500;
+    document.getElementById("cfg-backup-keep").value = cfg.backup_keep_per_account || 0;
+    document.getElementById("cfg-lock-timeout").value = cfg.lock_timeout_minutes ?? 5;
+    document.getElementById("sec-status-line").textContent = "Loading…";
+    hideSecurityForm();
+    renderSecurityStatus(cfg);
+    document.getElementById("settings-modal").classList.add("active");
+    loadKeeperStatus();
+    loadSharedAppStatus();
+  });
+}
+
+function hideSettings() {
+  document.getElementById("settings-modal").classList.remove("active");
+}
+
+function switchSettingsTab(name, btn) {
+  document.querySelectorAll(".settings-tab").forEach(b => b.classList.remove("active"));
+  document.querySelectorAll(".settings-panel").forEach(p => p.classList.remove("active"));
+  btn.classList.add("active");
+  document.getElementById("stab-" + name).classList.add("active");
+}
+
+async function saveSettings() {
+  const app_source          = document.getElementById("cfg-app-source").value.trim();
+  const extra_scan_dirs     = document.getElementById("cfg-extra-dirs").value
+                                .split("\n").map(s => s.trim()).filter(Boolean);
+  const keeper_enabled      = document.getElementById("cfg-keeper-enabled").checked;
+  const keeper_interval_days = parseInt(document.getElementById("cfg-keeper-days").value) || 30;
+  const keeper_open_seconds  = parseInt(document.getElementById("cfg-keeper-secs").value) || 120;
+  const proxy_system_apply  = document.getElementById("cfg-proxy-apply").checked;
+  const cacheEnabled = document.getElementById("cfg-cache-auto").checked;
+  const auto_clear_cache_mb = cacheEnabled ? (parseInt(document.getElementById("cfg-cache-mb").value) || 500) : 0;
+  const lock_timeout_minutes = parseInt(document.getElementById("cfg-lock-timeout").value) || 0;
+  const backup_keep_per_account = parseInt(document.getElementById("cfg-backup-keep").value, 10) || 0;
+  const r = await api("/api/config", "POST", {
+    app_source, extra_scan_dirs,
+    keeper_enabled, keeper_interval_days, keeper_open_seconds,
+    proxy_system_apply,
+    auto_clear_cache_mb,
+    lock_timeout_minutes,
+    backup_keep_per_account,
+  });
+  hideSettings();
+  _lockConfig.timeout = lock_timeout_minutes;
+  resetIdleTimer();
+  if (r.bad_dirs && r.bad_dirs.length) {
+    toast(`Settings saved — but ${r.bad_dirs.length} extra folder${r.bad_dirs.length > 1 ? "s" : ""} not found: ${r.bad_dirs.join(", ")}`, "warning", 7000);
+  } else {
+    toast("Settings saved ✓", "success");
+  }
+  await refresh();
+}
+
+document.getElementById("settings-modal").addEventListener("click", e => {
+  if (e.target === e.currentTarget) hideSettings();
+});
+
+async function exportConfig() {
+  const r = await api("/api/export-config");
+  if (!r || r.success === false) { toast(r?.message || "Export failed", "error"); return; }
+  const blob = new Blob([JSON.stringify(r, null, 2)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `telegram-manager-config-${new Date().toISOString().slice(0,10)}.json`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+  toast("Config exported", "success");
+}
+
+async function importConfig(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const ok = confirm(
+    `Import config from "${file.name}"?\n\nThis will overwrite ALL account metadata, settings, and workspaces with the contents of the file. This cannot be undone.`
+  );
+  if (!ok) { input.value = ""; return; }
+  try {
+    const text = await file.text();
+    const payload = JSON.parse(text);
+    const r = await api("/api/import-config", "POST", payload);
+    if (r.success) {
+      toast("Config imported — refreshing…", "success");
+      input.value = "";
+      setTimeout(() => { hideSettings(); refresh(); }, 1000);
+    } else {
+      toast(r.message || "Import failed", "error");
+    }
+  } catch (e) {
+    toast("Invalid JSON file", "error");
+  }
+}
+
+// ── Shared App Management ──────────────────────────────────────────────────
+
+async function loadSharedAppStatus() {
+  const el = document.getElementById("shared-app-status");
+  if (!el) return;
+  el.textContent = "Loading…";
+  const r = await api("/api/shared-app/status");
+  el.dataset.sharedExists = r.shared_exists ? "1" : "";
+  if (r.shared_exists) {
+    const savings = r.own_count > 0
+      ? ` · ${r.own_count} account${r.own_count !== 1 ? "s" : ""} still have own copy (${esc(r.total_size_human)} recoverable)`
+      : ` · All accounts use shared app — no duplicates`;
+    const pathLine = `<br><span style="color:var(--text-dim);font-size:11px">Path: ${esc(r.shared_path)}</span>`;
+    el.innerHTML =
+      `<span style="color:var(--green)">✓ Shared Telegram.app active</span>${savings}${pathLine}`;
+  } else {
+    const count  = accounts.length;
+    const approxGB = ((count * 435) / 1024).toFixed(1);
+    let sourceHint = "";
+    if (r.setup_source_type === "sibling" || r.setup_source_type === "config" || r.setup_source_type === "account") {
+      const label = r.setup_source_type === "config" ? "Source configured in Settings"
+                  : r.setup_source_type === "sibling" ? "Found Telegram.app next to manager"
+                  : "Will copy from an existing account app";
+      sourceHint = `<br><span style="color:var(--green)">✓ ${esc(label)} — ready to set up.</span>`;
+    } else {
+      sourceHint = `<br><span style="color:var(--red)">✗ No Telegram.app source found.</span> `
+        + `Place <strong>Telegram.app</strong> next to <strong>TelegramManager.app</strong>:<br>`
+        + `<code style="font-size:10px;opacity:0.7">${esc(r.sibling_path)}</code>`;
+    }
+    el.innerHTML =
+      `<span style="color:var(--yellow)">⚠ No shared app yet.</span> ` +
+      `${count} accounts × ~435 MB ≈ <strong>${approxGB} GB</strong> in duplicate Telegram.app copies.` +
+      sourceHint;
+  }
+}
+
+async function setupSharedApp() {
+  toast("Setting up shared Telegram.app…", "info");
+  const r = await api("/api/shared-app/setup", "POST", {});
+  if (r.success) {
+    toast(r.message || "Shared app ready ✓", "success", 6000);
+    loadSharedAppStatus();
+  } else {
+    toast(r.message || "Setup failed", "error");
+  }
+}
+
+async function setupSharedAppPick() {
+  toast("Choose Telegram.app in the dialog…", "info");
+  const p = await api("/api/pick-app");
+  if (!p.success) {
+    if (p.message !== "canceled") toast(p.message || "Picker failed", "error");
+    return;
+  }
+  toast("Setting up shared Telegram.app…", "info");
+  const r = await api("/api/shared-app/setup", "POST", { source: p.path });
+  if (r.success) {
+    toast(r.message || "Shared app ready ✓", "success", 6000);
+    loadSharedAppStatus();
+  } else {
+    toast(r.message || "Setup failed", "error");
+  }
+}
+
+async function removeAllAccountApps() {
+  const owned = accounts.filter(a => a.has_app);
+  if (!owned.length) { toast("No per-account apps to remove", "info"); return; }
+  const gbStr = ((owned.length * 435) / 1024).toFixed(1);
+  toast(`Removing ${owned.length} app${owned.length !== 1 ? "s" : ""} (${gbStr} GB)…`, "info", 8000);
+  toast("Removing per-account apps after a safe shared-app check…", "info", 8000);
+  const r = await api("/api/shared-app/remove-all-account-apps", "POST", {});
+  if (r.success) {
+    toast(`Removed ${r.removed} app${r.removed !== 1 ? "s" : ""}, freed ${r.freed_human} ✓`, "success", 6000);
+    loadSharedAppStatus();
+    await refresh();
+  } else {
+    toast(r.message || "Failed", "error");
+  }
+}
+
+async function removeAccountApp(path, name) {
+  toast(`Removing app from ${name} after a safe shared-app check…`, "info", 6000);
+  const r = await api("/api/shared-app/remove-account-app", "POST", { path });
+  if (r.success) {
+    toast(`App removed from ${name} ✓`, "success");
+    await refresh();
+  } else {
+    toast(r.message || "Failed", "error");
+  }
+}
+
+
+// ── Collapse groups ────────────────────────────────────────────────────────
+
+function loadCollapsed() {
+  try { return new Set(JSON.parse(localStorage.getItem("tg_collapsed") || "[]")); }
+  catch { return new Set(); }
+}
+
+function saveCollapsed(set) {
+  localStorage.setItem("tg_collapsed", JSON.stringify([...set]));
+}
+
+function toggleGroup(event, group) {
+  // Don't toggle if clicking the drag handle
+  if (event.target.classList.contains("group-drag-handle")) return;
+  const section = event.currentTarget.closest(".group-section");
+  section.classList.toggle("collapsed");
+  const collapsed = loadCollapsed();
+  if (section.classList.contains("collapsed")) collapsed.add(group);
+  else collapsed.delete(group);
+  saveCollapsed(collapsed);
+}
+
+// ── Group order ────────────────────────────────────────────────────────────
+
+function loadGroupOrder() {
+  try { return JSON.parse(localStorage.getItem("tg_group_order") || "{}"); }
+  catch { return {}; }
+}
+
+function saveGroupOrder() {
+  const order = {};
+  document.querySelectorAll(".group-section[data-group]").forEach((el, idx) => {
+    order[el.dataset.group] = idx;
+  });
+  localStorage.setItem("tg_group_order", JSON.stringify(order));
+}
+
+// ── Group drag ─────────────────────────────────────────────────────────────
+
+let dragGroupSrc = null;
+
+function onGroupDragStart(e) {
+  // Only drag if the handle was grabbed
+  if (!e.target.classList.contains("group-drag-handle") &&
+      !e.target.closest(".group-drag-handle")) {
+    e.preventDefault();
+    return;
+  }
+  dragGroupSrc = e.currentTarget;
+  dragGroupSrc.classList.add("dragging-group");
+  e.dataTransfer.effectAllowed = "move";
+  e.dataTransfer.setData("text/plain", dragGroupSrc.dataset.group);
+}
+
+function onGroupDragEnd(e) {
+  if (dragGroupSrc) dragGroupSrc.classList.remove("dragging-group");
+  document.querySelectorAll(".group-section").forEach(el => el.classList.remove("drag-over-group"));
+  dragGroupSrc = null;
+}
+
+function onGroupDragOver(e) {
+  if (!dragGroupSrc) return;
+  e.preventDefault();
+  e.stopPropagation();
+  document.querySelectorAll(".group-section").forEach(el => el.classList.remove("drag-over-group"));
+  const target = e.currentTarget;
+  if (target !== dragGroupSrc) target.classList.add("drag-over-group");
+  e.dataTransfer.dropEffect = "move";
+}
+
+function onGroupDragLeave(e) {
+  if (!e.currentTarget.contains(e.relatedTarget)) {
+    e.currentTarget.classList.remove("drag-over-group");
+  }
+}
+
+function onGroupDrop(e) {
+  if (!dragGroupSrc) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const target = e.currentTarget;
+  if (target === dragGroupSrc) return;
+  target.classList.remove("drag-over-group");
+
+  const container = document.getElementById("content");
+  const sections  = [...container.querySelectorAll(".group-section")];
+  const srcIdx    = sections.indexOf(dragGroupSrc);
+  const tgtIdx    = sections.indexOf(target);
+
+  if (srcIdx < tgtIdx) target.after(dragGroupSrc);
+  else target.before(dragGroupSrc);
+
+  saveGroupOrder();
+}
+
+// ── Drag to reorder (cards within group) ──────────────────────────────────
+
+function onDragStart(e) {
+  dragSrc = e.currentTarget;
+  dragSrc.classList.add("dragging");
+  e.dataTransfer.effectAllowed = "move";
+  e.dataTransfer.setData("text/plain", dragSrc.dataset.path);
+}
+
+function onDragEnd(e) {
+  e.currentTarget.classList.remove("dragging");
+  document.querySelectorAll(".drop-placeholder").forEach(el => el.remove());
+  document.querySelectorAll(".group-grid").forEach(g => g.classList.remove("drag-over"));
+}
+
+function onDragOver(e) {
+  e.preventDefault();
+  e.dataTransfer.dropEffect = "move";
+  const grid = e.currentTarget;
+  grid.classList.add("drag-over");
+
+  // Show placeholder
+  document.querySelectorAll(".drop-placeholder").forEach(el => el.remove());
+  const afterEl = getDragAfterElement(grid, e.clientY);
+  const placeholder = document.createElement("div");
+  placeholder.className = "drop-placeholder";
+  if (afterEl == null) {
+    grid.appendChild(placeholder);
+  } else {
+    grid.insertBefore(placeholder, afterEl);
+  }
+}
+
+function onDragLeave(e) {
+  if (!e.currentTarget.contains(e.relatedTarget)) {
+    e.currentTarget.classList.remove("drag-over");
+    document.querySelectorAll(".drop-placeholder").forEach(el => el.remove());
+  }
+}
+
+function onDrop(e) {
+  e.preventDefault();
+  const grid = e.currentTarget;
+  grid.classList.remove("drag-over");
+  document.querySelectorAll(".drop-placeholder").forEach(el => el.remove());
+
+  if (!dragSrc) return;
+
+  const afterEl = getDragAfterElement(grid, e.clientY);
+  if (afterEl == null) {
+    grid.appendChild(dragSrc);
+  } else if (afterEl !== dragSrc) {
+    grid.insertBefore(dragSrc, afterEl);
+  }
+
+  // Build new order map and save
+  const orders = {};
+  grid.querySelectorAll(".card[data-path]").forEach((card, idx) => {
+    orders[card.dataset.path] = idx;
+    const acc = accounts.find(a => a.path === card.dataset.path);
+    if (acc) acc.order = idx;
+  });
+
+  api("/api/reorder", "POST", { orders });
+}
+
+function getDragAfterElement(grid, y) {
+  const cards = [...grid.querySelectorAll(".card:not(.dragging)")];
+  return cards.reduce((closest, child) => {
+    const box = child.getBoundingClientRect();
+    const offset = y - box.top - box.height / 2;
+    if (offset < 0 && offset > closest.offset) {
+      return { offset, element: child };
+    }
+    return closest;
+  }, { offset: Number.NEGATIVE_INFINITY }).element || null;
+}
+
+// ── Password lock ─────────────────────────────────────────────────────────
+
+let _lockConfig = { hash: null, salt: '', hint: '', timeout: 5 };
+let _lockTimer  = null;
+let _idleListenersRegistered = false;
+
+async function hashPassword(salt, password) {
+  const enc = new TextEncoder();
+  const buf = await crypto.subtle.digest('SHA-256', enc.encode(salt + password));
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,'0')).join('');
+}
+
+function generateSalt() {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes).map(b => b.toString(16).padStart(2,'0')).join('');
+}
+
+function lockApp() {
+  clearTimeout(_lockTimer);
+  document.getElementById('lock-screen').classList.add('visible');
+  const inp = document.getElementById('lock-password-input');
+  inp.value = '';
+  inp.classList.remove('lock-error');
+  document.getElementById('lock-hint-text').style.display = 'none';
+  if (_lockConfig.hint) document.getElementById('lock-hint-link').style.display = 'block';
+  setTimeout(() => inp.focus(), 50);
+}
+
+function showLockHint() {
+  const el = document.getElementById('lock-hint-text');
+  el.textContent = _lockConfig.hint;
+  el.style.display = 'block';
+  document.getElementById('lock-hint-link').style.display = 'none';
+}
+
+async function tryUnlock() {
+  if (!_lockConfig.hash) { document.getElementById('lock-screen').classList.remove('visible'); return; }
+  const inp  = document.getElementById('lock-password-input');
+  const hash = await hashPassword(_lockConfig.salt, inp.value);
+  if (hash === _lockConfig.hash) {
+    document.getElementById('lock-screen').classList.remove('visible');
+    inp.value = '';
+    resetIdleTimer();
+  } else {
+    inp.classList.add('lock-error', 'lock-shake');
+    inp.addEventListener('animationend', () => {
+      inp.classList.remove('lock-shake');
+    }, { once: true });
+    inp.value = '';
+    setTimeout(() => inp.focus(), 50);
+  }
+}
+
+function resetIdleTimer() {
+  clearTimeout(_lockTimer);
+  if (!_lockConfig.hash) return;
+  const ms = (_lockConfig.timeout || 0) * 60 * 1000;
+  if (ms > 0) _lockTimer = setTimeout(lockApp, ms);
+}
+
+// Fail-closed lock init: if we cannot fetch config (network error), we cannot
+// know whether a password is set, so we defensively show the lock overlay and
+// keep retrying. The overlay is only lifted once config is fetched and shows no
+// password (initLock removes it), or the user unlocks with the real password.
+async function initLockWithRetry() {
+  const statusEl = document.getElementById('lock-status');
+  const showStatus = (txt) => {
+    if (!statusEl) return;
+    statusEl.textContent = txt;
+    statusEl.style.display = txt ? 'block' : 'none';
+  };
+
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const cfg = await api("/api/config");
+    if (cfg && !cfg._networkError && cfg.success !== false) {
+      showStatus('');
+      // Real config in hand: lock if a password is set, otherwise unlock.
+      if (cfg.lock_password_hash) {
+        initLock(cfg);
+      } else {
+        document.getElementById('lock-screen').classList.remove('visible');
+      }
+      return;
+    }
+    // Could not determine lock state — stay locked defensively while retrying.
+    document.getElementById('lock-screen').classList.add('visible');
+    showStatus('Verifying lock status… retrying');
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  // Retries exhausted and still no config: remain locked, since we cannot
+  // confirm the app is safe to unlock.
+  document.getElementById('lock-screen').classList.add('visible');
+  showStatus('Could not verify lock status — locked for safety. Check data/manager.log');
+}
+
+function initLock(cfg) {
+  document.getElementById('lock-status').style.display = 'none';
+  _lockConfig.hash    = cfg.lock_password_hash || null;
+  _lockConfig.salt    = cfg.lock_password_salt || '';
+  _lockConfig.hint    = cfg.lock_hint || '';
+  _lockConfig.timeout = cfg.lock_timeout_minutes ?? 5;
+
+  const hintLink = document.getElementById('lock-hint-link');
+  if (_lockConfig.hint) hintLink.style.display = 'block';
+
+  if (_lockConfig.hash) {
+    lockApp();
+    if (!_idleListenersRegistered) {
+      ['mousemove','keydown','mousedown','touchstart'].forEach(ev =>
+        document.addEventListener(ev, resetIdleTimer, { passive: true })
+      );
+      _idleListenersRegistered = true;
+    }
+  }
+}
+
+// ── Security settings tab ─────────────────────────────────────────────────
+
+let _secMode = 'set'; // 'set' or 'change'
+
+function renderSecurityStatus(cfg) {
+  const hasPassword = !!cfg.lock_password_hash;
+  document.getElementById('sec-status-line').textContent = hasPassword
+    ? '🔒 Screen lock is enabled.'
+    : '🔓 No screen lock set — app is unlocked.';
+
+  const btns = document.getElementById('sec-action-btns');
+  btns.replaceChildren();
+  if (!hasPassword) {
+    const b = document.createElement('button');
+    b.className = 'btn primary';
+    b.style.fontSize = '12px';
+    b.textContent = 'Set Password';
+    b.onclick = () => showSecurityForm('set');
+    btns.appendChild(b);
+  } else {
+    const ch = document.createElement('button');
+    ch.className = 'btn';
+    ch.style.fontSize = '12px';
+    ch.textContent = 'Change Password';
+    ch.onclick = () => showSecurityForm('change');
+    btns.appendChild(ch);
+
+    const rm = document.createElement('button');
+    rm.className = 'btn danger';
+    rm.style.fontSize = '12px';
+    rm.textContent = 'Remove Password';
+    rm.onclick = removePassword;
+    btns.appendChild(rm);
+  }
+}
+
+function showSecurityForm(mode) {
+  _secMode = mode;
+  document.getElementById('sec-current-wrap').style.display = mode === 'change' ? 'block' : 'none';
+  document.getElementById('sec-current-pw').value = '';
+  document.getElementById('sec-new-pw').value = '';
+  document.getElementById('sec-confirm-pw').value = '';
+  document.getElementById('sec-hint').value = _lockConfig.hint || '';
+  document.getElementById('sec-form-error').style.display = 'none';
+  document.getElementById('sec-form').style.display = 'block';
+}
+
+function hideSecurityForm() {
+  document.getElementById('sec-form').style.display = 'none';
+}
+
+async function savePasswordForm() {
+  const errEl   = document.getElementById('sec-form-error');
+  const newPw   = document.getElementById('sec-new-pw').value;
+  const confirm = document.getElementById('sec-confirm-pw').value;
+  const hint    = document.getElementById('sec-hint').value.trim();
+
+  errEl.style.display = 'none';
+
+  if (!newPw) {
+    errEl.textContent = 'New password cannot be empty.';
+    errEl.style.display = 'block';
+    return;
+  }
+  if (newPw !== confirm) {
+    errEl.textContent = 'Passwords do not match.';
+    errEl.style.display = 'block';
+    return;
+  }
+  if (_secMode === 'change') {
+    const currentPw   = document.getElementById('sec-current-pw').value;
+    const currentHash = await hashPassword(_lockConfig.salt, currentPw);
+    if (currentHash !== _lockConfig.hash) {
+      errEl.textContent = 'Current password is incorrect.';
+      errEl.style.display = 'block';
+      return;
+    }
+  }
+
+  const salt    = generateSalt();
+  const hash    = await hashPassword(salt, newPw);
+  const timeout = parseInt(document.getElementById('cfg-lock-timeout').value) || 0;
+
+  const r = await api('/api/config', 'POST', {
+    lock_password_hash:   hash,
+    lock_password_salt:   salt,
+    lock_hint:            hint,
+    lock_timeout_minutes: timeout,
+  });
+
+  if (r && r.success !== false) {
+    _lockConfig.hash    = hash;
+    _lockConfig.salt    = salt;
+    _lockConfig.hint    = hint;
+    _lockConfig.timeout = timeout;
+
+    if (!_idleListenersRegistered) {
+      ['mousemove','keydown','mousedown','touchstart'].forEach(ev =>
+        document.addEventListener(ev, resetIdleTimer, { passive: true })
+      );
+      _idleListenersRegistered = true;
+    }
+    resetIdleTimer();
+
+    hideSecurityForm();
+    api('/api/config').then(cfg => { if (cfg) renderSecurityStatus(cfg); });
+    toast('Password saved ✓', 'success');
+  } else {
+    errEl.textContent = r?.message || 'Failed to save password.';
+    errEl.style.display = 'block';
+  }
+}
+
+async function removePassword() {
+  const timeout = parseInt(document.getElementById('cfg-lock-timeout').value) || 0;
+  const r = await api('/api/config', 'POST', {
+    lock_password_hash:   null,
+    lock_password_salt:   null,
+    lock_hint:            '',
+    lock_timeout_minutes: timeout,
+  });
+  if (r && r.success !== false) {
+    _lockConfig.hash = null;
+    _lockConfig.salt = '';
+    _lockConfig.hint = '';
+    clearTimeout(_lockTimer);
+    ['mousemove','keydown','mousedown','touchstart'].forEach(ev =>
+      document.removeEventListener(ev, resetIdleTimer)
+    );
+    _idleListenersRegistered = false;
+    api('/api/config').then(cfg => { if (cfg) renderSecurityStatus(cfg); });
+    toast('Password removed', 'info');
+  } else {
+    toast(r?.message || 'Failed to remove password', 'error');
+  }
+}
+
+// ── Auto-refresh ──────────────────────────────────────────────────────────
+
+setInterval(async () => {
+  if (_refreshing) return;  // don't pile up if a manual refresh is in flight
+  _refreshing = true;
+  try {
+    const prev  = accounts.filter(a => a.running).map(a => a.path).sort().join(",");
+    const fresh = await api("/api/accounts");
+    if (!fresh || fresh._networkError || !Array.isArray(fresh)) {
+      if (fresh && fresh._networkError) setServerDisconnected(true);
+      return;
+    }
+    setServerDisconnected(false);
+    const next  = fresh.filter(a => a.running).map(a => a.path).sort().join(",");
+    // Flush any in-progress textarea edits into accounts[] before we transfer
+    // them to fresh[] — otherwise mid-typing text is lost when renderAccounts()
+    // rebuilds the DOM and restores from acc.note (the last-saved value).
+    accounts.forEach(acc => {
+      const ta = document.getElementById("note-" + pathKey(acc.path));
+      if (ta) acc.note = ta.value;
+    });
+    // Preserve local edits (note, username) in the refreshed data
+    fresh.forEach(fa => {
+      const old = accounts.find(a => a.path === fa.path);
+      if (old) { fa.note = old.note; fa.username = old.username; }
+    });
+    accounts = fresh;
+    if (prev !== next) renderAccounts();
+    else updateStats();
+  } finally {
+    _refreshing = false;
+  }
+}, 5000);
+
+// ── Dock name fix ──────────────────────────────────────────────────────────
+
+async function fixDockNames() {
+  toast("Fixing Dock names for all accounts…", "info");
+  const r = await api("/api/fix-dock-names", "POST");
+  if (r.success) {
+    toast(`✓ Fixed ${r.fixed} account${r.fixed !== 1 ? "s" : ""} — reopen Telegram windows to see the new names in Dock`, "success");
+  } else {
+    toast(r.message || "Failed", "error");
+  }
+}
+
+// ── Diagnose & Repair ─────────────────────────────────────────────────────
+
+let _diagnosePath = "";
+let _diagnoseName = "";
+let _diagnoseData = null;  // last scan result
+
+async function showDiagnoseModal(path, name) {
+  _diagnosePath = path;
+  _diagnoseName = name;
+  document.getElementById("diagnose-account-label").textContent = name;
+  document.getElementById("diagnose-loading").style.display = "block";
+  document.getElementById("diagnose-results").style.display = "none";
+  document.getElementById("diagnose-modal").classList.add("active");
+  await runDiagnose();
+}
+
+function hideDiagnoseModal() {
+  document.getElementById("diagnose-modal").classList.remove("active");
+}
+
+async function rerunDiagnose() {
+  document.getElementById("diagnose-loading").style.display = "block";
+  document.getElementById("diagnose-results").style.display = "none";
+  await runDiagnose();
+}
+
+async function runDiagnose() {
+  const r = await api("/api/diagnose", "POST", { path: _diagnosePath });
+  _diagnoseData = r;
+
+  document.getElementById("diagnose-loading").style.display = "none";
+  document.getElementById("diagnose-results").style.display = "block";
+
+  // Reset sub-sections
+  document.getElementById("diagnose-repair-results").style.display = "none";
+  document.getElementById("diagnose-repair-results").innerHTML = "";
+
+  const allIssues = [...(r.issues || []), ...(r.warnings || [])];
+  const fixable   = allIssues.filter(i => i.fixable);
+
+  // Build issues/warnings section
+  const wrap = document.getElementById("diagnose-issues-wrap");
+  wrap.innerHTML = "";
+  if (allIssues.length === 0) {
+    document.getElementById("diagnose-ok").style.display = "block";
+    document.getElementById("diagnose-repair-wrap").style.display = "none";
+  } else {
+    document.getElementById("diagnose-ok").style.display = "none";
+    for (const issue of allIssues) {
+      const sev = issue.severity || "info";
+      const color = sev === "error" ? "var(--red)" : sev === "warning" ? "#f0a500" : "var(--muted)";
+      const icon  = sev === "error" ? "✗" : sev === "warning" ? "⚠" : "ℹ";
+      const div = document.createElement("div");
+      div.style = `border:1px solid ${color}40;background:${color}10;border-radius:6px;padding:10px 12px;margin-bottom:8px`;
+      div.innerHTML = `<div style="font-size:13px;font-weight:600;color:${color}">${icon} ${esc(issue.title)}</div>`
+                    + `<div style="font-size:12px;color:var(--muted);margin-top:4px">${esc(issue.detail || "")}</div>`;
+      wrap.appendChild(div);
+    }
+
+    // Build repair actions if any fixable
+    if (fixable.length > 0) {
+      document.getElementById("diagnose-repair-wrap").style.display = "block";
+      const al = document.getElementById("diagnose-action-list");
+      al.innerHTML = "";
+
+      const actions = buildRepairActions(r);
+      for (const act of actions) {
+        const label = document.createElement("label");
+        label.style = "display:flex;align-items:flex-start;gap:8px;margin-bottom:8px;cursor:pointer;font-size:13px";
+        label.innerHTML = `<input type="checkbox" value="${act.id}" checked style="margin-top:2px">`
+                        + `<span><strong>${esc(act.label)}</strong>`
+                        + (act.desc ? `<br><span style="color:var(--muted);font-size:12px">${esc(act.desc)}</span>` : "")
+                        + `</span>`;
+        al.appendChild(label);
+      }
+    } else {
+      document.getElementById("diagnose-repair-wrap").style.display = "none";
+    }
+  }
+
+  // Info lines
+  const infoWrap = document.getElementById("diagnose-info-wrap");
+  infoWrap.innerHTML = "";
+  for (const line of (r.info || [])) {
+    const d = document.createElement("div");
+    d.style = "font-size:12px;color:var(--muted);padding:2px 0";
+    d.textContent = "  " + line;
+    infoWrap.appendChild(d);
+  }
+}
+
+function buildRepairActions(data) {
+  const actions = [];
+  const allIssues = [...(data.issues || []), ...(data.warnings || [])];
+
+  const hasId = id => allIssues.some(i => i.id === id);
+
+  if (hasId("zombie_process")) {
+    actions.push({ id: "kill_zombie", label: "Kill zombie process",
+                   desc: "Force-quit the stale Telegram process holding file locks." });
+  }
+  if (hasId("lock_files")) {
+    actions.push({ id: "remove_locks", label: "Remove stale lock files",
+                   desc: "Delete .lock files left over from a crash." });
+  }
+  if (hasId("clearable_cache") || allIssues.some(i => i.id === "clearable_cache")) {
+    actions.push({ id: "clear_cache", label: "Clear settings & cache files",
+                   desc: "Removes settings0/settings1 and media_cache so Telegram rebuilds them. Safe — your messages are in tdata." });
+  }
+  if (hasId("not_executable")) {
+    actions.push({ id: "fix_perms", label: "Fix Telegram binary permissions",
+                   desc: "Restore executable bit and re-sign Telegram.app." });
+  }
+  if (hasId("no_portable")) {
+    actions.push({ id: "recreate_portable", label: "Recreate TelegramForcePortable folder",
+                   desc: "Creates the missing portable mode marker folder." });
+  }
+  if (hasId("no_app") || hasId("no_binary")) {
+    actions.push({ id: "recopy_app", label: "Replace Telegram.app with a fresh copy",
+                   desc: "Copies from the source Telegram.app set in Settings." });
+  }
+  // Always offer clear_cache as optional if Telegram crashed on startup
+  if (!actions.some(a => a.id === "clear_cache") && (data.issues || []).length > 0) {
+    actions.push({ id: "clear_cache", label: "Clear settings & cache (optional, safe)",
+                   desc: "Sometimes fixes startup crashes by letting Telegram rebuild config files." });
+  }
+  return actions;
+}
+
+async function runRepair() {
+  const checkboxes = document.querySelectorAll("#diagnose-action-list input[type=checkbox]:checked");
+  const selectedActions = Array.from(checkboxes).map(cb => cb.value);
+  if (selectedActions.length === 0) {
+    toast("No repair actions selected", "warning");
+    return;
+  }
+
+  document.getElementById("diagnose-repair-btn").disabled = true;
+  document.getElementById("diagnose-repair-btn").textContent = "Backing up…";
+  toast("Creating a backup snapshot first, then applying the selected fixes…", "info", 9000);
+
+  const r = await api("/api/repair", "POST", { path: _diagnosePath, actions: selectedActions });
+
+  document.getElementById("diagnose-repair-btn").disabled = false;
+  document.getElementById("diagnose-repair-btn").textContent = "Apply Fixes";
+
+  const rr = document.getElementById("diagnose-repair-results");
+  rr.style.display = "block";
+  rr.innerHTML = "<h3 style='font-size:13px;margin-bottom:8px;color:var(--muted)'>REPAIR RESULTS</h3>";
+
+  if (!r.success) {
+    rr.innerHTML += `<div style="color:var(--red);font-size:13px">Error: ${esc(r.message || "Unknown error")}</div>`;
+    return;
+  }
+  for (const res of (r.results || [])) {
+    const color = res.ok ? "var(--green)" : "var(--red)";
+    const icon  = res.ok ? "✓" : "✗";
+    const div = document.createElement("div");
+    div.style = `font-size:13px;padding:4px 0;color:${color}`;
+    div.textContent = `${icon} ${res.msg}`;
+    rr.appendChild(div);
+    if (res.backup_path) {
+      const bp = document.createElement("div");
+      bp.style = "font-size:11px;color:var(--muted);padding:0 0 6px 16px";
+      bp.textContent = `Backup saved at: ${res.backup_path}`;
+      rr.appendChild(bp);
+    }
+  }
+
+  // Show a re-scan button suggestion
+  const hint = document.createElement("div");
+  hint.style = "margin-top:12px;font-size:12px;color:var(--muted)";
+  hint.textContent = "Repairs applied. Click ↺ Re-scan to verify, then try opening the account again.";
+  rr.appendChild(hint);
+}
+
+// ── Boot ─────────────────────────────────────────────────────────────────
+
+// On first load, retry until the Python server is ready (takes ~1-2s to start).
+(async function boot() {
+  const content = document.getElementById("content");
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const r = await api("/api/accounts");
+    if (r && !r._networkError && Array.isArray(r)) {
+      accounts = r;
+      renderAccounts();
+      loadAlerts();
+      loadWorkspaceBar();
+      api("/api/stats").then(s => { if (s) { _statsData = s; updateStats(); } });
+      initLockWithRetry();
+      return;
+    }
+    // Server not ready yet — show a waiting state
+    content.innerHTML = `<div class="empty-state"><div class="empty-state-icon">⏳</div><h2>Starting…</h2><p>Waiting for the server to be ready.</p></div>`;
+    await new Promise(r => setTimeout(r, 500));
+  }
+  // Give up — show an error
+  content.innerHTML = `<div class="empty-state"><div class="empty-state-icon">⚠</div><h2>Could not connect</h2><p>The server did not start. Try relaunching TelegramManager.</p></div>`;
+})();
+</script>
+</body>
+</html>
