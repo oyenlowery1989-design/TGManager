@@ -405,13 +405,13 @@ def clone_app_to_folder(account_path, shared_app_path=None, app_name=None):
     if safe_bundle_name in ("", ".", ".."):
         safe_bundle_name = os.path.basename(account_path).replace("/", "-").strip() or "Telegram"
     app_dest = os.path.join(account_path, safe_bundle_name + ".app")
-    r = subprocess.run(["cp", "-cR", shared_app_path, app_dest], capture_output=True)
+    r = subprocess.run(["cp", "-cR", shared_app_path, app_dest], capture_output=True, timeout=1800)
     if r.returncode != 0:
-        r2 = subprocess.run(["cp", "-R", shared_app_path, app_dest], capture_output=True)
+        r2 = subprocess.run(["cp", "-R", shared_app_path, app_dest], capture_output=True, timeout=1800)
         if r2.returncode != 0:
             return False
     # Strip Gatekeeper quarantine so macOS doesn't silently block launch
-    subprocess.run(["xattr", "-dr", "com.apple.quarantine", app_dest], capture_output=True)
+    subprocess.run(["xattr", "-dr", "com.apple.quarantine", app_dest], capture_output=True, timeout=120)
     # NOTE: We deliberately do NOT patch Info.plist or re-sign here. Modifying the
     # bundle in the per-open clone path triggers an APFS copy-on-write split and an
     # ad-hoc re-sign that changes the app's code identity — which has corrupted tdata
@@ -446,7 +446,7 @@ def remove_cloned_app(account_path):
         return
     app = find_account_app(account_path)
     if app and os.path.isdir(app):
-        subprocess.run(["rm", "-rf", app], capture_output=True)
+        subprocess.run(["rm", "-rf", app], capture_output=True, timeout=300)
 
 
 def clear_media_cache(account_path, threshold_mb=0):
@@ -461,7 +461,7 @@ def clear_media_cache(account_path, threshold_mb=0):
     size = get_folder_size(cache_path)
     if threshold_mb > 0 and size < threshold_mb * 1024 * 1024:
         return False, 0
-    subprocess.run(["rm", "-rf", cache_path], capture_output=True)
+    subprocess.run(["rm", "-rf", cache_path], capture_output=True, timeout=300)
     invalidate_tdata_size(account_path)
     _log.info("Cleared media_cache for %s (freed %s)", os.path.basename(account_path), human_size(size))
     return True, size
@@ -546,7 +546,7 @@ def _copy_tdata_excluding_cache(src, dst):
                      r.returncode, r.stderr.decode(errors="replace").strip()[:200])
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
         _log.warning("backup rsync unavailable (%s); falling back to cp", e)
-    subprocess.run(["rm", "-rf", dst], capture_output=True)
+    subprocess.run(["rm", "-rf", dst], capture_output=True, timeout=300)
     r = subprocess.run(["cp", "-R", src, dst], capture_output=True, timeout=1800)
     return (r.returncode == 0), ("" if r.returncode == 0
                                  else r.stderr.decode(errors="replace").strip()[:200])
@@ -885,7 +885,7 @@ def _app_watcher_loop():
                     app = find_account_app(p)
                     if app:
                         _log.info("Watcher: removing idle cloned app for %s", acc["name"])
-                        subprocess.run(["rm", "-rf", app], capture_output=True)
+                        subprocess.run(["rm", "-rf", app], capture_output=True, timeout=300)
                         invalidate_scan_cache()
                 # Auto-clear caches (media + WebView) if total is over threshold
                 if threshold_mb > 0:
@@ -1259,6 +1259,8 @@ def list_backups():
         if not os.path.isdir(date_path):
             continue
         for account in sorted(os.listdir(date_path)):
+            if account.endswith(".partial"):   # crashed mid-copy — not a valid backup
+                continue
             acc_path  = os.path.join(date_path, account)
             tdata_src = os.path.join(acc_path, "tdata")
             if os.path.isdir(tdata_src):
@@ -1292,6 +1294,8 @@ def _last_backup_map():
                 if not os.path.isdir(date_path):
                     continue
                 for account in os.listdir(date_path):
+                    if account.endswith(".partial"):
+                        continue
                     result.setdefault(account, date_folder)
         except OSError as e:
             _log.warning("_last_backup_map: %s", e)
@@ -1300,16 +1304,25 @@ def _last_backup_map():
     return result
 
 
-def delete_backup(backup_path):
-    """Delete one backup folder (Backups/<date>/<account>). Returns (ok, msg).
+def _resolve_backup_dir(backup_path):
+    """Resolve a client-supplied backup path to its realpath, or None.
 
-    Only accepts paths exactly two levels below DATA_DIR/Backups so a crafted
-    request can never delete the whole Backups tree or anything outside it.
+    Only accepts paths exactly two levels below DATA_DIR/Backups
+    (Backups/<date>/<account>) so a crafted request can never touch the whole
+    Backups tree, a live account's tdata, or anything outside Backups.
     """
     backup_root = os.path.realpath(os.path.join(DATA_DIR, "Backups"))
     real = os.path.realpath(str(backup_path or ""))
     rel = os.path.relpath(real, backup_root)
     if rel.startswith("..") or len(rel.split(os.sep)) != 2:
+        return None
+    return real
+
+
+def delete_backup(backup_path):
+    """Delete one backup folder (Backups/<date>/<account>). Returns (ok, msg)."""
+    real = _resolve_backup_dir(backup_path)
+    if real is None:
         return False, "Invalid backup path"
     if not os.path.isdir(real):
         return False, "Backup not found"
@@ -1345,11 +1358,22 @@ def prune_backups(account_name):
 
 @serialize_account_op(lambda backup_path, account_path: account_path, (False, _BUSY_MSG))
 def restore_backup(backup_path, account_path):
-    """Copy tdata from a backup folder back into the account's TelegramForcePortable/."""
-    _log.info("Restoring backup from %s into %s", backup_path, account_path)
-    tdata_src = os.path.join(backup_path, "tdata")
+    """Copy tdata from a backup folder back into the account's TelegramForcePortable/.
+
+    Crash-safe: the backup is first copied to tdata.new inside the account,
+    then the live tdata is swapped out via two renames. If the server dies
+    mid-copy the live tdata is untouched (a stale tdata.new is cleaned up on
+    the next restore).
+    """
+    real_backup = _resolve_backup_dir(backup_path)
+    if real_backup is None:
+        _log.warning("restore_backup: invalid backup path %r", backup_path)
+        return False, "Invalid backup path"
+    _log.info("Restoring backup from %s into %s", real_backup, account_path)
+    tdata_src = os.path.join(real_backup, "tdata")
     portable  = os.path.join(account_path, "TelegramForcePortable")
     tdata_dst = os.path.join(portable, "tdata")
+    tdata_new = tdata_dst + ".new"
 
     if not os.path.isdir(tdata_src):
         _log.warning("restore_backup: tdata not found at %s", tdata_src)
@@ -1363,24 +1387,33 @@ def restore_backup(backup_path, account_path):
 
     os.makedirs(portable, exist_ok=True)
 
-    # Move current tdata to a timestamped .bak before overwriting
-    bak = None
-    if os.path.isdir(tdata_dst):
-        bak = tdata_dst + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
-        os.rename(tdata_dst, bak)
-        _log.info("Existing tdata moved to %s", bak)
-
-    r = subprocess.run(["cp", "-R", tdata_src, tdata_dst], capture_output=True)
+    # Copy to a sibling temp dir first — the live tdata stays intact until the
+    # copy has fully succeeded.
+    subprocess.run(["rm", "-rf", tdata_new], capture_output=True, timeout=300)
+    r = subprocess.run(["cp", "-R", tdata_src, tdata_new], capture_output=True, timeout=1800)
     if r.returncode != 0:
         _log.error("restore_backup: cp failed: %s", r.stderr.decode(errors="replace").strip())
-        # Roll back: restore the original tdata from the .bak
-        if bak and os.path.isdir(bak):
+        subprocess.run(["rm", "-rf", tdata_new], capture_output=True, timeout=300)
+        return False, "Copy failed — the current tdata was not touched"
+
+    # Swap: current tdata → timestamped .bak, then tdata.new → tdata.
+    bak = None
+    try:
+        if os.path.isdir(tdata_dst):
+            bak = tdata_dst + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S")
+            os.rename(tdata_dst, bak)
+            _log.info("Existing tdata moved to %s", bak)
+        os.rename(tdata_new, tdata_dst)
+    except OSError as e:
+        _log.error("restore_backup: swap failed: %s", e)
+        if bak and os.path.isdir(bak) and not os.path.isdir(tdata_dst):
             try:
                 os.rename(bak, tdata_dst)
                 _log.info("restore_backup: original tdata restored from %s", bak)
             except Exception as undo_e:
                 _log.error("restore_backup: rollback also failed: %s", undo_e)
-        return False, "Copy failed — original tdata has been restored"
+        subprocess.run(["rm", "-rf", tdata_new], capture_output=True, timeout=300)
+        return False, "Restore failed — original tdata has been restored"
 
     invalidate_tdata_size(account_path)   # tdata was just replaced
     _log.info("Backup restored successfully")
@@ -1535,18 +1568,40 @@ def find_telegram_pid(account_path):
                 pass
     return None
 
+def _pid_alive(pid):
+    """True if the process still exists (signal 0 probe)."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
 def kill_account(account_path):
     """Kill only the Telegram process for this account."""
     pid = find_telegram_pid(account_path)
     if pid:
         _log.info("Killing Telegram PID %d for account %s", pid, account_path)
-        subprocess.run(["kill", str(pid)], capture_output=True)
-        def _cleanup(p):
-            time.sleep(2)
+        subprocess.run(["kill", str(pid)], capture_output=True, timeout=10)
+        def _cleanup(p, pid):
+            # Wait for Telegram to actually exit (it may still be flushing
+            # tdata) before touching the cloned app; escalate to SIGKILL if
+            # it ignores SIGTERM.
+            deadline = time.time() + 8
+            while _pid_alive(pid) and time.time() < deadline:
+                time.sleep(0.5)
+            if _pid_alive(pid):
+                _log.warning("kill_account: PID %d ignored SIGTERM — sending SIGKILL", pid)
+                subprocess.run(["kill", "-9", str(pid)], capture_output=True, timeout=10)
+                deadline = time.time() + 4
+                while _pid_alive(pid) and time.time() < deadline:
+                    time.sleep(0.5)
             remove_cloned_app(p)
             invalidate_tdata_size(p)   # tdata settled (and cache may auto-clear on close)
             invalidate_scan_cache()
-        threading.Thread(target=_cleanup, args=(account_path,), daemon=True).start()
+        threading.Thread(target=_cleanup, args=(account_path, pid), daemon=True).start()
         return True
     return False
 
@@ -1624,8 +1679,13 @@ def _run_keeper_pass(interval_days, open_secs):
             ok, msg = open_account(acc["path"])
             if not ok:
                 _log.error("Keeper: failed to open %s: %s", acc["name"], msg)
-            time.sleep(open_secs)
-            kill_account(acc["path"])
+                continue
+            try:
+                time.sleep(open_secs)
+            finally:
+                # Never leave a keeper-opened Telegram running, even if this
+                # thread is interrupted mid-sleep.
+                kill_account(acc["path"])
             time.sleep(5)   # brief pause between accounts
 
 
@@ -1668,13 +1728,13 @@ def _patch_app_display_name(app_path: str, display_name: str) -> bool:
     safe_dn = shlex.quote(display_name)
     for key in ("CFBundleDisplayName", "CFBundleName"):
         r = subprocess.run([pb, "-c", f"Set :{key} {safe_dn}", plist],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, timeout=60)
         if r.returncode != 0:
             subprocess.run([pb, "-c", f"Add :{key} string {safe_dn}", plist],
-                           capture_output=True)
+                           capture_output=True, timeout=60)
     # Re-sign with ad-hoc signature (required after modifying Info.plist)
     r = subprocess.run(["codesign", "--force", "--deep", "--sign", "-", app_path],
-                       capture_output=True)
+                       capture_output=True, timeout=600)
     if r.returncode != 0:
         _log.warning("_patch_app_display_name: codesign failed for %s: %s",
                      app_path, r.stderr.decode(errors="replace").strip())
@@ -1852,11 +1912,11 @@ def create_account(name, parent_path, open_after=True):
         safe_bundle = os.path.basename(folder_path) or "Telegram"
     app_dest = os.path.join(folder_path, safe_bundle + ".app")
     # Use APFS clone (cp -cR) when copying from the shared master — saves ~300 MB per account
-    r = subprocess.run(["cp", "-cR", app_source, app_dest], capture_output=True)
+    r = subprocess.run(["cp", "-cR", app_source, app_dest], capture_output=True, timeout=1800)
     if r.returncode != 0:
-        r = subprocess.run(["cp", "-R", app_source, app_dest], capture_output=True)
+        r = subprocess.run(["cp", "-R", app_source, app_dest], capture_output=True, timeout=1800)
     if r.returncode != 0:
-        subprocess.run(["rm", "-rf", folder_path], capture_output=True)
+        subprocess.run(["rm", "-rf", folder_path], capture_output=True, timeout=300)
         return False, f"Failed to copy Telegram.app: {r.stderr.decode(errors='replace').strip()}"
 
     # Patch Info.plist so the Dock shows the account name
@@ -1914,16 +1974,16 @@ def setup_account(folder_path):
         if safe_name in ("", ".", ".."):
             safe_name = os.path.basename(folder_path) or "Telegram"
         app_dest = os.path.join(folder_path, safe_name + ".app")
-        r = subprocess.run(["cp", "-cR", app_source, app_dest], capture_output=True)
+        r = subprocess.run(["cp", "-cR", app_source, app_dest], capture_output=True, timeout=1800)
         if r.returncode != 0:
-            r = subprocess.run(["cp", "-R", app_source, app_dest], capture_output=True)
+            r = subprocess.run(["cp", "-R", app_source, app_dest], capture_output=True, timeout=1800)
         if r.returncode != 0:
             return False, f"Failed to copy Telegram.app: {r.stderr.decode(errors='replace').strip()}"
 
     os.makedirs(portable, exist_ok=True)
 
     if os.path.isdir(tdata_src) and not os.path.isdir(tdata_dest):
-        r = subprocess.run(["mv", tdata_src, tdata_dest], capture_output=True)
+        r = subprocess.run(["mv", tdata_src, tdata_dest], capture_output=True, timeout=600)
         if r.returncode != 0:
             return False, f"Failed to move tdata: {r.stderr.decode(errors='replace').strip()}"
 
@@ -1932,7 +1992,7 @@ def setup_account(folder_path):
         if os.path.exists(fp): os.remove(fp)
     modules = os.path.join(folder_path, "modules")
     if os.path.isdir(modules):
-        subprocess.run(["rm", "-rf", modules])
+        subprocess.run(["rm", "-rf", modules], capture_output=True, timeout=300)
 
     # Set the Dock name to the account folder name
     account_name = os.path.basename(folder_path)
@@ -1953,12 +2013,19 @@ def backup_account(folder_path, account_name):
     if find_telegram_pid(folder_path):
         _log.warning("backup_account: refused — Telegram is running for %s", folder_path)
         return False, "Close Telegram for this account before backing up", ""
-    os.makedirs(backup_dir, exist_ok=True)
-    ok, err = _copy_tdata_excluding_cache(tdata_src, os.path.join(backup_dir, "tdata"))
+    # Crash-safe: copy into a .partial dir, rename to the final name only once
+    # the copy fully succeeded. A server crash mid-copy leaves a *.partial dir
+    # that list_backups() ignores, never a half backup that looks valid.
+    partial_dir = backup_dir + ".partial"
+    subprocess.run(["rm", "-rf", partial_dir], capture_output=True, timeout=300)
+    os.makedirs(partial_dir, exist_ok=True)
+    ok, err = _copy_tdata_excluding_cache(tdata_src, os.path.join(partial_dir, "tdata"))
     if not ok:
-        # Don't leave a partial backup that list_backups() would offer as valid.
-        subprocess.run(["rm", "-rf", backup_dir], capture_output=True)
+        subprocess.run(["rm", "-rf", partial_dir], capture_output=True, timeout=300)
         return False, f"Copy failed: {err}", ""
+    if os.path.isdir(backup_dir):   # same account backed up twice in one minute
+        subprocess.run(["rm", "-rf", backup_dir], capture_output=True, timeout=300)
+    os.rename(partial_dir, backup_dir)
     _log.info("Backup complete: %s", backup_dir)
     prune_backups(account_name)
     _backup_map_cache["ts"] = 0.0
@@ -1990,12 +2057,12 @@ def update_all_apps():
         if not os.path.isdir(app_source):
             return False, "Set Telegram.app source path in Settings first"
         shared_tmp = shared + ".new"
-        subprocess.run(["rm", "-rf", shared_tmp], capture_output=True)
-        r = subprocess.run(["cp", "-R", app_source, shared_tmp], capture_output=True)
+        subprocess.run(["rm", "-rf", shared_tmp], capture_output=True, timeout=300)
+        r = subprocess.run(["cp", "-R", app_source, shared_tmp], capture_output=True, timeout=1800)
         if r.returncode != 0:
-            subprocess.run(["rm", "-rf", shared_tmp], capture_output=True)
+            subprocess.run(["rm", "-rf", shared_tmp], capture_output=True, timeout=300)
             return False, "Failed to update shared Telegram.app"
-        subprocess.run(["rm", "-rf", shared], capture_output=True)
+        subprocess.run(["rm", "-rf", shared], capture_output=True, timeout=300)
         os.rename(shared_tmp, shared)
         return True, "Shared Telegram.app updated"
 
@@ -2019,13 +2086,13 @@ def update_all_apps():
                 continue
             # Copy to a temp name, then swap — keeps the bundle name unchanged
             app_tmp = app_dest + ".new"
-            subprocess.run(["rm", "-rf", app_tmp], capture_output=True)
-            r = subprocess.run(["cp", "-R", app_source, app_tmp], capture_output=True)
+            subprocess.run(["rm", "-rf", app_tmp], capture_output=True, timeout=300)
+            r = subprocess.run(["cp", "-R", app_source, app_tmp], capture_output=True, timeout=1800)
             if r.returncode != 0:
-                subprocess.run(["rm", "-rf", app_tmp], capture_output=True)
+                subprocess.run(["rm", "-rf", app_tmp], capture_output=True, timeout=300)
                 _log.warning("update_all_apps: cp failed for %s — skipping", acc["path"])
                 continue
-            subprocess.run(["rm", "-rf", app_dest], capture_output=True)
+            subprocess.run(["rm", "-rf", app_dest], capture_output=True, timeout=300)
             os.rename(app_tmp, app_dest)
             # Re-apply dock name after binary update (Info.plist was overwritten by cp)
             with _meta_lock:
@@ -2205,7 +2272,7 @@ def repair_account(account_path, actions):
     if "kill_zombie" in actions:
         pid = find_telegram_pid(account_path)
         if pid:
-            subprocess.run(["kill", "-9", str(pid)], capture_output=True)
+            subprocess.run(["kill", "-9", str(pid)], capture_output=True, timeout=10)
             time.sleep(1)
             results.append({"action": "kill_zombie", "ok": True,
                             "msg": f"Killed Telegram process (PID {pid})"})
@@ -2258,7 +2325,7 @@ def repair_account(account_path, actions):
             if os.path.exists(fpath):
                 try:
                     if os.path.isdir(fpath):
-                        subprocess.run(["rm", "-rf", fpath], capture_output=True)
+                        subprocess.run(["rm", "-rf", fpath], capture_output=True, timeout=300)
                     else:
                         os.remove(fpath)
                     cleared.append(fname)
@@ -2267,7 +2334,7 @@ def repair_account(account_path, actions):
         # Also clear media_cache if it exists
         mc = os.path.join(tdata, "media_cache")
         if os.path.isdir(mc):
-            r = subprocess.run(["rm", "-rf", mc], capture_output=True)
+            r = subprocess.run(["rm", "-rf", mc], capture_output=True, timeout=300)
             if r.returncode == 0:
                 cleared.append("media_cache")
             else:
@@ -2286,7 +2353,7 @@ def repair_account(account_path, actions):
                 os.chmod(binary, 0o755)
                 # Also re-sign after permission fix
                 r = subprocess.run(["codesign", "--force", "--deep", "--sign", "-", app],
-                                   capture_output=True)
+                                   capture_output=True, timeout=600)
                 if r.returncode == 0:
                     results.append({"action": "fix_perms", "ok": True,
                                     "msg": "Fixed binary permissions and re-signed Telegram.app"})
@@ -2317,8 +2384,8 @@ def repair_account(account_path, actions):
                             "msg": f"Source Telegram.app not found at {app_source}"})
         else:
             if os.path.isdir(app):
-                subprocess.run(["rm", "-rf", app], capture_output=True)
-            r = subprocess.run(["cp", "-R", app_source, app], capture_output=True)
+                subprocess.run(["rm", "-rf", app], capture_output=True, timeout=300)
+            r = subprocess.run(["cp", "-R", app_source, app], capture_output=True, timeout=1800)
             if r.returncode == 0:
                 # Re-apply dock name
                 account_name = os.path.basename(account_path)
@@ -2335,6 +2402,28 @@ def repair_account(account_path, actions):
 class RequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
+        # Last-resort guard: a handler bug or a subprocess timeout must yield a
+        # JSON error, not an unhandled-exception traceback on a dead socket.
+        try:
+            self._do_GET()
+        except Exception as e:
+            _log.error("do_GET %s: unhandled error: %s", self.path, e, exc_info=True)
+            try:
+                self.send_json({"success": False, "message": f"Server error: {e}"}, 500)
+            except Exception:
+                pass
+
+    def do_POST(self):
+        try:
+            self._do_POST()
+        except Exception as e:
+            _log.error("do_POST %s: unhandled error: %s", self.path, e, exc_info=True)
+            try:
+                self.send_json({"success": False, "message": f"Server error: {e}"}, 500)
+            except Exception:
+                pass
+
+    def _do_GET(self):
         path = _route_path(self.path)
         if path is None:
             self.send_response(404)
@@ -2453,7 +2542,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
-    def do_POST(self):
+    def _do_POST(self):
         origin = self.headers.get("Origin", "")
         if origin and not (origin.startswith("http://127.0.0.1:") or
                            origin.startswith("http://localhost:")):
@@ -2995,13 +3084,13 @@ class RequestHandler(BaseHTTPRequestHandler):
             os.makedirs(shared_dir, exist_ok=True)
             dest = os.path.join(shared_dir, "Telegram.app")
             if os.path.isdir(dest):
-                subprocess.run(["rm", "-rf", dest], capture_output=True)
-            r = subprocess.run(["cp", "-R", app_source, dest], capture_output=True)
+                subprocess.run(["rm", "-rf", dest], capture_output=True, timeout=300)
+            r = subprocess.run(["cp", "-R", app_source, dest], capture_output=True, timeout=1800)
             if r.returncode != 0:
                 self.send_json({"success": False, "message": "Copy failed: " + r.stderr.decode()})
                 return
             # Strip quarantine so the master (and every clone from it) launches without Gatekeeper prompts
-            subprocess.run(["xattr", "-dr", "com.apple.quarantine", dest], capture_output=True)
+            subprocess.run(["xattr", "-dr", "com.apple.quarantine", dest], capture_output=True, timeout=120)
             invalidate_scan_cache()
             self.send_json({"success": True,
                             "message": "Shared Telegram.app is ready. Accounts will use it on next open."})
@@ -3016,7 +3105,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self.send_json({"success": False, "message": "No Telegram app bundle found in this folder"})
                 return
             sz = get_folder_size(app_path)
-            subprocess.run(["rm", "-rf", app_path], capture_output=True)
+            subprocess.run(["rm", "-rf", app_path], capture_output=True, timeout=300)
             invalidate_scan_cache()
             self.send_json({"success": True, "freed": sz, "freed_human": human_size(sz)})
 
@@ -3031,7 +3120,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 app_path = find_account_app(acc["path"])
                 if app_path:
                     freed += get_folder_size(app_path)
-                    subprocess.run(["rm", "-rf", app_path], capture_output=True)
+                    subprocess.run(["rm", "-rf", app_path], capture_output=True, timeout=300)
                     removed += 1
             invalidate_scan_cache()
             self.send_json({"success": True, "removed": removed,
