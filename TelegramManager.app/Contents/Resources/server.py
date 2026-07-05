@@ -164,6 +164,38 @@ def choose_app_dialog(prompt_text, default_dir="/Applications", timeout=600):
     return None, "picker failed: " + (r.stderr or "").strip()[:200]
 
 
+# Bundles the user physically selected via the native picker this session.
+# A path in here is trusted as an app-source even outside the fixed locations
+# below, because summoning+clicking the native dialog needs real user presence
+# — a token-only caller cannot do it.
+_approved_app_sources = set()
+_approved_sources_lock = threading.Lock()
+
+
+def is_allowed_app_source(path):
+    """Whether `path` may be used as a Telegram.app master (copied, quarantine-
+    stripped, then launched).
+
+    A token-only caller must NOT be able to point the app at an attacker-planted
+    bundle. Accept only a real .app bundle that is EITHER (a) one the user just
+    chose in the native picker, OR (b) inside a trusted fixed location.
+    """
+    if not path:
+        return False
+    real = os.path.realpath(path)
+    if (not os.path.isdir(real) or not real.endswith(".app")
+            or not os.path.isdir(os.path.join(real, "Contents", "MacOS"))):
+        return False
+    with _approved_sources_lock:
+        if real in _approved_app_sources:
+            return True
+    for base in ("/Applications", ROOT_DIR, DATA_DIR):
+        broot = os.path.realpath(base)
+        if real == broot or real.startswith(broot + os.sep):
+            return True
+    return False
+
+
 def _save_json_atomic(path, value):
     directory = os.path.dirname(path)
     if directory:
@@ -897,6 +929,15 @@ def apply_proxy(proxy_config):
     # Persist the pre-change state so a failed restore can be recovered at
     # next startup. First writer wins: if a restore is already pending, the
     # file already holds the true original — do not overwrite it.
+    #
+    # The restore is then built from the FILE's baseline, not from this call's
+    # live query: if two accounts on the same proxy channel are opened within
+    # the 35 s window, the second's live query returns the FIRST account's
+    # proxy (already applied), so baking that in used to restore the wrong
+    # proxy and leave it stuck on. Reading back the authoritative baseline
+    # makes every concurrent restore converge on the same true original.
+    channel = "socks" if proxy_type.startswith("socks") else "http"
+    r_enabled, r_host, r_port = orig_enabled, orig_host, orig_port
     with _proxy_state_lock:
         if not os.path.exists(PROXY_ORIGINAL_FILE):
             _save_json_atomic(PROXY_ORIGINAL_FILE, {
@@ -904,6 +945,18 @@ def apply_proxy(proxy_config):
                 "enabled": orig_enabled, "host": orig_host, "port": orig_port,
                 "saved_at": datetime.now().isoformat(),
             })
+        try:
+            with open(PROXY_ORIGINAL_FILE) as _pf:
+                _base = json.load(_pf)
+            _base_channel = "socks" if str(_base.get("proxy_type", "")).startswith("socks") else "http"
+            # Only trust the file when it describes THIS proxy channel; a
+            # different channel is independent and its live query is correct.
+            if _base_channel == channel:
+                r_enabled = bool(_base.get("enabled"))
+                r_host    = str(_base.get("host", "") or "")
+                r_port    = str(_base.get("port", "0") or "0")
+        except Exception as _e:
+            _log.warning("apply_proxy: baseline read-back failed (%s); using live query", _e)
 
     # Build per-type command strings using shlex.quote() for all user-controlled values.
     # The initial set+enable pair runs via _run_as_admin() (temp-file approach — no AppleScript
@@ -912,12 +965,12 @@ def apply_proxy(proxy_config):
         set_cmd     = f"networksetup -setsocksfirewallproxy {shlex.quote(service)} {shlex.quote(host)} {shlex.quote(port)} off"
         on_cmd      = f"networksetup -setsocksfirewallproxystate {shlex.quote(service)} on"
         off_cmd     = f"networksetup -setsocksfirewallproxystate {shlex.quote(service)} off"
-        restore_set = f"networksetup -setsocksfirewallproxy {shlex.quote(service)} {shlex.quote(orig_host)} {shlex.quote(orig_port)} off"
+        restore_set = f"networksetup -setsocksfirewallproxy {shlex.quote(service)} {shlex.quote(r_host)} {shlex.quote(r_port)} off"
     else:
         set_cmd     = f"networksetup -sethttpproxy {shlex.quote(service)} {shlex.quote(host)} {shlex.quote(port)}"
         on_cmd      = f"networksetup -sethttpproxystate {shlex.quote(service)} on"
         off_cmd     = f"networksetup -sethttpproxystate {shlex.quote(service)} off"
-        restore_set = f"networksetup -sethttpproxy {shlex.quote(service)} {shlex.quote(orig_host)} {shlex.quote(orig_port)}"
+        restore_set = f"networksetup -sethttpproxy {shlex.quote(service)} {shlex.quote(r_host)} {shlex.quote(r_port)}"
 
     result = _run_as_admin(
         f"{set_cmd}\n{on_cmd}\n",
@@ -931,7 +984,7 @@ def apply_proxy(proxy_config):
 
     def schedule_restore():
         import tempfile, stat
-        if orig_enabled and orig_host:
+        if r_enabled and r_host:
             restore_lines = [restore_set, on_cmd]
         else:
             restore_lines = [off_cmd]
@@ -2185,6 +2238,10 @@ class RequestHandler(BaseHTTPRequestHandler):
             picked, err = choose_app_dialog(
                 "Select the Telegram.app to use as shared master")
             if picked:
+                # Remember it as user-approved so /api/shared-app/setup will
+                # accept it even though it may live outside the trusted roots.
+                with _approved_sources_lock:
+                    _approved_app_sources.add(os.path.realpath(picked))
                 self.send_json({"success": True, "path": picked})
             else:
                 self.send_json({"success": False, "message": err})
@@ -2681,6 +2738,12 @@ class RequestHandler(BaseHTTPRequestHandler):
                         except (TypeError, ValueError):
                             _log.warning("config: ignoring non-integer %s=%r", k, v)
                             continue
+                    elif k == "app_source" and v and not is_allowed_app_source(v):
+                        # app_source is later copied + quarantine-stripped + launched,
+                        # so a token-only caller must not be able to set it to an
+                        # arbitrary path. Empty = clear (falls back to auto-detect).
+                        _log.warning("config: rejecting untrusted app_source=%r", v)
+                        continue
                     config[k] = v
                 save_config(config)
             invalidate_scan_cache()
@@ -2697,11 +2760,10 @@ class RequestHandler(BaseHTTPRequestHandler):
             # Priority: explicit request source → config → sibling ROOT_DIR/Telegram.app → newest per-account copy
             req_source = data.get("source", "")
             if req_source:
-                if (not os.path.isdir(req_source)
-                        or not req_source.endswith(".app")
-                        or not os.path.isdir(os.path.join(req_source, "Contents", "MacOS"))):
+                if not is_allowed_app_source(req_source):
                     self.send_json({"success": False,
-                                    "message": "Selected path is not a valid .app bundle"})
+                                    "message": "Source is not a valid or approved .app bundle. "
+                                               "Use “Choose App…” to select it."})
                     return
                 app_source = req_source
             else:
@@ -2724,6 +2786,13 @@ class RequestHandler(BaseHTTPRequestHandler):
                                         "message": "No Telegram.app found. Place Telegram.app next to TelegramManager.app, or set the app path in Settings."})
                         return
                     app_source = latest
+            # Defense in depth: whatever the resolution path, never copy+launch
+            # a bundle from an untrusted location.
+            if not is_allowed_app_source(app_source):
+                self.send_json({"success": False,
+                                "message": "Resolved Telegram.app source is not in a trusted "
+                                           "location. Use “Choose App…” to select it."})
+                return
             shared_dir = os.path.join(SHARED_APPS_DIR, "macOS")
             os.makedirs(shared_dir, exist_ok=True)
             dest = os.path.join(shared_dir, "Telegram.app")
