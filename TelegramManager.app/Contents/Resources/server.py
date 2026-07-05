@@ -397,6 +397,34 @@ def _bundle_version(app_path):
         return None
 
 
+def _bundle_identifier(app_path):
+    """Return CFBundleIdentifier of an .app bundle, or None."""
+    try:
+        with open(os.path.join(app_path, "Contents", "Info.plist"), "rb") as f:
+            return plistlib.load(f).get("CFBundleIdentifier")
+    except Exception:
+        return None
+
+
+# Only Telegram Desktop (tdesktop) reads TelegramForcePortable/tdata. The
+# native macOS Telegram (ru.keepcoder.Telegram) silently ignores it and opens
+# the user's personal session instead — a confusing, hard-to-diagnose mistake.
+TDESKTOP_BUNDLE_ID = "com.tdesktop.Telegram"
+
+def _wrong_app_type_error(app_path):
+    """Return an error string if app_path is not Telegram Desktop, else None."""
+    bid = _bundle_identifier(app_path)
+    if bid == TDESKTOP_BUNDLE_ID:
+        return None
+    if bid == "ru.keepcoder.Telegram":
+        return ("This is the native macOS Telegram — it ignores portable account "
+                "data (tdata) and would open your personal session. Choose "
+                "Telegram Desktop from desktop.telegram.org instead.")
+    return (f"This app (bundle id {bid or 'unknown'}) is not Telegram Desktop — "
+            "accounts need Telegram Desktop (com.tdesktop.Telegram) from "
+            "desktop.telegram.org.")
+
+
 def clone_app_to_folder(account_path, shared_app_path=None, app_name=None):
     """Clone the shared Telegram.app into account_path.
 
@@ -999,10 +1027,11 @@ def open_account(path):
     # version forever — replace it when its version differs from the master.
     shared = get_shared_app()
     if app and shared:
-        clone_v, master_v = _bundle_version(app), _bundle_version(shared)
-        if clone_v and master_v and clone_v != master_v:
-            _log.info("open_account: replacing stale clone v%s with master v%s for %s",
-                      clone_v, master_v, path)
+        clone_id  = (_bundle_identifier(app), _bundle_version(app))
+        master_id = (_bundle_identifier(shared), _bundle_version(shared))
+        if all(clone_id) and all(master_id) and clone_id != master_id:
+            _log.info("open_account: replacing stale clone %s with master %s for %s",
+                      clone_id, master_id, path)
             subprocess.run(["rm", "-rf", app], capture_output=True, timeout=300)
             app = None
     if not app:
@@ -2080,6 +2109,9 @@ def update_all_apps():
     if shared:
         if not os.path.isdir(app_source):
             return False, "Set Telegram.app source path in Settings first"
+        type_err = _wrong_app_type_error(app_source)
+        if type_err:
+            return False, type_err
         shared_tmp = shared + ".new"
         subprocess.run(["rm", "-rf", shared_tmp], capture_output=True, timeout=300)
         r = subprocess.run(["cp", "-R", app_source, shared_tmp], capture_output=True, timeout=1800)
@@ -3108,6 +3140,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self.send_json({"success": False,
                                 "message": "Resolved Telegram.app source is not in a trusted "
                                            "location. Use “Choose App…” to select it."})
+                return
+            type_err = _wrong_app_type_error(app_source)
+            if type_err:
+                self.send_json({"success": False, "message": type_err})
                 return
             shared_dir = os.path.join(SHARED_APPS_DIR, "macOS")
             os.makedirs(shared_dir, exist_ok=True)
