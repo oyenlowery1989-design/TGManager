@@ -129,6 +129,23 @@ class BackupPathTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("Invalid backup path", msg)
 
+    def test_restore_rejects_symlinked_destination(self):
+        import tempfile
+        backup = self._make_backup()
+        acct = os.path.join(self.tmp, "acct-folder")
+        os.makedirs(acct)
+        outside = tempfile.mkdtemp(prefix="tm_outside_")
+        try:
+            # TelegramForcePortable is a symlink escaping the managed tree
+            os.symlink(outside, os.path.join(acct, "TelegramForcePortable"))
+            ok, msg = server.restore_backup(backup, acct)
+            self.assertFalse(ok)
+            self.assertIn("not a valid account folder", msg)
+            self.assertFalse(os.path.isdir(os.path.join(outside, "tdata")))
+        finally:
+            import shutil
+            shutil.rmtree(outside, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()

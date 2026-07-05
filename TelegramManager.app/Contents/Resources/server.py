@@ -356,12 +356,19 @@ def save_metadata(meta):
 config   = load_config()
 metadata = load_metadata()
 SESSION_TOKEN = os.environ.get("TG_SESSION_TOKEN", "")
-ROUTE_PREFIX  = f"/{SESSION_TOKEN}" if SESSION_TOKEN else ""
+_TOKEN_GENERATED = False
+if not SESSION_TOKEN:
+    # Never serve without a token: an empty TG_SESSION_TOKEN (launcher's two
+    # generators both failing, or a manual run) would leave every endpoint
+    # unauthenticated on 127.0.0.1. Generate one and print the URL to stdout
+    # (not the log — the log deliberately redacts the token).
+    import secrets
+    SESSION_TOKEN = secrets.token_hex(16)
+    _TOKEN_GENERATED = True
+ROUTE_PREFIX  = f"/{SESSION_TOKEN}"
 
 def _route_path(raw_path: str):
     path = urlparse(raw_path).path
-    if not ROUTE_PREFIX:
-        return path
     if path == ROUTE_PREFIX or path == ROUTE_PREFIX + "/":
         return "/"
     if path.startswith(ROUTE_PREFIX + "/"):
@@ -1448,6 +1455,13 @@ def restore_backup(backup_path, account_path):
         return False, "Close Telegram for this account before restoring a backup"
 
     os.makedirs(portable, exist_ok=True)
+
+    # Re-validate the FINAL destination right before writing: the account path
+    # was checked by the route, but a symlink planted at TelegramForcePortable/
+    # or tdata could still redirect the copy outside the managed tree.
+    if os.path.islink(portable) or os.path.islink(tdata_dst) or not is_safe_path(portable):
+        _log.warning("restore_backup: destination failed re-validation: %s", portable)
+        return False, "Restore destination is not a valid account folder"
 
     # Copy to a sibling temp dir first — the live tdata stays intact until the
     # copy has fully succeeded.
@@ -3293,6 +3307,10 @@ if __name__ == "__main__":
     _log.info("Server starting on 127.0.0.1:%d  (ROOT_DIR=%s)", port, ROOT_DIR)
     for w in PATH_WARNINGS:
         _log.warning("PATH FALLBACK: %s", w)
+    if _TOKEN_GENERATED:
+        # Manual/standalone run — token exists only in this process, so print
+        # the full URL to stdout for the developer (never to the log file).
+        print(f"Session token generated. UI: http://127.0.0.1:{port}{ROUTE_PREFIX}/")
     server = ThreadedHTTPServer(("127.0.0.1", port), RequestHandler)
     try:
         server.serve_forever()

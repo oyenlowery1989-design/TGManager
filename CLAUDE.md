@@ -11,6 +11,8 @@ There is no build step for Python files — they run directly. The only compile 
 open TelegramManager.app
 # or, to run the server standalone for testing:
 python3 "TelegramManager.app/Contents/Resources/server.py"
+# (with no TG_SESSION_TOKEN env var the server generates one and prints the
+#  full UI URL to stdout — endpoints are never served unauthenticated)
 ```
 
 **Compile the Swift launcher manually (auto-done by launcher.sh):**
