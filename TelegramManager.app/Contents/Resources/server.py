@@ -723,11 +723,14 @@ def _compute_disk_stats():
     backup_root = os.path.join(DATA_DIR, "Backups")
     backup_size = get_folder_size(backup_root) if os.path.isdir(backup_root) else 0
     accs        = scan_accounts_cached()
-    cache_total = sum(
-        get_folder_size(os.path.join(a["path"], "TelegramForcePortable", "tdata", "media_cache"))
-        for a in accs
-        if os.path.isdir(os.path.join(a["path"], "TelegramForcePortable", "tdata", "media_cache"))
-    )
+    # Full reclaimable cache (media + file + emoji + WebView), not just
+    # media_cache — this is the number the "Clear Caches" button would free.
+    # Fine to walk here: disk stats are background-refreshed on a 60s cache.
+    cache_total = 0
+    for a in accs:
+        tdata = os.path.join(a["path"], "TelegramForcePortable", "tdata")
+        if os.path.isdir(tdata):
+            cache_total += sum(get_folder_size(t) for t in _find_cache_dirs(tdata))
     result = {"tg_size": tg_size, "backup_size": backup_size, "cache_total": cache_total}
     with _disk_stats_lock:
         _disk_stats["data"] = result
@@ -2554,6 +2557,26 @@ class RequestHandler(BaseHTTPRequestHandler):
             else:
                 self.send_json({"success": True, "freed": 0,
                                 "freed_human": "0 B", "message": "No cache to clear"})
+
+        elif path == "/api/clear-all-cache":
+            total_freed = cleared = skipped = 0
+            for a in scan_accounts():
+                if a.get("running"):
+                    skipped += 1
+                    continue
+                ok, freed = clear_account_caches(a["path"])
+                if ok and freed > 0:
+                    cleared += 1
+                    total_freed += freed
+            invalidate_scan_cache()
+            with _disk_stats_lock:
+                _disk_stats["ts"] = 0.0   # force a fresh reclaimable-cache number
+            msg = f"Cleared {human_size(total_freed)} across {cleared} account(s)"
+            if skipped:
+                msg += f"; skipped {skipped} running"
+            self.send_json({"success": True, "freed": total_freed,
+                            "freed_human": human_size(total_freed),
+                            "cleared": cleared, "skipped": skipped, "message": msg})
 
         elif path == "/api/setup":
             acc_path = data.get("path", "")

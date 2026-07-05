@@ -1019,6 +1019,7 @@
   <div class="toolbar-sep"></div>
   <button class="btn" onclick="backupAll()" data-tip="Save a backup of every account's session data (tdata)">Backup All</button>
   <button class="btn" onclick="showBackupBrowser()" data-tip="View saved backups and restore one to an account">Browse Backups</button>
+  <button class="btn" onclick="clearAllCaches()" data-tip="Delete regenerable media + mini-app cache from every closed account. Sessions untouched.">🧹 Clear Caches</button>
   <button class="btn" onclick="fixDockNames()" data-tip="Rename each account's app bundle so it shows the account name in the Dock">Fix Dock Names</button>
   <div class="toolbar-sep"></div>
   <button class="btn" onclick="toggleSelectMode()" id="btn-select" data-tip="Select multiple accounts to open together or save as a workspace">Select Mode</button>
@@ -2153,6 +2154,21 @@ async function clearAccountCache(path, name, running) {
   const r = await api("/api/clear-cache", "POST", { path });
   toast(r.message || (r.success ? "Cache cleared" : "Failed"),
         r.success ? "success" : "error");
+  if (r.success) refresh();
+}
+
+async function clearAllCaches() {
+  const reclaimable = _statsData && _statsData.cache_total_human
+    ? ` (about ${_statsData.cache_total_human} reclaimable)` : "";
+  if (!window.confirm(`Clear cached media and mini-app data from all closed accounts${reclaimable}?\n` +
+      `Sessions and messages are untouched. Running accounts are skipped. ` +
+      `Telegram re-downloads cached media on demand.`)) return;
+  const btn = document.querySelector('[onclick="clearAllCaches()"]');
+  if (btn) { btn.disabled = true; btn.textContent = "🧹 Clearing…"; }
+  toast("Clearing caches…", "info", 8000);
+  const r = await api("/api/clear-all-cache", "POST");
+  if (btn) { btn.disabled = false; btn.textContent = "🧹 Clear Caches"; }
+  toast(r.message || (r.success ? "Done" : "Failed"), r.success ? "success" : "error", 6000);
   if (r.success) refresh();
 }
 
