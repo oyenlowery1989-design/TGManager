@@ -50,6 +50,12 @@ _log_handler = RotatingFileHandler(_log_file, maxBytes=2 * 1024 * 1024, backupCo
                                    encoding="utf-8")
 _log_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
 _log.addHandler(_log_handler)
+# The log line records request paths, which contain the secret URL token.
+# Keep it owner-only so another local user/process can't read the token back.
+try:
+    os.chmod(_log_file, 0o600)
+except OSError:
+    pass
 
 DEFAULT_CONFIG = {
     "app_source":            "",
@@ -2822,7 +2828,12 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def log_message(self, fmt, *args):
-        _log.info("%s - %s", self.address_string(), fmt % args)
+        msg = fmt % args
+        # The request line embeds ROUTE_PREFIX (the secret URL token); redact it
+        # so the token never lands in manager.log.
+        if ROUTE_PREFIX:
+            msg = msg.replace(ROUTE_PREFIX + "/", "/").replace(ROUTE_PREFIX, "")
+        _log.info("%s - %s", self.address_string(), msg)
 
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
