@@ -143,8 +143,12 @@ def choose_app_dialog(prompt_text, default_dir="/Applications", timeout=600):
     source contains only values escaped through _as_str() — never raw input.
     """
     lines = ["tell me to activate"]
+    # Filter by UTI plus the plain "app" extension: bundles in unindexed
+    # locations (DMG mounts, freshly copied folders) often have no Spotlight
+    # UTI yet and would show up greyed-out with a UTI-only filter. Anything
+    # picked is still validated by is_allowed_app_source() server-side.
     choose = (
-        'set f to choose file of type {"com.apple.application-bundle"}'
+        'set f to choose file of type {"com.apple.application-bundle", "com.apple.bundle", "app"}'
         " with prompt " + _as_str(prompt_text)
     )
     if os.path.isdir(default_dir):
