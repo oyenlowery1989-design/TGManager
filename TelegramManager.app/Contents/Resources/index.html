@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Telegram Manager</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%23965cf9'/%3E%3Cstop offset='1' stop-color='%234f2795'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='15' fill='url(%23g)'/%3E%3Crect x='15' y='12' width='15' height='10' rx='3' fill='%23c8b3f0'/%3E%3Crect x='34' y='12' width='15' height='10' rx='3' fill='%23f9f7fe'/%3E%3Crect x='15' y='25' width='15' height='10' rx='3' fill='%23c8b3f0'/%3E%3Crect x='34' y='25' width='15' height='10' rx='3' fill='%23c8b3f0'/%3E%3Ctext x='32' y='55' font-family='-apple-system,Helvetica,Arial,sans-serif' font-size='20' font-weight='800' fill='white' text-anchor='middle'%3ETM%3C/text%3E%3C/svg%3E">
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -49,12 +50,15 @@
   .header-logo {
     width: 28px;
     height: 28px;
-    background: var(--accent);
-    border-radius: 6px;
+    background: linear-gradient(135deg, #965cf9, #4f2795);
+    border-radius: 8px;
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 15px;
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: -0.3px;
+    color: #fff;
     flex-shrink: 0;
   }
 
@@ -69,8 +73,24 @@
     font-size: 11px;
     color: var(--text-dim);
     flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .stat-chip {
+    padding: 2px 8px;
+    border-radius: 20px;
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: background 0.12s, border-color 0.12s, color 0.12s;
     white-space: nowrap;
   }
+  .stat-chip:hover { background: rgba(255,255,255,0.06); }
+  .stat-chip.active { border-color: var(--accent); background: rgba(82,136,193,0.15); color: var(--accent); }
+  .stat-chip.stat-chip-static { cursor: default; }
+  .stat-chip.stat-chip-static:hover { background: none; }
 
   /* ── Toolbar ─────────────────────────────────────────────────────────────── */
   .toolbar {
@@ -176,8 +196,43 @@
   .search-box:focus { border-color: var(--accent); }
   .search-box::placeholder { color: var(--text-dim); }
 
+  .sort-select {
+    padding: 7px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: rgba(255,255,255,0.05);
+    color: var(--text);
+    font-size: 13px;
+    outline: none;
+    cursor: pointer;
+    transition: border-color 0.2s;
+  }
+  .sort-select:focus { border-color: var(--accent); }
+
   /* Content */
   #content { padding: 20px 20px 40px; }
+
+  /* Skeleton loading cards */
+  .skeleton-card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    height: 230px;
+    position: relative;
+    overflow: hidden;
+  }
+  .skeleton-card::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.05), transparent);
+    background-size: 200% 100%;
+    animation: skeleton-shimmer 1.6s ease-in-out infinite;
+  }
+  @keyframes skeleton-shimmer {
+    0%   { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+  }
 
   /* Group section */
   .group-section { margin-bottom: 20px; }
@@ -349,6 +404,18 @@
   .card-icon.no_data    { background: #333; }
 
   .card-icon { position: relative; overflow: hidden; }
+  .card-icon img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: inherit;
+    display: block;
+  }
+
+  .card.avatar-drop-target {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
 
   .card-header-text { flex: 1; min-width: 0; }
 
@@ -991,12 +1058,49 @@
   }
 
   .settings-section-title:first-child { margin-top: 0; }
+
+  /* ── Log drawer ─────────────────────────────────────────────────────────── */
+  #log-drawer {
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    height: 40vh;
+    background: var(--toolbar-bg);
+    border-top: 1px solid var(--border);
+    z-index: 150;
+    display: flex;
+    flex-direction: column;
+    transform: translateY(100%);
+    transition: transform 0.2s ease;
+  }
+  #log-drawer.visible { transform: translateY(0); }
+  .log-drawer-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .log-drawer-header h3 { font-size: 13px; margin: 0; }
+  .log-drawer-note { font-size: 11px; color: var(--text-dim); margin-left: auto; }
+  .log-drawer-close { cursor: pointer; font-size: 16px; color: var(--text-dim); }
+  .log-drawer-close:hover { color: var(--text); }
+  #log-drawer-body {
+    flex: 1;
+    overflow: auto;
+    margin: 0;
+    padding: 12px;
+    font-family: ui-monospace, monospace;
+    font-size: 11px;
+    color: var(--text-dim);
+    white-space: pre-wrap;
+  }
 </style>
 </head>
 <body>
 
 <div class="header">
-  <div class="header-logo">✈</div>
+  <div class="header-logo">TM</div>
   <h1>Telegram Manager</h1>
   <div class="header-stats" id="stats"></div>
 </div>
@@ -1007,8 +1111,15 @@
   <button class="btn success" onclick="showNewAccountModal()" id="btn-new-account" data-tip="Create a new account folder and log in">＋ New</button>
 
   <div class="toolbar-spacer"></div>
+  <select class="sort-select" id="sort-select" onchange="setSortMode(this.value)" data-tip="Sort accounts">
+    <option value="custom">Custom order</option>
+    <option value="name">Name A-Z</option>
+    <option value="size">Size (largest)</option>
+    <option value="recent">Last opened</option>
+  </select>
   <input type="text" class="search-box" placeholder="Search accounts…" oninput="filterAccounts(this.value)" id="search">
   <button class="btn" onclick="refresh()" data-tip="Reload account list from disk">↻</button>
+  <button class="btn" onclick="toggleLogDrawer()" id="btn-log" data-tip="View recent activity log">📜 Log</button>
   <button class="btn" onclick="showSettings()" data-tip="Open settings">⚙ Settings</button>
 </div>
 
@@ -1071,12 +1182,26 @@
   <div class="ctx-sep"></div>
 <div class="ctx-item" id="ctx-dock-name">Dock Name</div>
   <div class="ctx-item" id="ctx-proxy">Proxy</div>
+  <div class="ctx-item" id="ctx-set-avatar">🖼 Set Avatar…</div>
+  <div class="ctx-item" id="ctx-remove-avatar" style="display:none">Remove Avatar</div>
   <div class="ctx-item" id="ctx-copy-path">Copy Path</div>
   <div class="ctx-item" id="ctx-reveal">Show in Finder</div>
   <div class="ctx-item" id="ctx-diagnose">Diagnose &amp; Repair</div>
   <div class="ctx-item danger" id="ctx-remove-app" style="display:none">Remove App</div>
   <div class="ctx-sep"></div>
   <div class="ctx-item danger" id="ctx-delete">Delete</div>
+</div>
+
+<input type="file" id="avatar-file-input" accept="image/png,image/jpeg" style="display:none">
+
+<!-- Activity log drawer -->
+<div id="log-drawer">
+  <div class="log-drawer-header">
+    <h3>Activity Log</h3>
+    <span class="log-drawer-note">refreshes every 3s</span>
+    <span class="log-drawer-close" onclick="closeLogDrawer()">✕</span>
+  </div>
+  <pre id="log-drawer-body"></pre>
 </div>
 
 <!-- Rename modal -->
@@ -1433,6 +1558,9 @@
 <script>
 let accounts    = [];
 let searchFilter = "";
+let statusFilter = null;
+let sortMode = localStorage.getItem("tm_sort") || "custom";
+document.getElementById("sort-select").value = sortMode;
 let dragSrc     = null;
 let noteTimers  = {};
 let _keeperInfo = { enabled: false, interval_days: 30 };
@@ -1515,17 +1643,57 @@ function statusClass(acc) {
 
 // ── Rendering ──────────────────────────────────────────────────────────────
 
+function getFilteredAccounts() {
+  return accounts.filter(a => {
+    if (searchFilter) {
+      const q = searchFilter.toLowerCase();
+      const matches = a.name.toLowerCase().includes(q)
+          || (a.username||"").toLowerCase().includes(q)
+          || (a.note||"").toLowerCase().includes(q)
+          || a.rel_path.toLowerCase().includes(q);
+      if (!matches) return false;
+    }
+    if (statusFilter) {
+      if (statusFilter === "running") return a.running;
+      if (statusFilter === "issues") return (a.health||{}).status === "error";
+      return a.status === statusFilter;
+    }
+    return true;
+  });
+}
+
+function setSortMode(mode) {
+  sortMode = mode;
+  localStorage.setItem("tm_sort", mode);
+  renderAccounts();
+}
+
+function sortList(list) {
+  if (sortMode === "name") {
+    return [...list].sort((a, b) => a.name.localeCompare(b.name));
+  }
+  if (sortMode === "size") {
+    return [...list].sort((a, b) => (b.tdata_size||0) - (a.tdata_size||0));
+  }
+  if (sortMode === "recent") {
+    return [...list].sort((a, b) => {
+      const at = a.last_opened ? new Date(a.last_opened).getTime() : -Infinity;
+      const bt = b.last_opened ? new Date(b.last_opened).getTime() : -Infinity;
+      return bt - at;
+    });
+  }
+  return list;
+}
+
+function toggleStatusFilter(key) {
+  statusFilter = statusFilter === key ? null : key;
+  renderAccounts();
+}
+
 function renderAccounts() {
   const content = document.getElementById("content");
 
-  const filtered = accounts.filter(a => {
-    if (!searchFilter) return true;
-    const q = searchFilter.toLowerCase();
-    return a.name.toLowerCase().includes(q)
-        || (a.username||"").toLowerCase().includes(q)
-        || (a.note||"").toLowerCase().includes(q)
-        || a.rel_path.toLowerCase().includes(q);
-  });
+  const filtered = getFilteredAccounts();
 
   if (accounts.length === 0) {
     content.innerHTML = `
@@ -1549,7 +1717,7 @@ function renderAccounts() {
   }
 
   // Separate pinned — they get their own top section AND stay in their original folder
-  const pinned = filtered.filter(a => a.pinned);
+  const pinned = sortList(filtered.filter(a => a.pinned));
 
   // All accounts go into their original groups (pinned included, rendered as ghost copies)
   const groups = {};
@@ -1603,7 +1771,7 @@ function renderAccounts() {
   }
 
   const sections = sortedGroups.map((group, idx) => {
-    const list = groups[group];
+    const list = sortList(groups[group]);
     const running = list.filter(a => a.running).length;
     const isCollapsed = collapsed.has(group);
     const cards = list.map(acc => buildCard(acc, acc.pinned)).join("");
@@ -1729,7 +1897,7 @@ function buildCard(acc, pinnedCopy = false) {
            oncontextmenu="showCtxMenu(event,${esc(JSON.stringify(acc.path))},${esc(JSON.stringify(acc.name))},${acc.running})">
         <div style="display:flex;align-items:center;gap:10px">
           <div class="card-icon ${acc.status}" style="width:28px;height:28px;font-size:14px;border-radius:8px;flex-shrink:0;pointer-events:none">
-            ✈
+            ${acc.avatar ? `<img src="${acc.avatar}" alt="">` : '✈'}
           </div>
           <span style="font-size:13px;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
                 title="${esc(acc.name)}">${esc(acc.name)}</span>
@@ -1755,12 +1923,15 @@ function buildCard(acc, pinnedCopy = false) {
          style="${colorStyle}"
          ondragstart="onDragStart(event)"
          ondragend="onDragEnd(event)"
+         ondragover="onAvatarDragOver(event)"
+         ondragleave="onAvatarDragLeave(event)"
+         ondrop="onAvatarDrop(event, ${esc(JSON.stringify(acc.path))})"
          oncontextmenu="showCtxMenu(event,${esc(JSON.stringify(acc.path))},${esc(JSON.stringify(acc.name))},${acc.running})">
       <span class="drag-handle" onclick="event.stopPropagation()">⠿</span>
       <div class="card-checkbox">✓</div>
       <div class="card-top">
         <div class="card-icon ${acc.status}">
-          ✈
+          ${acc.avatar ? `<img src="${acc.avatar}" alt="">` : '✈'}
         </div>
         <div class="card-header-text">
           <div class="card-name" title="${esc(acc.name)}">${acc.pinned ? '📌 ' : ''}${esc(acc.name)}</div>
@@ -1823,19 +1994,30 @@ function updateStats() {
   const pinned     = accounts.filter(a => a.pinned).length;
   const notRunning = accounts.filter(a => a.status === "ready" && !a.running).length;
 
-  const parts = [`${ready} ready`];
-  if (running)    parts.push(`${running} running`);
-  if (needsSetup) parts.push(`${needsSetup} need setup`);
-  if (issues)     parts.push(`${issues} issues`);
+  const makeChip = (label, key) => {
+    const chip = document.createElement("span");
+    chip.className = "stat-chip" + (statusFilter === key ? " active" : "");
+    chip.textContent = label;
+    chip.onclick = () => toggleStatusFilter(key);
+    return chip;
+  };
+
+  const chips = [makeChip(`${ready} ready`, "ready")];
+  if (running)    chips.push(makeChip(`${running} running`, "running"));
+  if (needsSetup) chips.push(makeChip(`${needsSetup} need setup`, "needs_setup"));
+  if (issues)     chips.push(makeChip(`${issues} issues`, "issues"));
 
   if (_statsData.grand_total_human) {
     const breakdown = [];
     if (_statsData.total_disk_human)  breakdown.push(`accounts ${_statsData.total_disk_human}`);
     if (_statsData.cache_total_human) breakdown.push(`cache ${_statsData.cache_total_human}`);
     if (_statsData.backup_size_human) breakdown.push(`backups ${_statsData.backup_size_human}`);
-    parts.push(`${_statsData.grand_total_human} (${breakdown.join(" · ")})`);
+    const sizeChip = document.createElement("span");
+    sizeChip.className = "stat-chip stat-chip-static";
+    sizeChip.textContent = `${_statsData.grand_total_human} (${breakdown.join(" · ")})`;
+    chips.push(sizeChip);
   }
-  document.getElementById("stats").textContent = parts.join(" · ");
+  document.getElementById("stats").replaceChildren(...chips);
 
   // Show/hide toolbar buttons based on current state
   setVisible("btn-close-all",   running > 0);
@@ -1966,6 +2148,7 @@ function showCtxMenu(e, path, name, running) {
   const sharedStatusEl = document.getElementById("shared-app-status");
   const sharedExists = !!(sharedStatusEl && sharedStatusEl.dataset.sharedExists);
   setVisible("ctx-remove-app", !!(acc && acc.has_app && sharedExists));
+  setVisible("ctx-remove-avatar", !!(acc && acc.avatar));
 
   document.getElementById("ctx-open").onclick = () => {
     hideCtxMenu();
@@ -1997,6 +2180,14 @@ const pinBtn = document.getElementById("ctx-pin");
     hideCtxMenu();
     const acc2 = accounts.find(a => a.path === path);
     showProxyModal(path, acc2 ? acc2.proxy : null);
+  };
+  document.getElementById("ctx-set-avatar").onclick = () => {
+    hideCtxMenu();
+    _ctxAvatarPath = path;
+    document.getElementById("avatar-file-input").click();
+  };
+  document.getElementById("ctx-remove-avatar").onclick = () => {
+    hideCtxMenu(); removeAvatar(path);
   };
   document.getElementById("ctx-copy-path").onclick = () => {
     hideCtxMenu();
@@ -2031,7 +2222,37 @@ function hideCtxMenu() {
 }
 
 document.addEventListener("click", () => { hideCtxMenu(); });
-document.addEventListener("keydown", e => { if (e.key === "Escape") { hideCtxMenu(); } });
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape" && isLogDrawerOpen()) {
+    closeLogDrawer();
+    return;
+  }
+  if (e.key === "Escape") {
+    hideCtxMenu();
+    if (searchFilter) {
+      const searchEl = document.getElementById("search");
+      searchFilter = "";
+      if (searchEl) searchEl.value = "";
+      renderAccounts();
+    }
+    return;
+  }
+
+  if (e.target && e.target.id === "search" && e.key === "Enter") {
+    const first = getFilteredAccounts()[0];
+    if (first) openAccount(first.path);
+    return;
+  }
+
+  const tag = e.target && e.target.tagName;
+  const typing = tag === "INPUT" || tag === "TEXTAREA" || (e.target && e.target.isContentEditable);
+  const modalOpen = document.querySelector(".modal-overlay.active") !== null;
+  if ((e.key === "/" || (e.metaKey && e.key.toLowerCase() === "f")) && !typing && !modalOpen) {
+    e.preventDefault();
+    const searchEl = document.getElementById("search");
+    if (searchEl) searchEl.focus();
+  }
+});
 
 function filterAccounts(val) { searchFilter = val; renderAccounts(); }
 
@@ -3155,6 +3376,111 @@ function getDragAfterElement(grid, y) {
   }, { offset: Number.NEGATIVE_INFINITY }).element || null;
 }
 
+// ── Avatars ────────────────────────────────────────────────────────────────
+
+function uploadAvatar(path, file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    const img = new Image();
+    img.onload = () => {
+      const size = 96;
+      const side = Math.min(img.width, img.height);
+      const sx = (img.width - side) / 2;
+      const sy = (img.height - side) / 2;
+      const canvas = document.createElement("canvas");
+      canvas.width = size;
+      canvas.height = size;
+      canvas.getContext("2d").drawImage(img, sx, sy, side, side, 0, 0, size, size);
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
+      api("/api/set-avatar", "POST", { path, image: dataUrl }).then(d => {
+        if (d.success) { toast("Avatar updated", "success"); refresh(); }
+        else toast(d.message || "Failed to set avatar", "error");
+      });
+    };
+    img.src = reader.result;
+  };
+  reader.readAsDataURL(file);
+}
+
+function removeAvatar(path) {
+  api("/api/set-avatar", "POST", { path, image: "" }).then(d => {
+    if (d.success) { toast("Avatar removed", "success"); refresh(); }
+    else toast(d.message || "Failed to remove avatar", "error");
+  });
+}
+
+function onAvatarDragOver(e) {
+  if (!e.dataTransfer.types.includes("Files")) return;
+  e.preventDefault();
+  e.stopPropagation();
+  e.currentTarget.classList.add("avatar-drop-target");
+}
+
+function onAvatarDragLeave(e) {
+  if (!e.currentTarget.contains(e.relatedTarget)) {
+    e.currentTarget.classList.remove("avatar-drop-target");
+  }
+}
+
+function onAvatarDrop(e, path) {
+  if (!e.dataTransfer.types.includes("Files")) return;
+  e.preventDefault();
+  e.stopPropagation();
+  e.currentTarget.classList.remove("avatar-drop-target");
+  const file = e.dataTransfer.files[0];
+  if (!file) return;
+  if (!/^image\/(png|jpeg)$/.test(file.type)) {
+    toast("Only PNG or JPEG images are supported", "warning");
+    return;
+  }
+  uploadAvatar(path, file);
+}
+
+let _ctxAvatarPath = null;
+document.getElementById("avatar-file-input").addEventListener("change", e => {
+  const file = e.target.files[0];
+  e.target.value = "";
+  if (file && _ctxAvatarPath) uploadAvatar(_ctxAvatarPath, file);
+});
+
+// ── Activity log drawer ─────────────────────────────────────────────────────
+
+let _logDrawerTimer = null;
+
+function isLogDrawerOpen() {
+  return document.getElementById("log-drawer").classList.contains("visible");
+}
+
+async function refreshLogDrawer() {
+  const pre = document.getElementById("log-drawer-body");
+  const stickToBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 4;
+  const d = await api("/api/logs?lines=300");
+  if (d && Array.isArray(d.lines)) {
+    pre.textContent = d.lines.join("");
+    if (stickToBottom) pre.scrollTop = pre.scrollHeight;
+  }
+}
+
+function openLogDrawer() {
+  document.getElementById("log-drawer").classList.add("visible");
+  refreshLogDrawer();
+  const pre = document.getElementById("log-drawer-body");
+  pre.scrollTop = pre.scrollHeight;
+  clearInterval(_logDrawerTimer);
+  _logDrawerTimer = setInterval(refreshLogDrawer, 3000);
+}
+
+function closeLogDrawer() {
+  document.getElementById("log-drawer").classList.remove("visible");
+  clearInterval(_logDrawerTimer);
+  _logDrawerTimer = null;
+}
+
+function toggleLogDrawer() {
+  if (isLogDrawerOpen()) closeLogDrawer();
+  else openLogDrawer();
+}
+
 // ── Password lock ─────────────────────────────────────────────────────────
 
 let _lockConfig = { hash: null, salt: '', hint: '', timeout: 5 };
@@ -3637,9 +3963,22 @@ async function runRepair() {
 
 // ── Boot ─────────────────────────────────────────────────────────────────
 
+function renderSkeletons() {
+  const content = document.getElementById("content");
+  const grid = document.createElement("div");
+  grid.className = "group-grid";
+  for (let i = 0; i < 6; i++) {
+    const card = document.createElement("div");
+    card.className = "skeleton-card";
+    grid.appendChild(card);
+  }
+  content.replaceChildren(grid);
+}
+
 // On first load, retry until the Python server is ready (takes ~1-2s to start).
 (async function boot() {
   const content = document.getElementById("content");
+  renderSkeletons();
   for (let attempt = 0; attempt < 20; attempt++) {
     const r = await api("/api/accounts");
     if (r && !r._networkError && Array.isArray(r)) {

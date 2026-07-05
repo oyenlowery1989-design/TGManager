@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Telegram Manager - Backend Server v2"""
 
+import base64
 import copy
 import functools
 import json
@@ -291,7 +292,7 @@ def load_metadata():
     data, source = _load_json_file_with_fallbacks(
         METADATA_FILE,
         {"notes": {}, "usernames": {}, "order": {}, "colors": {},
-         "last_opened": {}, "pinned": [], "proxies": {}},
+         "last_opened": {}, "pinned": [], "proxies": {}, "avatars": {}},
         (LEGACY_METADATA_FILE,)
     )
     if source == LEGACY_METADATA_FILE and METADATA_FILE != LEGACY_METADATA_FILE:
@@ -699,6 +700,7 @@ def scan_accounts():
                     "proxy":            _meta.get("proxies",      {}).get(full_path),
 "uses_shared_app":  not has_app and bool(_shared_app),
                     "dock_name":        _meta.get("dock_names",    {}).get(full_path, ""),
+                    "avatar":           _meta.get("avatars",       {}).get(full_path, ""),
                     "health":           health,
                 })
             else:
@@ -1538,7 +1540,8 @@ def _validate_import_payload(data):
 
     allowed_metadata = {
         "notes": {}, "usernames": {}, "order": {}, "colors": {},
-        "last_opened": {}, "pinned": [], "proxies": {}, "dock_names": {}
+        "last_opened": {}, "pinned": [], "proxies": {}, "dock_names": {},
+        "avatars": {}
     }
     cleaned_metadata = {}
 
@@ -1869,7 +1872,7 @@ def rename_account(old_path, new_name):
     with _meta_lock:
         new_meta = copy.deepcopy(metadata)
     for section in ("notes", "usernames", "order", "colors",
-                    "last_opened", "proxies", "dock_names"):
+                    "last_opened", "proxies", "dock_names", "avatars"):
         d = new_meta.get(section, {})
         if old_path in d:
             d[new_path] = d.pop(old_path)
@@ -2625,6 +2628,20 @@ class RequestHandler(BaseHTTPRequestHandler):
                 "sibling_path":       SIBLING_APP,
             })
 
+        elif path == "/api/logs":
+            qs = parse_qs(urlparse(self.path).query)
+            try:
+                n_lines = int(qs.get("lines", ["200"])[0])
+            except ValueError:
+                n_lines = 200
+            n_lines = max(1, min(1000, n_lines))
+            if os.path.isfile(_log_file):
+                with open(_log_file, "r", errors="replace") as f:
+                    lines = f.readlines()[-n_lines:]
+                self.send_json({"lines": lines})
+            else:
+                self.send_json({"lines": []})
+
         elif path in ("/", "/index.html"):
             self.serve_file("index.html", "text/html")
         else:
@@ -2923,6 +2940,33 @@ class RequestHandler(BaseHTTPRequestHandler):
             invalidate_scan_cache()
             self.send_json({"success": True})
 
+        elif path == "/api/set-avatar":
+            acc_path = data.get("path", "")
+            image    = data.get("image", "")
+            if not is_safe_path(acc_path):
+                self.send_json({"success": False, "message": "Invalid path"}); return
+            if image:
+                prefix = None
+                for p in ("data:image/jpeg;base64,", "data:image/png;base64,"):
+                    if image.startswith(p):
+                        prefix = p
+                        break
+                if prefix is None:
+                    self.send_json({"success": False, "message": "Invalid image"}); return
+                try:
+                    decoded = base64.b64decode(image[len(prefix):], validate=True)
+                except Exception:
+                    self.send_json({"success": False, "message": "Invalid image"}); return
+                if len(decoded) > 300_000:
+                    self.send_json({"success": False, "message": "Image too large"}); return
+            with _meta_lock:
+                if image:
+                    metadata.setdefault("avatars", {})[acc_path] = image
+                else:
+                    metadata.get("avatars", {}).pop(acc_path, None)
+                save_metadata(metadata)
+            self.send_json({"success": True})
+
         elif path == "/api/restore":
             backup_path  = data.get("backup_path", "")
             account_path = data.get("account_path", "")
@@ -3035,7 +3079,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                         with _meta_lock:
                             for section in ("notes", "usernames", "order",
                                             "colors", "last_opened", "dock_names",
-                                            "proxies"):
+                                            "proxies", "avatars"):
                                 metadata.get(section, {}).pop(acc_path, None)
                             pinned = metadata.get("pinned", [])
                             if acc_path in pinned:
