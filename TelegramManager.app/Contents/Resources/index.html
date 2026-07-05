@@ -1314,9 +1314,7 @@
     <!-- Tab: General -->
     <div class="settings-panel active" id="stab-general">
       <div class="modal-info" id="cfg-root-display"></div>
-      <p class="settings-section-title">Telegram app source</p>
-      <label>Path to Telegram.app used when creating accounts:</label>
-      <input type="text" id="cfg-app-source" placeholder="/Applications/Telegram.app">
+      <p style="font-size:11px;color:var(--text-dim);margin-bottom:10px;line-height:1.5">The Telegram app used for accounts is managed in <strong>Advanced → Shared App</strong>.</p>
       <p class="settings-section-title">Extra scan folders</p>
       <label style="color:var(--text-dim);font-size:11px">One per line — scanned in addition to the root folder:</label>
       <textarea id="cfg-extra-dirs" rows="3" style="width:100%;padding:9px 13px;border:1px solid var(--border);border-radius:6px;background:rgba(255,255,255,0.05);color:var(--text);font-size:12px;font-family:monospace;resize:vertical;outline:none;margin-bottom:0" placeholder="/Volumes/MySSD/Accounts&#10;~/Documents/Telegrams"></textarea>
@@ -2797,7 +2795,6 @@ function showSettings() {
   api("/api/config").then(cfg => {
     document.getElementById("cfg-root-display").textContent =
       "Root folder: " + (cfg.root_dir || "(auto-detected)");
-    document.getElementById("cfg-app-source").value = cfg.app_source || "";
     document.getElementById("cfg-extra-dirs").value = (cfg.extra_scan_dirs || []).join("\n");
     document.getElementById("cfg-keeper-enabled").checked = !!cfg.keeper_enabled;
     document.getElementById("cfg-proxy-apply").checked = !!cfg.proxy_system_apply;
@@ -2829,7 +2826,6 @@ function switchSettingsTab(name, btn) {
 }
 
 async function saveSettings() {
-  const app_source          = document.getElementById("cfg-app-source").value.trim();
   const extra_scan_dirs     = document.getElementById("cfg-extra-dirs").value
                                 .split("\n").map(s => s.trim()).filter(Boolean);
   const keeper_enabled      = document.getElementById("cfg-keeper-enabled").checked;
@@ -2841,7 +2837,7 @@ async function saveSettings() {
   const lock_timeout_minutes = parseInt(document.getElementById("cfg-lock-timeout").value) || 0;
   const backup_keep_per_account = parseInt(document.getElementById("cfg-backup-keep").value, 10) || 0;
   const r = await api("/api/config", "POST", {
-    app_source, extra_scan_dirs,
+    extra_scan_dirs,
     keeper_enabled, keeper_interval_days, keeper_open_seconds,
     proxy_system_apply,
     auto_clear_cache_mb,
@@ -2851,7 +2847,9 @@ async function saveSettings() {
   hideSettings();
   _lockConfig.timeout = lock_timeout_minutes;
   resetIdleTimer();
-  if (r.bad_dirs && r.bad_dirs.length) {
+  if (r.rejected && r.rejected.length) {
+    toast(`Some settings were NOT saved — ${r.rejected.join("; ")}`, "error", 10000);
+  } else if (r.bad_dirs && r.bad_dirs.length) {
     toast(`Settings saved — but ${r.bad_dirs.length} extra folder${r.bad_dirs.length > 1 ? "s" : ""} not found: ${r.bad_dirs.join(", ")}`, "warning", 7000);
   } else {
     toast("Settings saved ✓", "success");
@@ -2911,8 +2909,9 @@ async function loadSharedAppStatus() {
       ? ` · ${r.own_count} account${r.own_count !== 1 ? "s" : ""} still have own copy (${esc(r.total_size_human)} recoverable)`
       : ` · All accounts use shared app — no duplicates`;
     const pathLine = `<br><span style="color:var(--text-dim);font-size:11px">Path: ${esc(r.shared_path)}</span>`;
+    const howLine  = `<br><span style="color:var(--text-dim);font-size:11px">Each account clones this app when opened (the clone is deleted after it quits). Replace it with “Choose App…” — accounts pick up the new version on their next open.</span>`;
     el.innerHTML =
-      `<span style="color:var(--green)">✓ Shared Telegram.app active</span>${savings}${pathLine}`;
+      `<span style="color:var(--green)">✓ Shared Telegram.app active</span>${savings}${pathLine}${howLine}`;
   } else {
     const count  = accounts.length;
     const approxGB = ((count * 435) / 1024).toFixed(1);

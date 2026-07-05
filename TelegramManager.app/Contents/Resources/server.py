@@ -5,6 +5,7 @@ import copy
 import functools
 import json
 import os
+import plistlib
 import shlex
 import subprocess
 import threading
@@ -382,6 +383,15 @@ def get_shared_app():
     if os.path.isdir(SIBLING_APP):
         return SIBLING_APP
     return None
+
+def _bundle_version(app_path):
+    """Return CFBundleShortVersionString of an .app bundle, or None."""
+    try:
+        with open(os.path.join(app_path, "Contents", "Info.plist"), "rb") as f:
+            return plistlib.load(f).get("CFBundleShortVersionString")
+    except Exception:
+        return None
+
 
 def clone_app_to_folder(account_path, shared_app_path=None, app_name=None):
     """Clone the shared Telegram.app into account_path.
@@ -981,6 +991,16 @@ def open_account(path):
         _log.info("open_account: already running for %s", path)
         return True, "already running"
     app = find_account_app(path)
+    # A leftover clone from an older master would silently launch the old
+    # version forever — replace it when its version differs from the master.
+    shared = get_shared_app()
+    if app and shared:
+        clone_v, master_v = _bundle_version(app), _bundle_version(shared)
+        if clone_v and master_v and clone_v != master_v:
+            _log.info("open_account: replacing stale clone v%s with master v%s for %s",
+                      clone_v, master_v, path)
+            subprocess.run(["rm", "-rf", app], capture_output=True, timeout=300)
+            app = None
     if not app:
         with _meta_lock:
             dock_name = metadata.get("dock_names", {}).get(path) or os.path.basename(path)
@@ -3005,6 +3025,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                          "auto_clear_cache_mb", "backup_keep_per_account",
                          "lock_timeout_minutes")
             bool_keys = ("keeper_enabled", "proxy_system_apply")
+            rejected  = []   # keys silently dropping a value would hide real errors from the UI
             with _config_lock:
                 for k in ("app_source", "extra_scan_dirs",
                           "keeper_enabled", "keeper_interval_days", "keeper_open_seconds",
@@ -3024,12 +3045,16 @@ class RequestHandler(BaseHTTPRequestHandler):
                             v = int(v)
                         except (TypeError, ValueError):
                             _log.warning("config: ignoring non-integer %s=%r", k, v)
+                            rejected.append(f"{k}: not a number")
                             continue
                     elif k == "app_source" and v and not is_allowed_app_source(v):
                         # app_source is later copied + quarantine-stripped + launched,
                         # so a token-only caller must not be able to set it to an
                         # arbitrary path. Empty = clear (falls back to auto-detect).
                         _log.warning("config: rejecting untrusted app_source=%r", v)
+                        rejected.append("app_source: path is not in a trusted location "
+                                        "(/Applications, the accounts folder, or data/) — "
+                                        "use “Choose App…” in Advanced → Shared App instead")
                         continue
                     config[k] = v
                 save_config(config)
@@ -3039,7 +3064,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 d for d in config.get("extra_scan_dirs", [])
                 if d and not os.path.isdir(os.path.expanduser(d))
             ]
-            self.send_json({"success": True, "bad_dirs": bad_dirs})
+            self.send_json({"success": True, "bad_dirs": bad_dirs, "rejected": rejected})
 
 
         elif path == "/api/shared-app/setup":
