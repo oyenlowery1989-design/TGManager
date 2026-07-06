@@ -33,25 +33,33 @@ def run_keeper_loop():
     CHECK_INTERVAL = 3600   # check every hour
 
     while True:
-        now_ts = time.time()
-        _keeper_status["next_check"] = datetime.fromtimestamp(now_ts + CHECK_INTERVAL).isoformat()
+        try:
+            if state.config.get("keeper_enabled", False):
+                if _keeper_lock.acquire(blocking=False):
+                    try:
+                        interval_days = state.config.get("keeper_interval_days", 30)
+                        open_secs     = state.config.get("keeper_open_seconds", 120)
 
-        if state.config.get("keeper_enabled", False):
-            if _keeper_lock.acquire(blocking=False):
-                try:
-                    interval_days = state.config.get("keeper_interval_days", 30)
-                    open_secs     = state.config.get("keeper_open_seconds", 120)
+                        _keeper_status["running"]  = True
+                        _keeper_status["last_run"] = datetime.now().isoformat()
 
-                    _keeper_status["running"]  = True
-                    _keeper_status["last_run"] = datetime.now().isoformat()
+                        _run_keeper_pass(interval_days, open_secs)
+                    finally:
+                        _keeper_status["running"] = False
+                        _keeper_lock.release()
+                else:
+                    state._log.info("run_keeper_loop: keeper already running — skipping this cycle")
+        except Exception as e:
+            # An unhandled exception here (e.g. a bad keeper_open_seconds
+            # making time.sleep() raise) must not silently kill this thread
+            # for the rest of the process — same reasoning as the sibling
+            # _app_watcher_loop in server.py.
+            state._log.warning("run_keeper_loop: unhandled error: %s", e, exc_info=True)
 
-                    _run_keeper_pass(interval_days, open_secs)
-                finally:
-                    _keeper_status["running"] = False
-                    _keeper_lock.release()
-            else:
-                state._log.info("run_keeper_loop: keeper already running — skipping this cycle")
-
+        # Computed AFTER the pass (which can itself take a while — roughly
+        # N_due_accounts * (open_secs + 5) seconds) so it reflects the real
+        # next check time instead of under-reporting it by the pass duration.
+        _keeper_status["next_check"] = datetime.fromtimestamp(time.time() + CHECK_INTERVAL).isoformat()
         # Sleep at the END so the first check runs immediately on startup.
         time.sleep(CHECK_INTERVAL)
 
@@ -84,6 +92,16 @@ def _run_keeper_pass(interval_days, open_secs):
             if not ok:
                 state._log.error("Keeper: failed to open %s: %s", acc["name"], msg)
                 continue
+            if msg == "already running":
+                # open_account() re-checks is_running() live, right now — not
+                # the possibly-minutes-stale acc["running"] snapshot from the
+                # top of this pass. Someone (the user, most likely) already
+                # has this open; count it as a keepalive but do NOT kill a
+                # session this pass didn't itself start.
+                with state._meta_lock:
+                    state.metadata.setdefault("last_opened", {})[acc["path"]] = datetime.now().isoformat()
+                    state.save_metadata(state.metadata)
+                continue
             try:
                 time.sleep(open_secs)
             finally:
@@ -99,6 +117,8 @@ def trigger_keeper_now():
     Returns (started, message). If a keeper pass is already in progress the
     request is rejected rather than running a second concurrent pass.
     """
+    if not state.config.get("keeper_enabled", False):
+        return False, "Session Keeper is turned off"
     if not _keeper_lock.acquire(blocking=False):
         state._log.info("trigger_keeper_now: keeper already running — request ignored")
         return False, "keeper already running"

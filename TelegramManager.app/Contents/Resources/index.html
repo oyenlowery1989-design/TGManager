@@ -450,20 +450,6 @@
   .status-badge.needs-setup { color: var(--yellow); }
   .status-badge.no-data    { color: var(--text-dim); }
 
-  /* Username line */
-  .card-username {
-    font-size: 12px;
-    color: var(--accent);
-    font-family: 'SF Mono', 'Menlo', monospace;
-    margin-bottom: 8px;
-    min-height: 16px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .card-username:empty { display: none; }
-
   /* Meta row */
   .card-meta {
     display: flex;
@@ -725,9 +711,6 @@
   }
   .color-swatch:hover { transform: scale(1.25); border-color: rgba(255,255,255,0.5); }
   .color-swatch.none { background: rgba(255,255,255,0.08); border: 2px dashed #4a4a4a; }
-
-  /* Colored card left border */
-  .card[data-color] { border-left-width: 3px; }
 
   /* Health indicator */
   .health-dot {
@@ -1108,7 +1091,7 @@
 <div class="toolbar">
   <button class="btn primary" onclick="openAll()" id="btn-open-all" data-tip="Launch Telegram for all ready accounts">▶ Open All</button>
   <button class="btn danger" onclick="closeAll()" id="btn-close-all" data-tip="Kill all running Telegram instances">■ Close All</button>
-  <button class="btn success" onclick="showNewAccountModal()" id="btn-new-account" data-tip="Create a new account folder and log in">＋ New</button>
+  <button class="btn success" onclick="showNewAccountModal()" data-tip="Create a new account folder and log in">＋ New</button>
 
   <div class="toolbar-spacer"></div>
   <select class="sort-select" id="sort-select" onchange="setSortMode(this.value)" data-tip="Sort accounts">
@@ -1119,11 +1102,11 @@
   </select>
   <input type="text" class="search-box" placeholder="Search accounts…" oninput="filterAccounts(this.value)" id="search">
   <button class="btn" onclick="refresh()" data-tip="Reload account list from disk">↻</button>
-  <button class="btn" onclick="toggleLogDrawer()" id="btn-log" data-tip="View recent activity log">📜 Log</button>
+  <button class="btn" onclick="toggleLogDrawer()" data-tip="View recent activity log">📜 Log</button>
   <button class="btn" onclick="showSettings()" data-tip="Open settings">⚙ Settings</button>
 </div>
 
-<div class="toolbar-expanded" id="toolbar-overflow">
+<div class="toolbar-expanded">
   <button class="btn" onclick="openPinned()" id="btn-open-pinned" data-tip="Launch only pinned accounts">Open Pinned</button>
   <button class="btn" onclick="setupAll()" data-tip="Copy Telegram.app into accounts that are missing it">Setup</button>
   <button class="btn" onclick="updateAll()" data-tip="Replace all per-account Telegram.app copies with the latest version from your source">Update All</button>
@@ -1349,7 +1332,7 @@
         <div style="margin-top:4px;font-size:13px;color:var(--muted)">The account looks healthy. Try opening it again.</div>
       </div>
 
-      <div class="modal-actions" id="diagnose-close-row" style="margin-top:16px">
+      <div class="modal-actions" style="margin-top:16px">
         <button class="btn" onclick="hideDiagnoseModal()">Close</button>
         <button class="btn" onclick="rerunDiagnose()" style="margin-left:auto">↺ Re-scan</button>
       </div>
@@ -1362,7 +1345,7 @@
   <div class="modal" style="width:560px">
     <h2>📂 Backup Browser</h2>
     <input type="text" id="backup-filter" placeholder="Filter by account…" oninput="renderBackupList()" style="width:100%;box-sizing:border-box;padding:8px 12px;margin-bottom:10px;border:1px solid var(--border);border-radius:8px;background:rgba(255,255,255,0.05);color:var(--text);font-size:13px;outline:none">
-    <div id="backup-list-wrap">
+    <div>
       <div class="backup-list" id="backup-list"><div style="padding:20px;text-align:center;color:var(--text-dim)">Loading backups…</div></div>
     </div>
     <p style="font-size:11px;color:var(--text-dim);line-height:1.6;margin-bottom:14px">
@@ -1633,6 +1616,14 @@ function toast(msg, type = "info", duration = 4000) {
   c.appendChild(el);
 }
 
+// Shared by the several call sites whose result-toast is exactly
+// "server message, else a canned ok/fail string, colored by r.success" —
+// sites with a genuinely different message shape (e.g. one that also
+// appends r.backup_path) stay as their own explicit toast() call.
+function toastResult(r, okMsg, failMsg, duration) {
+  toast(r.message || (r.success ? okMsg : failMsg), r.success ? "success" : "error", duration);
+}
+
 function esc(s) {
   return String(s)
     .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
@@ -1701,6 +1692,15 @@ function toggleStatusFilter(key) {
 }
 
 function renderAccounts() {
+  // A full DOM rebuild while a native drag is in progress detaches dragSrc
+  // (onDragStart's live node reference) from the document; onDrop then
+  // re-inserts that stale, listener-less node into the freshly built grid —
+  // the account visibly duplicates and its note textarea silently stops
+  // autosaving. Any render triggered mid-drag (poller tick, another action)
+  // defers instead; onDragEnd's own listener cleanup still runs normally,
+  // and the next poll/action re-render fires once the drag ends.
+  if (dragSrc) return;
+
   const content = document.getElementById("content");
 
   const filtered = getFilteredAccounts();
@@ -2055,6 +2055,22 @@ function setServerDisconnected(down) {
 
 let _refreshing = false;   // guard against concurrent auto-refreshes
 
+// Shared by refresh() and the auto-refresh poller below: flushes in-progress
+// textarea edits into accounts[], then carries local note/username edits
+// over onto the freshly-fetched list (a Map keyed by path avoids an O(n)
+// .find() per account on every poll tick).
+function mergeLocalEdits(fresh) {
+  accounts.forEach(acc => {
+    const ta = document.getElementById("note-" + pathKey(acc.path));
+    if (ta) acc.note = ta.value;
+  });
+  const byPath = new Map(accounts.map(a => [a.path, a]));
+  fresh.forEach(fa => {
+    const old = byPath.get(fa.path);
+    if (old) { fa.note = old.note; fa.username = old.username; }
+  });
+}
+
 async function refresh() {
   if (_refreshing) return;
   _refreshing = true;
@@ -2070,18 +2086,7 @@ async function refresh() {
       return;
     }
     setServerDisconnected(false);
-    // Flush any in-progress textarea edits into accounts[] before we transfer
-    // them to fresh[] — otherwise mid-typing text is lost when renderAccounts()
-    // rebuilds the DOM and restores from acc.note (the last-saved value).
-    accounts.forEach(acc => {
-      const ta = document.getElementById("note-" + pathKey(acc.path));
-      if (ta) acc.note = ta.value;
-    });
-    // Preserve local edits (note, username) in the refreshed data
-    fresh.forEach(fa => {
-      const old = accounts.find(a => a.path === fa.path);
-      if (old) { fa.note = old.note; fa.username = old.username; }
-    });
+    mergeLocalEdits(fresh);
     accounts = fresh;
     if (stats) _statsData = stats;
     renderAccounts();
@@ -2138,12 +2143,9 @@ async function saveUsername(path, username) {
 
 // ── Right-click context menu ───────────────────────────────────────────────
 
-let ctxTarget = null;
-
 function showCtxMenu(e, path, name, running) {
   e.preventDefault();
   e.stopPropagation();
-  ctxTarget = { path, name, running };
 
   const menu = document.getElementById("ctx-menu");
   menu.classList.add("visible");
@@ -2238,7 +2240,6 @@ const pinBtn = document.getElementById("ctx-pin");
 
 function hideCtxMenu() {
   document.getElementById("ctx-menu").classList.remove("visible");
-  ctxTarget = null;
 }
 
 document.addEventListener("click", () => { hideCtxMenu(); });
@@ -2254,6 +2255,15 @@ const _MODAL_HIDE_FNS = {
   "proxy-modal":        hideProxyModal,
   "settings-modal":     hideSettings,
 };
+
+// Click on the dark backdrop (not the dialog itself) dismisses the open
+// modal — one shared loop over _MODAL_HIDE_FNS instead of a duplicated
+// listener per modal, so a new modal added to the map above gets this for
+// free instead of needing its own copy-pasted listener.
+Object.entries(_MODAL_HIDE_FNS).forEach(([id, hide]) => {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener("click", e => { if (e.target === e.currentTarget) hide(); });
+});
 
 document.addEventListener("keydown", e => {
   if (e.key === "Escape" && isLogDrawerOpen()) {
@@ -2388,7 +2398,7 @@ async function setupAll() {
 async function updateAll() {
   toast("Checking that all accounts are closed, then updating Telegram apps…", "info", 7000);
   const r = await api("/api/update-all", "POST");
-  toast(r.message || (r.success ? "Done" : "Failed"), r.success ? "success" : "error");
+  toastResult(r, "Done", "Failed");
 }
 
 async function backupAccount(path, name) {
@@ -2405,8 +2415,7 @@ async function clearAccountCache(path, name, running) {
   }
   toast(`Clearing cache for ${name}… (sessions and messages are untouched)`, "info");
   const r = await api("/api/clear-cache", "POST", { path });
-  toast(r.message || (r.success ? "Cache cleared" : "Failed"),
-        r.success ? "success" : "error");
+  toastResult(r, "Cache cleared", "Failed");
   if (r.success) refresh();
 }
 
@@ -2416,7 +2425,7 @@ async function clearAllCaches() {
   toast("Clearing caches…", "info", 8000);
   const r = await api("/api/clear-all-cache", "POST");
   if (btn) { btn.disabled = false; btn.textContent = "🧹 Clear Caches"; }
-  toast(r.message || (r.success ? "Done" : "Failed"), r.success ? "success" : "error", 6000);
+  toastResult(r, "Done", "Failed", 6000);
   if (r.success) refresh();
 }
 
@@ -2477,11 +2486,17 @@ function hideDockNameModal() {
 
 async function confirmDockName(forcedValue) {
   if (!dockNameTarget) return;
+  const path = dockNameTarget;
+  dockNameTarget = null;   // guard against a fast double-Enter firing a second concurrent request
   const dock_name = forcedValue !== undefined ? forcedValue
                     : document.getElementById("dock-name-input").value.trim();
-  const r = await api("/api/dock-name", "POST", { path: dockNameTarget, dock_name });
-  if (!r.success) { toast(r.message || "Failed to set dock name", "error"); return; }
-  const acc = accounts.find(a => a.path === dockNameTarget);
+  const r = await api("/api/dock-name", "POST", { path, dock_name });
+  if (!r.success) {
+    toast(r.message || "Failed to set dock name", "error");
+    dockNameTarget = path;   // failed — modal stays open (unchanged behavior), allow retry
+    return;
+  }
+  const acc = accounts.find(a => a.path === path);
   if (acc) acc.dock_name = dock_name;
   hideDockNameModal();
   toast(dock_name ? `App name set to "${dock_name}"` : "App name reset to folder name", "success");
@@ -2489,9 +2504,6 @@ async function confirmDockName(forcedValue) {
   setTimeout(refresh, 600);
 }
 
-document.getElementById("dock-name-modal").addEventListener("click", e => {
-  if (e.target === e.currentTarget) hideDockNameModal();
-});
 document.getElementById("dock-name-input").addEventListener("keydown", e => {
   if (e.key === "Enter") confirmDockName();
   if (e.key === "Escape") hideDockNameModal();
@@ -2518,7 +2530,9 @@ async function confirmRename() {
   if (!renameTarget) return;
   const new_name = document.getElementById("rename-input").value.trim();
   if (!new_name) return;
-  const r = await api("/api/rename", "POST", { path: renameTarget, new_name });
+  const path = renameTarget;
+  renameTarget = null;   // guard against a fast double-Enter firing a second concurrent request
+  const r = await api("/api/rename", "POST", { path, new_name });
   hideRename();
   if (r.success) {
     toast(`Renamed to "${new_name}"`, "success");
@@ -2528,9 +2542,6 @@ async function confirmRename() {
   }
 }
 
-document.getElementById("rename-modal").addEventListener("click", e => {
-  if (e.target === e.currentTarget) hideRename();
-});
 document.getElementById("rename-input").addEventListener("keydown", e => {
   if (e.key === "Enter") confirmRename();
   if (e.key === "Escape") hideRename();
@@ -2639,9 +2650,6 @@ async function confirmSaveWorkspace() {
   }
 }
 
-document.getElementById("workspace-modal").addEventListener("click", e => {
-  if (e.target === e.currentTarget) hideWorkspaceModal();
-});
 document.getElementById("ws-name-input").addEventListener("keydown", e => {
   if (e.key === "Enter") confirmSaveWorkspace();
   if (e.key === "Escape") hideWorkspaceModal();
@@ -2681,8 +2689,8 @@ async function deleteWorkspace(name) {
 // ── Session Keeper ─────────────────────────────────────────────────────────
 
 async function runKeeperNow() {
-  await api("/api/keeper/run-now", "POST");
-  toast("Keeper started — opening accounts due for keepalive…", "info");
+  const r = await api("/api/keeper/run-now", "POST");
+  toastResult(r, "Keeper started — opening accounts due for keepalive…", "Could not start keeper");
   setTimeout(loadKeeperStatus, 2000);
 }
 
@@ -2780,16 +2788,15 @@ async function confirmDelete() {
   }
 }
 
-document.getElementById("delete-modal").addEventListener("click", e => {
-  if (e.target === e.currentTarget) hideDeleteModal();
-});
 
 // ── New Account ────────────────────────────────────────────────────────────
 
 const BAD_NAME_CHARS = /[\/\\:*?"<>|]/;
+let _creatingAccount = false;   // guards confirmNewAccount against a fast double-Enter/click
 
 async function showNewAccountModal() {
   // Reset form
+  _creatingAccount = false;
   document.getElementById("new-account-name").value = "";
   document.getElementById("new-account-name-error").style.display = "none";
   document.getElementById("new-account-creating").style.display = "none";
@@ -2837,6 +2844,13 @@ function validateNewAccountName(val) {
 }
 
 async function confirmNewAccount() {
+  // The name input's Enter-key handler stays live while the request is in
+  // flight (only the button row is hidden) — without this guard a fast
+  // double-Enter fires two concurrent /api/create-account calls, and
+  // create_account()'s unlocked exists-check + cp -R can race two copies
+  // into the same destination folder.
+  if (_creatingAccount) return;
+
   const name       = document.getElementById("new-account-name").value.trim();
   const parentPath = document.getElementById("new-account-group").value;
 
@@ -2847,6 +2861,7 @@ async function confirmNewAccount() {
     return;
   }
 
+  _creatingAccount = true;
   // Show progress
   document.getElementById("new-account-creating").style.display = "block";
   document.getElementById("new-account-actions").style.display = "none";
@@ -2856,6 +2871,7 @@ async function confirmNewAccount() {
     parent_path: parentPath,
     open_after: true,
   });
+  _creatingAccount = false;
 
   if (!r.success) {
     // Show error, restore form
@@ -2872,9 +2888,6 @@ async function confirmNewAccount() {
   setTimeout(refresh, 3000);   // refresh after Telegram has had a moment to appear
 }
 
-document.getElementById("new-account-modal").addEventListener("click", e => {
-  if (e.target === e.currentTarget) hideNewAccountModal();
-});
 document.getElementById("new-account-name").addEventListener("keydown", e => {
   if (e.key === "Escape") hideNewAccountModal();
 });
@@ -2975,16 +2988,10 @@ async function confirmRestore() {
   hideBackupBrowser();
   toast(`Restoring ${label}…`, "info");
   const r = await api("/api/restore", "POST", { backup_path, account_path });
-  toast(r.message || (r.success ? "Restored!" : "Restore failed"), r.success ? "success" : "error");
+  toastResult(r, "Restored!", "Restore failed");
   if (r.success) await refresh();
 }
 
-document.getElementById("backup-modal").addEventListener("click", e => {
-  if (e.target === e.currentTarget) hideBackupBrowser();
-});
-document.getElementById("restore-modal").addEventListener("click", e => {
-  if (e.target === e.currentTarget) hideRestoreModal();
-});
 
 // ── Proxy ──────────────────────────────────────────────────────────────────
 
@@ -3039,9 +3046,6 @@ async function saveProxy(forcedNull) {
   renderAccounts();
 }
 
-document.getElementById("proxy-modal").addEventListener("click", e => {
-  if (e.target === e.currentTarget) hideProxyModal();
-});
 
 
 // ── Settings ───────────────────────────────────────────────────────────────
@@ -3112,9 +3116,6 @@ async function saveSettings() {
   await refresh();
 }
 
-document.getElementById("settings-modal").addEventListener("click", e => {
-  if (e.target === e.currentTarget) hideSettings();
-});
 
 async function exportConfig() {
   const r = await api("/api/export-config");
@@ -3352,6 +3353,14 @@ function onDragEnd(e) {
   e.currentTarget.classList.remove("dragging");
   document.querySelectorAll(".drop-placeholder").forEach(el => el.remove());
   document.querySelectorAll(".group-grid").forEach(g => g.classList.remove("drag-over"));
+  // dragend fires whether the drop succeeded or the drag was cancelled —
+  // the one reliable place to clear dragSrc. Previously never cleared, so
+  // it kept pointing at the (correctly placed) old node after every drag;
+  // harmless before, but now renderAccounts() also checks dragSrc to avoid
+  // rebuilding the DOM mid-drag, so a stale non-null value here would have
+  // silently blocked every future render after the first drag of a session.
+  dragSrc = null;
+  renderAccounts();   // catch up on any render(s) deferred while this drag was in progress
 }
 
 function onDragOver(e) {
@@ -3804,18 +3813,7 @@ setInterval(async () => {
     }
     setServerDisconnected(false);
     const next  = fresh.filter(a => a.running).map(a => a.path).sort().join(",");
-    // Flush any in-progress textarea edits into accounts[] before we transfer
-    // them to fresh[] — otherwise mid-typing text is lost when renderAccounts()
-    // rebuilds the DOM and restores from acc.note (the last-saved value).
-    accounts.forEach(acc => {
-      const ta = document.getElementById("note-" + pathKey(acc.path));
-      if (ta) acc.note = ta.value;
-    });
-    // Preserve local edits (note, username) in the refreshed data
-    fresh.forEach(fa => {
-      const old = accounts.find(a => a.path === fa.path);
-      if (old) { fa.note = old.note; fa.username = old.username; }
-    });
+    mergeLocalEdits(fresh);
     accounts = fresh;
     if (prev !== next) renderAccounts();
     else updateStats();
@@ -3840,7 +3838,6 @@ async function fixDockNames() {
 
 let _diagnosePath = "";
 let _diagnoseName = "";
-let _diagnoseData = null;  // last scan result
 
 async function showDiagnoseModal(path, name) {
   _diagnosePath = path;
@@ -3864,7 +3861,6 @@ async function rerunDiagnose() {
 
 async function runDiagnose() {
   const r = await api("/api/diagnose", "POST", { path: _diagnosePath });
-  _diagnoseData = r;
 
   document.getElementById("diagnose-loading").style.display = "none";
   document.getElementById("diagnose-results").style.display = "block";

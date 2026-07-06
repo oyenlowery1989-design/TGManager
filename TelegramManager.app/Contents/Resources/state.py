@@ -180,14 +180,18 @@ def _load_json_file_with_fallbacks(path, default_value, fallback_paths=()):
     return copy.deepcopy(default_value), None
 
 def is_safe_path(path: str) -> bool:
-    """Return True if path resolves to within ROOT_DIR or DATA_DIR (prevents path traversal)."""
+    """Return True if path resolves to strictly within ROOT_DIR or DATA_DIR
+    (prevents path traversal). ROOT_DIR/DATA_DIR themselves are rejected —
+    every caller expects an account/backup subpath, never the root itself,
+    so accepting the root would let a client operate on the whole managed
+    tree (delete, rename, clear-cache, ...) instead of one account."""
     if not path:
         return False
     try:
         real_path = os.path.realpath(os.path.abspath(path))
         for base in (ROOT_DIR, DATA_DIR):
             real_base = os.path.realpath(base)
-            if real_path == real_base or real_path.startswith(real_base + os.sep):
+            if real_path.startswith(real_base + os.sep):
                 return True
         return False
     except Exception:
@@ -201,11 +205,11 @@ def load_config():
     return cfg
 
 def save_config(cfg):
+    # cfg holds lock_password_hash/lock_password_salt — route through
+    # _save_json_atomic so the file gets the same 0600 chmod as metadata,
+    # instead of inheriting the process umask (commonly world-readable).
     with _config_lock:
-        tmp = CONFIG_FILE + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(cfg, f, indent=2)
-        os.replace(tmp, CONFIG_FILE)
+        _save_json_atomic(CONFIG_FILE, cfg)
     # Mirror port to true parent dir so the Swift launcher always finds it (atomic write)
     if DATA_DIR != _PARENT_DIR:
         try:

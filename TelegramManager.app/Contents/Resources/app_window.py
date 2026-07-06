@@ -14,15 +14,13 @@ import sys
 import os
 import subprocess
 import threading
-import time
-import signal
 
 # Add the Resources directory to path
 DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, DIR)
 
 import objc
-from Foundation import NSObject, NSURL, NSURLRequest, NSApplication, NSApp, NSTimer, NSRunLoop
+from Foundation import NSObject, NSURL, NSURLRequest, NSApplication, NSApp, NSTimer
 from AppKit import (
     NSWindow, NSWindowStyleMaskTitled, NSWindowStyleMaskClosable,
     NSWindowStyleMaskMiniaturizable, NSWindowStyleMaskResizable,
@@ -114,9 +112,11 @@ class AppDelegate(NSObject):
 
     def start_server(self):
         import server
-        # server.py reads manager_config.json on import; don't override the port it found
-        from http.server import HTTPServer
-        httpd = HTTPServer(("127.0.0.1", PORT), server.RequestHandler)
+        # server.py reads manager_config.json on import; don't override the port it found.
+        # Use server's own ThreadedHTTPServer (not a plain HTTPServer) so a slow
+        # scan_accounts() walk doesn't block every other concurrent request —
+        # same reason server.py's own __main__ entrypoint uses it.
+        httpd = server.ThreadedHTTPServer(("127.0.0.1", PORT), server.RequestHandler)
         os.chdir(DIR)
         self.server_started = True
         httpd.serve_forever()

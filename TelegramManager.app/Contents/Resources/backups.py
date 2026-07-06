@@ -220,6 +220,14 @@ def restore_backup(backup_path, account_path):
 
 @state.serialize_account_op(lambda folder_path, account_name: folder_path, (False, state._BUSY_MSG, ""))
 def backup_account(folder_path, account_name):
+    # account_name comes straight from the client (server.py's /api/backup
+    # passes data.get("name") unchecked). Strip it to a bare path component
+    # so it can't traverse ("../../etc/pwned") or override the join outright
+    # (an absolute value like "/tmp/pwned" makes os.path.join() discard the
+    # DATA_DIR/Backups/date_str prefix entirely).
+    account_name = os.path.basename(str(account_name or "").strip()) or "account"
+    if account_name in (".", ".."):
+        account_name = "account"
     # Two accounts with the same folder name in different groups would write
     # to the same Backups/<date>/<name> dir (and prune each other) — suffix
     # the parent folder name when the basename is ambiguous.
