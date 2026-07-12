@@ -18,3 +18,7 @@ TelegramManager.app/Contents/_CodeSignature/
 .claude/
 .DS_Store
 __pycache__/
+
+# ── Docs, kept local only ─────────────────────────────────────────────
+README.md
+CLAUDE.md
