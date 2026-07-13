@@ -1895,6 +1895,9 @@ function buildCard(acc, pinnedCopy = false) {
     actions.push(`<button class="btn" onclick="event.stopPropagation(); backupAccount(${esc(JSON.stringify(acc.path))},${esc(JSON.stringify(acc.name))})" data-tip="Save a backup of this account's session data">↓ Backup</button>`);
   } else if (acc.status === "needs_setup") {
     actions.push(`<button class="btn warning" onclick="event.stopPropagation(); setupAccount(${esc(JSON.stringify(acc.path))})" data-tip="Copy Telegram.app into this account folder so it can be opened">⚙ Setup</button>`);
+    if (acc.can_backup) {
+      actions.push(`<button class="btn" onclick="event.stopPropagation(); backupAccount(${esc(JSON.stringify(acc.path))},${esc(JSON.stringify(acc.name))})" data-tip="Save a backup of this account's session data">↓ Backup</button>`);
+    }
   }
 
   const healthTip = health.issues.length ? health.issues.join(", ") : "Healthy";

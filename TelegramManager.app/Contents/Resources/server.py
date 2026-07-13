@@ -489,6 +489,7 @@ def scan_accounts():
                     "running":          _is_running(full_path),
                     "has_app":          has_app,
                     "has_tdata":        has_tdata or has_raw_tdata,
+                    "can_backup":       has_tdata,
                     "tdata_size":       tdata_size,
                     "tdata_size_human": human_size(tdata_size),
                     "note":             _meta.get("notes",        {}).get(full_path, ""),
@@ -2015,7 +2016,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.send_json({"success": ok, "message": msg})
 
     def _post_api_backup_all(self, data):
-        to_backup = [acc for acc in scan_accounts() if acc["status"] == "ready"]
+        to_backup = [acc for acc in scan_accounts() if acc["can_backup"]]
         success_count = 0
         failed = []
         for acc in to_backup:
