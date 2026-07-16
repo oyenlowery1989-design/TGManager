@@ -121,6 +121,19 @@ MyAccounts/
 | Port conflict (server won't start) | Edit `data/manager_config.json` and change `"port": 8477` to any free port |
 | Account shows "needs setup" | The tdata folder exists but is in the wrong place — use Setup Account |
 | Size in stats bar seems slow to update | Disk sizes refresh in the background every 60 s — normal on first load |
+| Window opens but shows "127.0.0.1 refused to connect" | Server never started. See below. |
+
+### "127.0.0.1 refused to connect"
+
+Right-click → Open only clears Gatekeeper on the top-level app, not every binary inside it (the compiled `launcher_swift`, the `python3` process it spawns). If the native window opens but the page can't connect:
+
+```bash
+xattr -cr TelegramManager.app                 # clear quarantine on everything inside
+xcode-select -p || xcode-select --install     # Swift compiler needed for the native window
+python3 "TelegramManager.app/Contents/Resources/server.py"   # run standalone, see the real error
+tail -f data/manager.log                      # or check the log
+```
+Fix whatever error `server.py` prints standalone, then reopen `TelegramManager.app` normally.
 
 ---
 
