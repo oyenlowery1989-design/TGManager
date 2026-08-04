@@ -159,9 +159,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
             return
         }
         let url = URL(string: "http://127.0.0.1:\(port)/\(sessionToken)/")!
-        let task = URLSession.shared.dataTask(with: url) { [weak self] _, _, error in
+        let task = URLSession.shared.dataTask(with: url) { [weak self] _, response, _ in
             guard let self = self else { return }
-            if error == nil {
+            if (response as? HTTPURLResponse)?.statusCode == 200 {
                 DispatchQueue.main.async { self.webView.load(URLRequest(url: url)) }
             } else {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
@@ -213,6 +213,41 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         alert.addButton(withTitle: "OK")
         alert.addButton(withTitle: "Cancel")
         completionHandler(alert.runModal() == .alertFirstButtonReturn)
+    }
+
+    // ── WKUIDelegate — native alert() dialog ──────────────────────────────────
+    func webView(_ webView: WKWebView,
+                 runJavaScriptAlertPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo,
+                 completionHandler: @escaping () -> Void) {
+        let alert = NSAlert()
+        alert.messageText     = message
+        alert.alertStyle      = .warning
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+        completionHandler()
+    }
+
+    // ── WKUIDelegate — native prompt() dialog ─────────────────────────────────
+    func webView(_ webView: WKWebView,
+                 runJavaScriptTextInputPanelWithPrompt prompt: String,
+                 defaultText: String?,
+                 initiatedByFrame frame: WKFrameInfo,
+                 completionHandler: @escaping (String?) -> Void) {
+        let alert = NSAlert()
+        alert.messageText     = prompt
+        alert.alertStyle      = .informational
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        field.stringValue = defaultText ?? ""
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        if alert.runModal() == .alertFirstButtonReturn {
+            completionHandler(field.stringValue)
+        } else {
+            completionHandler(nil)
+        }
     }
 
     // ── Lifecycle ────────────────────────────────────────────────────────────

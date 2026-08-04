@@ -33,8 +33,11 @@ def _copy_tdata_excluding_cache(src, dst):
                      r.returncode, r.stderr.decode(errors="replace").strip()[:200])
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
         state._log.warning("backup rsync unavailable (%s); falling back to cp", e)
-    subprocess.run(["rm", "-rf", dst], capture_output=True, timeout=300)
-    r = subprocess.run(["cp", "-R", src, dst], capture_output=True, timeout=1800)
+    try:
+        subprocess.run(["rm", "-rf", dst], capture_output=True, timeout=300)
+        r = subprocess.run(["cp", "-R", src, dst], capture_output=True, timeout=1800)
+    except subprocess.TimeoutExpired:
+        return False, "copy timed out"
     return (r.returncode == 0), ("" if r.returncode == 0
                                  else r.stderr.decode(errors="replace").strip()[:200])
 
@@ -117,7 +120,10 @@ def delete_backup(backup_path):
         return False, "Invalid backup path"
     if not os.path.isdir(real):
         return False, "Backup not found"
-    r = subprocess.run(["rm", "-rf", real], capture_output=True, timeout=120)
+    try:
+        r = subprocess.run(["rm", "-rf", real], capture_output=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        return False, "Delete timed out"
     if r.returncode != 0:
         return False, "Delete failed: " + r.stderr.decode(errors="replace").strip()[:200]
     # drop the date folder too once its last account backup is gone
@@ -187,12 +193,20 @@ def restore_backup(backup_path, account_path):
 
     # Copy to a sibling temp dir first — the live tdata stays intact until the
     # copy has fully succeeded.
-    subprocess.run(["rm", "-rf", tdata_new], capture_output=True, timeout=300)
-    r = subprocess.run(["cp", "-R", tdata_src, tdata_new], capture_output=True, timeout=1800)
-    if r.returncode != 0:
-        state._log.error("restore_backup: cp failed: %s", r.stderr.decode(errors="replace").strip())
+    try:
         subprocess.run(["rm", "-rf", tdata_new], capture_output=True, timeout=300)
-        return False, "Copy failed — the current tdata was not touched"
+        r = subprocess.run(["cp", "-R", tdata_src, tdata_new], capture_output=True, timeout=1800)
+        if r.returncode != 0:
+            state._log.error("restore_backup: cp failed: %s", r.stderr.decode(errors="replace").strip())
+            subprocess.run(["rm", "-rf", tdata_new], capture_output=True, timeout=300)
+            return False, "Copy failed — the current tdata was not touched"
+    except subprocess.TimeoutExpired:
+        state._log.error("restore_backup: copy timed out")
+        try:
+            subprocess.run(["rm", "-rf", tdata_new], capture_output=True, timeout=300)
+        except subprocess.TimeoutExpired:
+            pass
+        return False, "Copy timed out — the current tdata was not touched"
 
     # Swap: current tdata → timestamped .bak, then tdata.new → tdata.
     bak = None
@@ -210,8 +224,17 @@ def restore_backup(backup_path, account_path):
                 state._log.info("restore_backup: original tdata restored from %s", bak)
             except Exception as undo_e:
                 state._log.error("restore_backup: rollback also failed: %s", undo_e)
-        subprocess.run(["rm", "-rf", tdata_new], capture_output=True, timeout=300)
-        return False, "Restore failed — original tdata has been restored"
+        # Judge by reality, not by which rename failed: the original is safe
+        # iff a tdata dir exists at its normal location.
+        rolled_back = os.path.isdir(tdata_dst)
+        try:
+            subprocess.run(["rm", "-rf", tdata_new], capture_output=True, timeout=300)
+        except subprocess.TimeoutExpired:
+            pass
+        if rolled_back:
+            return False, "Restore failed — original tdata has been restored"
+        return False, ("Restore failed AND the original tdata could not be put back. "
+                       f"It is still intact at: {bak} — rename it back to 'tdata' manually.")
 
     server.invalidate_tdata_size(account_path)   # tdata was just replaced
     state._log.info("Backup restored successfully")
@@ -256,15 +279,28 @@ def backup_account(folder_path, account_name):
     # the copy fully succeeded. A server crash mid-copy leaves a *.partial dir
     # that list_backups() ignores, never a half backup that looks valid.
     partial_dir = backup_dir + ".partial"
-    subprocess.run(["rm", "-rf", partial_dir], capture_output=True, timeout=300)
-    os.makedirs(partial_dir, exist_ok=True)
-    ok, err = _copy_tdata_excluding_cache(tdata_src, os.path.join(partial_dir, "tdata"))
-    if not ok:
+    try:
         subprocess.run(["rm", "-rf", partial_dir], capture_output=True, timeout=300)
-        return False, f"Copy failed: {err}", ""
-    if os.path.isdir(backup_dir):   # same account backed up twice in one minute
-        subprocess.run(["rm", "-rf", backup_dir], capture_output=True, timeout=300)
-    os.rename(partial_dir, backup_dir)
+        os.makedirs(partial_dir, exist_ok=True)
+        ok, err = _copy_tdata_excluding_cache(tdata_src, os.path.join(partial_dir, "tdata"))
+        if not ok:
+            subprocess.run(["rm", "-rf", partial_dir], capture_output=True, timeout=300)
+            return False, f"Copy failed: {err}", ""
+    except subprocess.TimeoutExpired:
+        state._log.error("backup_account: timed out backing up %s", folder_path)
+        try:
+            subprocess.run(["rm", "-rf", partial_dir], capture_output=True, timeout=300)
+        except subprocess.TimeoutExpired:
+            pass
+        return False, "Backup timed out", ""
+    try:
+        # Copy finished — from here on, never delete partial_dir on failure.
+        if os.path.isdir(backup_dir):   # same account backed up twice in one minute
+            subprocess.run(["rm", "-rf", backup_dir], capture_output=True, timeout=300)
+        os.rename(partial_dir, backup_dir)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        state._log.error("backup_account: finalize failed for %s: %s", folder_path, e)
+        return False, f"Backup copied but could not be finalized — kept at {partial_dir}", ""
     state._log.info("Backup complete: %s", backup_dir)
     prune_backups(account_name)
     _backup_map_cache["ts"] = 0.0
