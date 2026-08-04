@@ -1753,7 +1753,11 @@ class RequestHandler(BaseHTTPRequestHandler):
         accs = scan_accounts_cached()
         last_map = _last_backup_map()
         for a in accs:
-            a["last_backup"] = last_map.get(a["name"], "")
+            # Duplicate folder names get backed up as "name (parent)" — check
+            # the suffixed key first, then the bare name (older backups).
+            parent = os.path.basename(os.path.dirname(a["path"]))
+            a["last_backup"] = (last_map.get(f'{a["name"]} ({parent})')
+                                or last_map.get(a["name"], ""))
         self.send_json(accs)
 
     def _get_api_config(self):

@@ -2951,7 +2951,7 @@ function renderBackupList() {
       const r = await api("/api/backup/delete", "POST", { backup_path: b.backup_path });
       if (r.success) {
         toast("Backup deleted", "success");
-        showBackupBrowser();
+        showBackupBrowser(document.getElementById("backup-filter").value);
       } else {
         toast(r.message, "error");
       }
