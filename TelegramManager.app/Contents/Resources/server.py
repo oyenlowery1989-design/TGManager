@@ -131,10 +131,11 @@ def _verify_lock_password(password) -> bool:
     return hmac.compare_digest(digest, stored)
 
 def _server_unlock():
-    global _lock_unlocked_at, _lock_last_activity, _unlock_fail_count
+    global _lock_unlocked_at, _lock_last_activity, _unlock_fail_count, _unlock_next_allowed
     with _lock_state_lock:
         _lock_unlocked_at = _lock_last_activity = time.monotonic()
         _unlock_fail_count = 0
+        _unlock_next_allowed = 0.0
 
 def _server_lock():
     global _lock_unlocked_at
@@ -144,10 +145,17 @@ def _server_lock():
 def _register_unlock_failure() -> int:
     """Record a failed unlock/lock-config attempt; return the new consecutive
     failure count so the caller can throttle the response."""
-    global _unlock_fail_count
+    global _unlock_fail_count, _unlock_next_allowed
     with _lock_state_lock:
         _unlock_fail_count += 1
+        _unlock_next_allowed = time.monotonic() + min(0.5 * _unlock_fail_count, 5.0)
         return _unlock_fail_count
+
+def _unlock_throttled() -> bool:
+    """Shared lockout across all threads/connections: True while a previous
+    failed attempt's escalating delay is still in effect."""
+    with _lock_state_lock:
+        return time.monotonic() < _unlock_next_allowed
 
 def _check_and_touch_unlocked() -> bool:
     """Gate for lock-protected endpoints. Atomically checks whether the
@@ -187,6 +195,7 @@ _lock_state_lock    = threading.Lock()
 _lock_unlocked_at   = 0.0   # time.monotonic() of last successful unlock; 0.0 = locked
 _lock_last_activity = 0.0   # time.monotonic() of last gated request that passed
 _unlock_fail_count  = 0     # consecutive failed unlock attempts (throttle)
+_unlock_next_allowed = 0.0  # time.monotonic() before which unlock attempts are rejected
 
 SESSION_TOKEN = os.environ.get("TG_SESSION_TOKEN", "")
 _TOKEN_GENERATED = False
@@ -1431,9 +1440,9 @@ def diagnose_account(account_path):
 
     if not app:
         if get_shared_app():
-            info.append({"id": "shared_app", "severity": "info",
-                         "title": "Uses shared Telegram.app",
-                         "detail": "No Telegram.app in this folder — it will be APFS-cloned from the shared master on open. This is normal and saves disk space."})
+            info.append("Uses shared Telegram.app — no Telegram.app in this folder; "
+                        "it will be APFS-cloned from the shared master on open. "
+                        "This is normal and saves disk space.")
         else:
             issues.append({"id": "no_app", "severity": "error",
                            "title": "Telegram.app missing",
@@ -1888,6 +1897,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", 0))
         except (ValueError, TypeError):
             length = 0
+        if length < 0 or length > 10 * 1024 * 1024:
+            self.send_json({"success": False, "message": "Request body too large"}, 413)
+            return
         body   = self.rfile.read(length).decode() if length else "{}"
         try:
             data = json.loads(body)
@@ -2367,6 +2379,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self.send_json({"success": False, "message": "Invalid path"})
                 return
             actions  = data.get("actions", [])
+            if not isinstance(actions, list):
+                self.send_json({"success": False, "message": "actions must be a list"}, 400)
+                return
             if not acc_path or not actions:
                 self.send_json({"success": False, "message": "path and actions required"})
                 return
@@ -2379,13 +2394,15 @@ class RequestHandler(BaseHTTPRequestHandler):
         if not _lock_enabled():
             self.send_json({"success": True, "enabled": False})
             return
+        if _unlock_throttled():
+            self.send_json({"success": False, "message": "Too many attempts — try again shortly"}, 429)
+            return
         if _verify_lock_password(data.get("password")):
             _server_unlock()
             self.send_json({"success": True})
         else:
             fail_count = _register_unlock_failure()
             _log.warning("unlock: incorrect password (consecutive failures=%d)", fail_count)
-            time.sleep(min(0.5 * fail_count, 5.0))
             self.send_json({"success": False, "message": "Incorrect password"}, 403)
 
     def _post_api_lock(self, data):
@@ -2399,10 +2416,12 @@ class RequestHandler(BaseHTTPRequestHandler):
         # they know the current one, so a walked-away unlocked screen
         # can't silently drop the lock.
         if _lock_enabled():
+            if _unlock_throttled():
+                self.send_json({"success": False, "message": "Too many attempts — try again shortly"}, 429)
+                return
             if not _verify_lock_password(data.get("current_password")):
                 fail_count = _register_unlock_failure()
                 _log.warning("lock-config: incorrect current password (consecutive failures=%d)", fail_count)
-                time.sleep(min(0.5 * fail_count, 5.0))
                 self.send_json({"success": False, "message": "Current password is incorrect"}, 403)
                 return
 

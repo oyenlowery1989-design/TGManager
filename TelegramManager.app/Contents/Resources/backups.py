@@ -226,6 +226,11 @@ def backup_account(folder_path, account_name):
     # (an absolute value like "/tmp/pwned" makes os.path.join() discard the
     # DATA_DIR/Backups/date_str prefix entirely).
     account_name = os.path.basename(str(account_name or "").strip()) or "account"
+    # A trailing ".partial" would make list_backups/_last_backup_map skip the
+    # finished backup (they treat *.partial as in-progress) — strip it.
+    while account_name.endswith(".partial"):
+        account_name = account_name[:-len(".partial")]
+    account_name = account_name or "account"
     if account_name in (".", ".."):
         account_name = "account"
     # Two accounts with the same folder name in different groups would write

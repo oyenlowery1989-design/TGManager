@@ -55,8 +55,19 @@ except OSError:
 _log_file    = os.path.join(DATA_DIR, "manager.log")
 _log         = logging.getLogger("TelegramManager")
 _log.setLevel(logging.INFO)
-_log_handler = RotatingFileHandler(_log_file, maxBytes=2 * 1024 * 1024, backupCount=3,
-                                   encoding="utf-8")
+class _OwnerOnlyRotatingFileHandler(RotatingFileHandler):
+    # Rollover reopens the log with default umask (world-readable) — re-chmod
+    # every open so the token-bearing log stays owner-only.
+    def _open(self):
+        stream = super()._open()
+        try:
+            os.chmod(self.baseFilename, 0o600)
+        except OSError:
+            pass
+        return stream
+
+_log_handler = _OwnerOnlyRotatingFileHandler(_log_file, maxBytes=2 * 1024 * 1024, backupCount=3,
+                                             encoding="utf-8")
 _log_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
 _log.addHandler(_log_handler)
 # The log line records request paths, which contain the secret URL token.

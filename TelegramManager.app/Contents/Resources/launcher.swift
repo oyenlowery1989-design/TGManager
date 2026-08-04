@@ -27,7 +27,7 @@ func readPort() -> Int {
 func killExistingServer(port: Int) {
     let p = Process()
     p.executableURL = URL(fileURLWithPath: "/bin/bash")
-    p.arguments = ["-c", "pgrep -f 'TelegramManager.app/Contents/Resources/server.py' 2>/dev/null | xargs kill 2>/dev/null || true"]
+    p.arguments = ["-c", "pgrep -f 'TelegramManager.app/Contents/Resources/[s]erver.py' 2>/dev/null | xargs kill 2>/dev/null || true"]
     p.standardOutput = FileHandle.nullDevice
     p.standardError  = FileHandle.nullDevice
     try? p.run()

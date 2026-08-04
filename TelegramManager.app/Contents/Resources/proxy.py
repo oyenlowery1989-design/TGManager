@@ -102,9 +102,9 @@ def apply_proxy(proxy_config):
         return
 
     def scutil_get_proxy():
-        cmd = "socks" if proxy_type.startswith("socks") else "http"
+        cmd = "-getsocksfirewallproxy" if proxy_type.startswith("socks") else "-getwebproxy"
         try:
-            r = subprocess.run(["networksetup", f"-get{cmd}firewallproxy", service],
+            r = subprocess.run(["networksetup", cmd, service],
                                capture_output=True, text=True, timeout=15)
         except subprocess.TimeoutExpired:
             state._log.warning("scutil_get_proxy: networksetup query timed out")
@@ -162,10 +162,10 @@ def apply_proxy(proxy_config):
         off_cmd     = f"networksetup -setsocksfirewallproxystate {shlex.quote(service)} off"
         restore_set = f"networksetup -setsocksfirewallproxy {shlex.quote(service)} {shlex.quote(r_host)} {shlex.quote(r_port)} off"
     else:
-        set_cmd     = f"networksetup -sethttpproxy {shlex.quote(service)} {shlex.quote(host)} {shlex.quote(port)}"
-        on_cmd      = f"networksetup -sethttpproxystate {shlex.quote(service)} on"
-        off_cmd     = f"networksetup -sethttpproxystate {shlex.quote(service)} off"
-        restore_set = f"networksetup -sethttpproxy {shlex.quote(service)} {shlex.quote(r_host)} {shlex.quote(r_port)}"
+        set_cmd     = f"networksetup -setwebproxy {shlex.quote(service)} {shlex.quote(host)} {shlex.quote(port)}"
+        on_cmd      = f"networksetup -setwebproxystate {shlex.quote(service)} on"
+        off_cmd     = f"networksetup -setwebproxystate {shlex.quote(service)} off"
+        restore_set = f"networksetup -setwebproxy {shlex.quote(service)} {shlex.quote(r_host)} {shlex.quote(r_port)}"
 
     result = state._run_as_admin(
         f"{set_cmd}\n{on_cmd}\n",
@@ -304,11 +304,11 @@ def _recover_stale_proxy():
         else:
             if rec.get("enabled") and rec.get("host"):
                 lines = [
-                    f"networksetup -sethttpproxy {q(service)} {q(str(rec.get('host')))} {q(str(rec.get('port', '0')))}",
-                    f"networksetup -sethttpproxystate {q(service)} on",
+                    f"networksetup -setwebproxy {q(service)} {q(str(rec.get('host')))} {q(str(rec.get('port', '0')))}",
+                    f"networksetup -setwebproxystate {q(service)} on",
                 ]
             else:
-                lines = [f"networksetup -sethttpproxystate {q(service)} off"]
+                lines = [f"networksetup -setwebproxystate {q(service)} off"]
 
         r = state._run_as_admin(
             "\n".join(lines) + "\n",
