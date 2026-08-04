@@ -1712,16 +1712,26 @@ def repair_account(account_path, actions):
         if os.path.exists(binary):
             try:
                 os.chmod(binary, 0o755)
-                # Also re-sign after permission fix
-                r = subprocess.run(["codesign", "--force", "--deep", "--sign", "-", app],
-                                   capture_output=True, timeout=600)
-                if r.returncode == 0:
+                # chmod never invalidates the signature, so leave a healthy
+                # bundle's code identity alone (ad-hoc re-sign churns identity —
+                # the pattern behind past tdata corruption). Re-sign only when
+                # the signature is actually broken, i.e. the app couldn't
+                # launch anyway.
+                v = subprocess.run(["codesign", "--verify", app],
+                                   capture_output=True, timeout=120)
+                if v.returncode == 0:
                     results.append({"action": "fix_perms", "ok": True,
-                                    "msg": "Fixed binary permissions and re-signed Telegram.app"})
+                                    "msg": "Fixed binary permissions (signature intact, not re-signed)"})
                 else:
-                    results.append({"action": "fix_perms", "ok": False,
-                                    "msg": "Fixed permissions but re-sign failed — "
-                                           + r.stderr.decode(errors="replace").strip()})
+                    r = subprocess.run(["codesign", "--force", "--deep", "--sign", "-", app],
+                                       capture_output=True, timeout=600)
+                    if r.returncode == 0:
+                        results.append({"action": "fix_perms", "ok": True,
+                                        "msg": "Fixed binary permissions and repaired a broken signature"})
+                    else:
+                        results.append({"action": "fix_perms", "ok": False,
+                                        "msg": "Fixed permissions but re-sign failed — "
+                                               + r.stderr.decode(errors="replace").strip()})
             except Exception as e:
                 results.append({"action": "fix_perms", "ok": False, "msg": str(e)})
         else:
