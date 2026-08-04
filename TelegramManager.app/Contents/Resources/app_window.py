@@ -42,7 +42,7 @@ def _read_port():
         return 8477
 
 PORT = _read_port()
-URL = f"http://127.0.0.1:{PORT}"
+URL = f"http://127.0.0.1:{PORT}"  # rebuilt with ROUTE_PREFIX once server is imported (start_server)
 
 
 class AppDelegate(NSObject):
@@ -112,6 +112,10 @@ class AppDelegate(NSObject):
 
     def start_server(self):
         import server
+        global URL
+        # Everything is served under ROUTE_PREFIX (secret session token) — bare
+        # 127.0.0.1:PORT/ 403s forever.
+        URL = f"http://127.0.0.1:{PORT}{server.ROUTE_PREFIX}/"
         # server.py reads manager_config.json on import; don't override the port it found.
         # Use server's own ThreadedHTTPServer (not a plain HTTPServer) so a slow
         # scan_accounts() walk doesn't block every other concurrent request —

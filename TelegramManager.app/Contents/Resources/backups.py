@@ -34,7 +34,9 @@ def _copy_tdata_excluding_cache(src, dst):
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
         state._log.warning("backup rsync unavailable (%s); falling back to cp", e)
     try:
-        subprocess.run(["rm", "-rf", dst], capture_output=True, timeout=300)
+        rm_r = subprocess.run(["rm", "-rf", dst], capture_output=True, timeout=300)
+        if rm_r.returncode != 0:
+            return False, "could not clear destination: " + rm_r.stderr.decode(errors="replace").strip()[:200]
         r = subprocess.run(["cp", "-R", src, dst], capture_output=True, timeout=1800)
     except subprocess.TimeoutExpired:
         return False, "copy timed out"
@@ -233,6 +235,8 @@ def restore_backup(backup_path, account_path):
             pass
         if rolled_back:
             return False, "Restore failed — original tdata has been restored"
+        if bak is None:
+            return False, "Restore failed — no original tdata existed, so nothing was overwritten"
         return False, ("Restore failed AND the original tdata could not be put back. "
                        f"It is still intact at: {bak} — rename it back to 'tdata' manually.")
 

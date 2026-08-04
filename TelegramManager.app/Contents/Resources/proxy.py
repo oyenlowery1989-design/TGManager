@@ -164,10 +164,14 @@ def apply_proxy(proxy_config):
         off_cmd     = f"networksetup -setsocksfirewallproxystate {shlex.quote(service)} off"
         restore_set = f"networksetup -setsocksfirewallproxy {shlex.quote(service)} {shlex.quote(r_host)} {shlex.quote(r_port)} off"
     else:
-        set_cmd     = f"networksetup -setwebproxy {shlex.quote(service)} {shlex.quote(host)} {shlex.quote(port)}"
-        on_cmd      = f"networksetup -setwebproxystate {shlex.quote(service)} on"
-        off_cmd     = f"networksetup -setwebproxystate {shlex.quote(service)} off"
-        restore_set = f"networksetup -setwebproxy {shlex.quote(service)} {shlex.quote(r_host)} {shlex.quote(r_port)}"
+        set_cmd     = (f"networksetup -setwebproxy {shlex.quote(service)} {shlex.quote(host)} {shlex.quote(port)}\n"
+                        f"networksetup -setsecurewebproxy {shlex.quote(service)} {shlex.quote(host)} {shlex.quote(port)}")
+        on_cmd      = (f"networksetup -setwebproxystate {shlex.quote(service)} on\n"
+                        f"networksetup -setsecurewebproxystate {shlex.quote(service)} on")
+        off_cmd     = (f"networksetup -setwebproxystate {shlex.quote(service)} off\n"
+                        f"networksetup -setsecurewebproxystate {shlex.quote(service)} off")
+        restore_set = (f"networksetup -setwebproxy {shlex.quote(service)} {shlex.quote(r_host)} {shlex.quote(r_port)}\n"
+                        f"networksetup -setsecurewebproxy {shlex.quote(service)} {shlex.quote(r_host)} {shlex.quote(r_port)}")
 
     result = state._run_as_admin(
         f"{set_cmd}\n{on_cmd}\n",
@@ -307,10 +311,15 @@ def _recover_stale_proxy():
             if rec.get("enabled") and rec.get("host"):
                 lines = [
                     f"networksetup -setwebproxy {q(service)} {q(str(rec.get('host')))} {q(str(rec.get('port', '0')))}",
+                    f"networksetup -setsecurewebproxy {q(service)} {q(str(rec.get('host')))} {q(str(rec.get('port', '0')))}",
                     f"networksetup -setwebproxystate {q(service)} on",
+                    f"networksetup -setsecurewebproxystate {q(service)} on",
                 ]
             else:
-                lines = [f"networksetup -setwebproxystate {q(service)} off"]
+                lines = [
+                    f"networksetup -setwebproxystate {q(service)} off",
+                    f"networksetup -setsecurewebproxystate {q(service)} off",
+                ]
 
         r = state._run_as_admin(
             "\n".join(lines) + "\n",

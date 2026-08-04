@@ -311,8 +311,11 @@ def _copy_app_bundle(src, dest, timeout=1800):
     """
     # A leftover partial dest (from an earlier failed copy) would make cp copy
     # src INSIDE it, producing a nested bundle that still exits 0. Clear it.
-    if os.path.exists(dest):
-        subprocess.run(["rm", "-rf", dest], capture_output=True, timeout=300)
+    # lexists, not exists: a dangling symlink at dest would make cp follow it.
+    if os.path.lexists(dest):
+        rm = subprocess.run(["rm", "-rf", dest], capture_output=True, timeout=300)
+        if rm.returncode != 0 or os.path.lexists(dest):
+            return False, "could not clear existing destination"
     r = subprocess.run(["cp", "-cR", src, dest], capture_output=True, timeout=timeout)
     if r.returncode == 0:
         return True, ""
@@ -905,6 +908,14 @@ def _open_accounts_async(accounts, tag):
     threading.Thread(target=_run, args=(), daemon=True).start()
 
 
+def _is_valid_hex_color(value):
+    """'' (clears the colour) or '#' + 3-8 hex digits."""
+    if value == "":
+        return True
+    return (value.startswith("#") and 3 <= len(value) - 1 <= 8
+            and all(c in "0123456789abcdefABCDEF" for c in value[1:]))
+
+
 def _validate_import_string_map(section_name, value):
     if not isinstance(value, dict):
         return False, f"{section_name} must be an object"
@@ -977,6 +988,28 @@ def _validate_import_payload(data):
             ok, msg = _validate_import_string_map(f"metadata.{key}", value)
             if not ok:
                 return False, msg, None
+            if key == "avatars":
+                # Avatars are rendered as img src — drop anything that isn't a
+                # data: image URL (javascript:/http: would be an injection/SSRF).
+                cleaned = {}
+                for path, avatar in value.items():
+                    if avatar.startswith("data:image/"):
+                        cleaned[path] = avatar
+                    else:
+                        _log.warning("import-config: dropping non-data avatar for %r", path)
+                cleaned_metadata[key] = cleaned
+                continue
+            if key == "colors":
+                # Colors land in style attributes — entity escaping doesn't stop
+                # CSS injection (url(//evil/x) beacons), so enforce hex here too.
+                cleaned = {}
+                for path, color in value.items():
+                    if _is_valid_hex_color(color):
+                        cleaned[path] = color
+                    else:
+                        _log.warning("import-config: dropping non-hex color for %r", path)
+                cleaned_metadata[key] = cleaned
+                continue
             cleaned_metadata[key] = dict(value)
 
     allowed_config_keys = {
@@ -1278,6 +1311,11 @@ def create_account(name, parent_path, open_after=True):
             "or set the correct path in Settings."
         )
 
+    type_err = _wrong_app_type_error(app_source)
+    if type_err:
+        subprocess.run(["rm", "-rf", folder_path], capture_output=True, timeout=300)
+        return False, type_err
+
     safe_bundle = _safe_bundle_name(name, os.path.basename(folder_path))
     app_dest = os.path.join(folder_path, safe_bundle + ".app")
     ok, err = _copy_app_bundle(app_source, app_dest)
@@ -1309,8 +1347,13 @@ def close_all():
     def _cleanup_all():
         time.sleep(14)  # kill escalation (SIGTERM 8s + SIGKILL 4s) can take up to 12s
         for acc in scan_accounts():
-            if not is_running(acc["path"]):
-                remove_cloned_app(acc["path"])
+            p = acc["path"]
+            # Same grace the watcher honours — an account reopened during the
+            # 14s wait must not have its bundle deleted out from under it.
+            with _watcher_grace_lock:
+                exempt = _watcher_grace.get(p, 0) > time.time()
+            if not exempt and not is_running(p):
+                remove_cloned_app(p)
         invalidate_scan_cache()
     threading.Thread(target=_cleanup_all, daemon=True).start()
 
@@ -1335,6 +1378,9 @@ def setup_account(folder_path):
         if not os.path.isdir(app_source):
             return False, ("Telegram.app not found. Place Telegram.app in the data/ folder "
                            "next to TelegramManager.app, or set the path in Settings.")
+        type_err = _wrong_app_type_error(app_source)
+        if type_err:
+            return False, type_err
         with _meta_lock:
             raw_name = metadata.get("dock_names", {}).get(folder_path) or os.path.basename(folder_path)
         safe_name = _safe_bundle_name(raw_name, os.path.basename(folder_path))
@@ -1410,6 +1456,11 @@ def update_all_apps():
         app_dest = find_account_app(acc["path"])
         if os.path.isdir(os.path.join(acc["path"], "TelegramForcePortable")) and app_dest:
             if os.path.abspath(app_dest) == os.path.abspath(app_source):
+                continue
+            # Re-check right before replacing — an account may have been launched
+            # after the up-front running check at the top of this function.
+            if find_telegram_pid(acc["path"]):
+                _log.warning("update_all_apps: %s is running — skipping", acc["path"])
                 continue
             # Copy to a temp name, then swap — keeps the bundle name unchanged
             app_tmp = app_dest + ".new"
@@ -2098,6 +2149,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         color    = data.get("color", "")
         if not is_safe_path(acc_path):
             self.send_json({"success": False, "message": "Invalid path"}); return
+        # Stored value is injected into the UI — only allow '' (clear) or a hex colour.
+        if not isinstance(color, str) or not _is_valid_hex_color(color):
+            self.send_json({"success": False, "message": "Invalid color"}); return
         with _meta_lock:
             metadata.setdefault("colors", {})[acc_path] = color
             save_metadata(metadata)
@@ -2570,11 +2624,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         shared_dir = os.path.join(SHARED_APPS_DIR, "macOS")
         os.makedirs(shared_dir, exist_ok=True)
         dest = os.path.join(shared_dir, "Telegram.app")
-        if os.path.isdir(dest):
-            subprocess.run(["rm", "-rf", dest], capture_output=True, timeout=300)
-        r = subprocess.run(["cp", "-R", app_source, dest], capture_output=True, timeout=1800)
-        if r.returncode != 0:
-            self.send_json({"success": False, "message": "Copy failed: " + r.stderr.decode()})
+        ok, err = _copy_app_bundle(app_source, dest)
+        if not ok:
+            self.send_json({"success": False, "message": "Copy failed: " + err})
             return
         # Strip quarantine so the master (and every clone from it) launches without Gatekeeper prompts
         subprocess.run(["xattr", "-dr", "com.apple.quarantine", dest], capture_output=True, timeout=120)

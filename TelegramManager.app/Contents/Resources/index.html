@@ -1901,7 +1901,7 @@ function buildCard(acc, pinnedCopy = false) {
   }
 
   const healthTip = health.issues.length ? health.issues.join(", ") : "Healthy";
-  const colorStyle = color ? `border-left-color:${color}` : "";
+  const colorStyle = color ? `border-left-color:${esc(color)}` : "";
 
   // Ghost card — shown in original folder when account is pinned to top
   if (pinnedCopy) {
@@ -1910,7 +1910,7 @@ function buildCard(acc, pinnedCopy = false) {
            oncontextmenu="showCtxMenu(event,${esc(JSON.stringify(acc.path))},${esc(JSON.stringify(acc.name))},${acc.running})">
         <div style="display:flex;align-items:center;gap:10px">
           <div class="card-icon ${acc.status}" style="width:28px;height:28px;font-size:14px;border-radius:8px;flex-shrink:0;pointer-events:none">
-            ${acc.avatar ? `<img src="${acc.avatar}" alt="">` : '✈'}
+            ${acc.avatar ? `<img src="${esc(acc.avatar)}" alt="">` : '✈'}
           </div>
           <span style="font-size:13px;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
                 title="${esc(acc.name)}">${esc(acc.name)}</span>
@@ -1942,7 +1942,7 @@ function buildCard(acc, pinnedCopy = false) {
       <div class="card-checkbox">✓</div>
       <div class="card-top">
         <div class="card-icon ${acc.status}">
-          ${acc.avatar ? `<img src="${acc.avatar}" alt="">` : '✈'}
+          ${acc.avatar ? `<img src="${esc(acc.avatar)}" alt="">` : '✈'}
         </div>
         <div class="card-header-text">
           <div class="card-name" title="${esc(acc.name)}">${acc.pinned ? '📌 ' : ''}${esc(acc.name)}</div>
@@ -1955,7 +1955,7 @@ function buildCard(acc, pinnedCopy = false) {
 <div style="display:flex;align-items:center;gap:5px">
             <span class="health-dot ${health.status}" title="${esc(healthTip)}"></span>
             <span class="card-color-dot ${color ? '' : 'empty'}"
-                  style="${color ? `background:${color}` : ''}"
+                  style="${color ? `background:${esc(color)}` : ''}"
                   onclick="event.stopPropagation(); toggleColorPicker('${key}')"
                   title="Set color tag"></span>
           </div>
@@ -2138,7 +2138,8 @@ let usernameTimers = {};
 async function saveUsername(path, username) {
   clearTimeout(usernameTimers[path]);
   usernameTimers[path] = setTimeout(async () => {
-    await api("/api/username", "POST", { path, username });
+    const r = await api("/api/username", "POST", { path, username });
+    if (!r || r.success === false) { toast(r?.message || "Username not saved", "error"); return; }
     const acc = accounts.find(a => a.path === path);
     if (acc) acc.username = username;
   }, 600);
@@ -2369,7 +2370,8 @@ async function openPinned() {
 }
 
 async function closeAll() {
-  await api("/api/close-all", "POST");
+  const r = await api("/api/close-all", "POST");
+  if (!r || r.success === false) { toast(r?.message || "Failed to close all", "error"); return; }
   toast("All closed", "success");
   setTimeout(refresh, 1200);
 }
@@ -2394,6 +2396,10 @@ async function setupAccount(path) {
 async function setupAll() {
   toast("Setting up new accounts…", "info");
   const r = await api("/api/setup-all", "POST");
+  if (!r || r.success === false || r.count === undefined) {
+    toast(r?.message || "Failed to set up accounts", "error");
+    return;
+  }
   toast(`Set up ${r.count} accounts`, "success");
   await refresh();
 }
@@ -2449,7 +2455,8 @@ async function backupAll() {
 }
 
 async function saveNote(path, note) {
-  await api("/api/note", "POST", { path, note });
+  const r = await api("/api/note", "POST", { path, note });
+  if (!r || r.success === false) { toast(r?.message || "Note not saved", "error"); return; }
   const acc = accounts.find(a => a.path === path);
   if (acc) acc.note = note;
 }
@@ -2458,6 +2465,10 @@ async function saveNote(path, note) {
 
 async function togglePin(path) {
   const r = await api("/api/pin", "POST", { path });
+  if (!r || r.success === false || r.pinned === undefined) {
+    toast(r?.message || "Failed to change pin", "error");
+    return;
+  }
   const acc = accounts.find(a => a.path === path);
   if (acc) acc.pinned = r.pinned;
   toast(r.pinned ? "📌 Pinned to top" : "Unpinned", "info");
@@ -2661,6 +2672,8 @@ document.getElementById("ws-name-input").addEventListener("keydown", e => {
 async function loadWorkspaceBar() {
   const ws = await api("/api/workspaces");
   const bar = document.getElementById("workspace-bar");
+  // api() returns an error object (not a workspace map) on network/server failure
+  if (!ws || typeof ws !== "object" || ws.success === false || ws._networkError) return;
   const names = Object.keys(ws);
   if (!names.length) { bar.style.display = "none"; return; }
   bar.style.display = "flex";
@@ -2745,7 +2758,7 @@ async function loadAlerts() {
   }
 
   if (expired.length) {
-    const items = expired.map(a => `<span title="${esc(a.issues.join(', '))}">• ${esc(a.name)}</span>`).join("  ");
+    const items = expired.map(a => `<span title="${esc((a.issues || []).join(', '))}">• ${esc(a.name)}</span>`).join("  ");
     zone.appendChild(makeBanner("error",
       `⚠ ${expired.length} account${expired.length > 1 ? "s" : ""} may have expired sessions`, items));
   }
@@ -3041,7 +3054,11 @@ async function saveProxy(forcedNull) {
       pass: document.getElementById("proxy-pass").value.trim(),
     };
   }
-  await api("/api/proxy", "POST", { path: proxyTarget, proxy });
+  const r = await api("/api/proxy", "POST", { path: proxyTarget, proxy });
+  if (!r || r.success === false) {
+    toast(r?.message || "Failed to save proxy", "error");
+    return;
+  }
   const acc = accounts.find(a => a.path === proxyTarget);
   if (acc) acc.proxy = proxy;
   hideProxyModal();
@@ -3808,15 +3825,20 @@ setInterval(async () => {
   if (lockScreen && lockScreen.classList.contains('visible')) return;
   _refreshing = true;
   try {
-    const prev  = accounts.filter(a => a.running).map(a => a.path).sort().join(",");
+    const prev  = JSON.stringify(accounts);
     const fresh = await api("/api/accounts");
     if (!fresh || fresh._networkError || !Array.isArray(fresh)) {
       if (fresh && fresh._networkError) setServerDisconnected(true);
       return;
     }
     setServerDisconnected(false);
-    const next  = fresh.filter(a => a.running).map(a => a.path).sort().join(",");
     mergeLocalEdits(fresh);
+    const next = JSON.stringify(fresh);
+    // Rebuilding the grid while the user types in a note/username kills focus.
+    const ae = document.activeElement;
+    const editing = ae && document.getElementById("content")?.contains(ae) &&
+      (ae.isContentEditable || ae.tagName === "TEXTAREA" || ae.tagName === "INPUT");
+    if (editing && prev !== next) { updateStats(); return; }  // keep old `accounts` so the render retries next tick
     accounts = fresh;
     if (prev !== next) renderAccounts();
     else updateStats();
@@ -3864,6 +3886,11 @@ async function rerunDiagnose() {
 
 async function runDiagnose() {
   const r = await api("/api/diagnose", "POST", { path: _diagnosePath });
+  if (!r || r.success === false || r._networkError) {
+    toast(r?.message || "Diagnose failed", "error");
+    hideDiagnoseModal();
+    return;
+  }
 
   document.getElementById("diagnose-loading").style.display = "none";
   document.getElementById("diagnose-results").style.display = "block";

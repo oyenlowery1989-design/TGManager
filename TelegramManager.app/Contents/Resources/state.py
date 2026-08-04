@@ -59,6 +59,11 @@ class _OwnerOnlyRotatingFileHandler(RotatingFileHandler):
     # Rollover reopens the log with default umask (world-readable) — re-chmod
     # every open so the token-bearing log stays owner-only.
     def _open(self):
+        try:
+            fd = os.open(self.baseFilename, os.O_CREAT | os.O_APPEND, 0o600)
+            os.close(fd)
+        except OSError:
+            pass
         stream = super()._open()
         try:
             os.chmod(self.baseFilename, 0o600)
@@ -161,7 +166,7 @@ def _save_json_atomic(path, value):
         except OSError:
             pass
     tmp = path + ".tmp"
-    with open(tmp, "w") as f:
+    with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
         json.dump(value, f, indent=2)
     os.replace(tmp, path)
     try:
