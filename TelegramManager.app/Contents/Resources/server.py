@@ -309,9 +309,14 @@ def _copy_app_bundle(src, dest, timeout=1800):
     (cp -R) if the clone fails (e.g. cross-volume, non-APFS destination).
     Returns (ok, error_message).
     """
+    # A leftover partial dest (from an earlier failed copy) would make cp copy
+    # src INSIDE it, producing a nested bundle that still exits 0. Clear it.
+    if os.path.exists(dest):
+        subprocess.run(["rm", "-rf", dest], capture_output=True, timeout=300)
     r = subprocess.run(["cp", "-cR", src, dest], capture_output=True, timeout=timeout)
     if r.returncode == 0:
         return True, ""
+    subprocess.run(["rm", "-rf", dest], capture_output=True, timeout=300)
     r = subprocess.run(["cp", "-R", src, dest], capture_output=True, timeout=timeout)
     if r.returncode == 0:
         return True, ""
@@ -1068,6 +1073,9 @@ def kill_account(account_path):
                 deadline = time.time() + 4
                 while _pid_alive(pid) and time.time() < deadline:
                     time.sleep(0.5)
+            if is_running(p):
+                # Account was reopened while we waited — leave the clone alone
+                return
             remove_cloned_app(p)
             invalidate_tdata_size(p)   # tdata settled (and cache may auto-clear on close)
             invalidate_scan_cache()
@@ -1299,9 +1307,10 @@ def close_all():
         kill_account(acc["path"])
 
     def _cleanup_all():
-        time.sleep(4)
+        time.sleep(14)  # kill escalation (SIGTERM 8s + SIGKILL 4s) can take up to 12s
         for acc in scan_accounts():
-            remove_cloned_app(acc["path"])
+            if not is_running(acc["path"]):
+                remove_cloned_app(acc["path"])
         invalidate_scan_cache()
     threading.Thread(target=_cleanup_all, daemon=True).start()
 
@@ -1391,6 +1400,10 @@ def update_all_apps():
         if not latest:
             return False, "No Telegram app bundle found in any account"
         app_source = latest
+
+    type_err = _wrong_app_type_error(app_source)
+    if type_err:
+        return False, type_err
 
     count = 0
     for acc in scan_accounts():

@@ -43,7 +43,7 @@ def run_keeper_loop():
                         _keeper_status["running"]  = True
                         _keeper_status["last_run"] = datetime.now().isoformat()
 
-                        _run_keeper_pass(interval_days, open_secs)
+                        _run_keeper_pass(interval_days, open_secs, respect_enabled=True)
                     finally:
                         _keeper_status["running"] = False
                         _keeper_lock.release()
@@ -64,10 +64,16 @@ def run_keeper_loop():
         time.sleep(CHECK_INTERVAL)
 
 
-def _run_keeper_pass(interval_days, open_secs):
+def _run_keeper_pass(interval_days, open_secs, respect_enabled=False):
     """Open every account that hasn't been seen in interval_days. Shared by the
-    scheduled loop and the manual 'Run Now' trigger."""
+    scheduled loop and the manual 'Run Now' trigger.
+
+    respect_enabled=True (scheduled loop) stops the pass early if the user
+    disables the keeper mid-pass; the manual trigger runs to completion."""
     for acc in server.scan_accounts():
+        if respect_enabled and not state.config.get("keeper_enabled", False):
+            state._log.info("Keeper: disabled mid-pass — stopping")
+            break
         if acc["status"] != "ready":
             continue
         if acc["running"]:
@@ -131,9 +137,16 @@ def trigger_keeper_now():
                 state.config.get("keeper_interval_days", 30),
                 state.config.get("keeper_open_seconds", 120),
             )
+        except Exception as e:
+            state._log.warning("trigger_keeper_now: unhandled error: %s", e, exc_info=True)
         finally:
             _keeper_status["running"] = False
             _keeper_lock.release()
 
-    threading.Thread(target=run_once, daemon=True).start()
+    try:
+        threading.Thread(target=run_once, daemon=True).start()
+    except Exception:
+        _keeper_status["running"] = False
+        _keeper_lock.release()
+        raise
     return True, "Keeper started"

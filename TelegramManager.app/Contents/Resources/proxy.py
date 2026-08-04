@@ -78,8 +78,10 @@ def _bump_channel_epoch(channel):
         except (OSError, ValueError):
             epoch = 0
         epoch += 1
-        with open(path, "w") as f:
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
             f.write(str(epoch))
+        os.replace(tmp, path)
     return epoch
 
 
