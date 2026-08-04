@@ -166,7 +166,9 @@ def _save_json_atomic(path, value):
         except OSError:
             pass
     tmp = path + ".tmp"
-    with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w") as f:
         json.dump(value, f, indent=2)
     os.replace(tmp, path)
     try:
@@ -378,7 +380,8 @@ def load_workspaces():
     data, source = _load_json_file_with_fallbacks(WORKSPACES_FILE, {}, (LEGACY_WORKSPACES_FILE,))
     if source == LEGACY_WORKSPACES_FILE and WORKSPACES_FILE != LEGACY_WORKSPACES_FILE:
         try:
-            _save_json_atomic(WORKSPACES_FILE, data)
+            with _ws_lock:
+                _save_json_atomic(WORKSPACES_FILE, data)
             os.unlink(LEGACY_WORKSPACES_FILE)
         except OSError:
             pass

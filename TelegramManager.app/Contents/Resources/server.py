@@ -319,7 +319,9 @@ def _copy_app_bundle(src, dest, timeout=1800):
     r = subprocess.run(["cp", "-cR", src, dest], capture_output=True, timeout=timeout)
     if r.returncode == 0:
         return True, ""
-    subprocess.run(["rm", "-rf", dest], capture_output=True, timeout=300)
+    rm = subprocess.run(["rm", "-rf", dest], capture_output=True, timeout=300)
+    if rm.returncode != 0 or os.path.lexists(dest):
+        return False, "could not clear existing destination"
     r = subprocess.run(["cp", "-R", src, dest], capture_output=True, timeout=timeout)
     if r.returncode == 0:
         return True, ""
@@ -1039,6 +1041,11 @@ def _validate_import_payload(data):
         elif key in ("port", "keeper_interval_days", "keeper_open_seconds", "auto_clear_cache_mb", "backup_keep_per_account", "lock_timeout_minutes"):
             if not isinstance(value, int):
                 return False, f"config.{key} must be an integer", None
+            # Same clamping /api/config applies — an out-of-range import (e.g.
+            # keeper_open_seconds: -1) would otherwise reach time.sleep().
+            if key in _INT_KEY_BOUNDS:
+                lo, hi = _INT_KEY_BOUNDS[key]
+                value = max(lo, min(hi, value))
         elif key == "extra_scan_dirs":
             if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
                 return False, "config.extra_scan_dirs must be an array of strings", None
@@ -1758,9 +1765,10 @@ def repair_account(account_path, actions):
                 subprocess.run(["rm", "-rf", app], capture_output=True, timeout=300)
             ok, err = _copy_app_bundle(app_source, app)
             if ok:
-                # Re-apply dock name
-                account_name = os.path.basename(account_path)
-                set_telegram_display_name(account_path, account_name)
+                # Re-apply dock name (custom if set, else folder name)
+                with _meta_lock:
+                    dock_name = metadata.get("dock_names", {}).get(account_path) or os.path.basename(account_path)
+                set_telegram_display_name(account_path, dock_name)
                 results.append({"action": "recopy_app", "ok": True,
                                 "msg": "Telegram.app replaced with a fresh copy"})
             else:
@@ -1978,7 +1986,19 @@ class RequestHandler(BaseHTTPRequestHandler):
         if length < 0 or length > 10 * 1024 * 1024:
             self.send_json({"success": False, "message": "Request body too large"}, 413)
             return
-        body   = self.rfile.read(length).decode() if length else "{}"
+        # A client may promise a Content-Length it never sends — without a
+        # timeout the read blocks forever and pins this handler thread.
+        if length:
+            self.connection.settimeout(30)
+            try:
+                body = self.rfile.read(length).decode()
+            except OSError:
+                self.send_json({"success": False, "message": "Request body read timed out"}, 400)
+                return
+            finally:
+                self.connection.settimeout(None)
+        else:
+            body = "{}"
         try:
             data = json.loads(body)
         except Exception:
@@ -2649,9 +2669,16 @@ class RequestHandler(BaseHTTPRequestHandler):
         if not acc_path or not is_safe_path(acc_path):
             self.send_json({"success": False, "message": "Invalid path"})
             return
+        if not get_shared_app():
+            self.send_json({"success": False,
+                            "message": "Set up the shared Telegram.app first before removing per-account copies."})
+            return
         app_path = find_account_app(acc_path)
         if not app_path:
             self.send_json({"success": False, "message": "No Telegram app bundle found in this folder"})
+            return
+        if find_telegram_pid(acc_path):
+            self.send_json({"success": False, "message": "Telegram is running for this account — quit it first"})
             return
         sz = get_folder_size(app_path)
         subprocess.run(["rm", "-rf", app_path], capture_output=True, timeout=300)
@@ -2665,14 +2692,21 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         removed = 0
         freed   = 0
+        skipped = 0
         for acc in scan_accounts():
             app_path = find_account_app(acc["path"])
             if app_path:
+                # Removing the bundle out from under a running Telegram
+                # corrupts the session — skip those accounts.
+                if find_telegram_pid(acc["path"]):
+                    _log.warning("remove-all-account-apps: %s is running — skipping", acc["path"])
+                    skipped += 1
+                    continue
                 freed += get_folder_size(app_path)
                 subprocess.run(["rm", "-rf", app_path], capture_output=True, timeout=300)
                 removed += 1
         invalidate_scan_cache()
-        self.send_json({"success": True, "removed": removed,
+        self.send_json({"success": True, "removed": removed, "skipped": skipped,
                         "freed": freed, "freed_human": human_size(freed)})
 
     def _post_api_export_config(self, data):

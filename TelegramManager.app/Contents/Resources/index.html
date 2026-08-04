@@ -2606,8 +2606,8 @@ async function openSelected() {
   for (const path of selectedAccounts) {
     const acc = accounts.find(a => a.path === path);
     if (acc && acc.status === "ready" && !acc.running) {
-      await api("/api/open", "POST", { path });
-      opened++;
+      const r = await api("/api/open", "POST", { path });
+      if (r && r.success !== false && !r._networkError) opened++;
       await new Promise(r => setTimeout(r, 1000));
     }
   }
@@ -3072,6 +3072,10 @@ async function saveProxy(forcedNull) {
 
 function showSettings() {
   api("/api/config").then(cfg => {
+    if (!cfg || cfg._networkError || cfg.success === false) {
+      toast(cfg?.message || "Could not load settings", "error");
+      return;
+    }
     document.getElementById("cfg-root-display").textContent =
       "Root folder: " + (cfg.root_dir || "(auto-detected)");
     document.getElementById("cfg-extra-dirs").value = (cfg.extra_scan_dirs || []).join("\n");
@@ -3123,6 +3127,10 @@ async function saveSettings() {
     lock_timeout_minutes,
     backup_keep_per_account,
   });
+  if (!r || r.success === false || r._networkError) {
+    toast(r?.message || "Could not save settings", "error");
+    return;
+  }
   hideSettings();
   _lockConfig.timeout = lock_timeout_minutes;
   resetIdleTimer();
@@ -3245,7 +3253,8 @@ async function removeAllAccountApps() {
   toast("Removing per-account apps after a safe shared-app check…", "info", 8000);
   const r = await api("/api/shared-app/remove-all-account-apps", "POST", {});
   if (r.success) {
-    toast(`Removed ${r.removed} app${r.removed !== 1 ? "s" : ""}, freed ${r.freed_human} ✓`, "success", 6000);
+    const skippedMsg = r.skipped ? `, skipped ${r.skipped} running` : "";
+    toast(`Removed ${r.removed} app${r.removed !== 1 ? "s" : ""}, freed ${r.freed_human}${skippedMsg} ✓`, "success", 6000);
     loadSharedAppStatus();
     await refresh();
   } else {

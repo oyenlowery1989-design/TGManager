@@ -174,7 +174,7 @@ def apply_proxy(proxy_config):
                         f"networksetup -setsecurewebproxy {shlex.quote(service)} {shlex.quote(r_host)} {shlex.quote(r_port)}")
 
     result = state._run_as_admin(
-        f"{set_cmd}\n{on_cmd}\n",
+        f"set -e\n{set_cmd}\n{on_cmd}\n",
         "TelegramManager is setting a proxy for this Telegram account."
     )
     if result.returncode != 0:

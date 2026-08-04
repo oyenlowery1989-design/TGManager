@@ -196,7 +196,11 @@ def restore_backup(backup_path, account_path):
     # Copy to a sibling temp dir first — the live tdata stays intact until the
     # copy has fully succeeded.
     try:
-        subprocess.run(["rm", "-rf", tdata_new], capture_output=True, timeout=300)
+        rm_r = subprocess.run(["rm", "-rf", tdata_new], capture_output=True, timeout=300)
+        if rm_r.returncode != 0:
+            state._log.error("restore_backup: could not clear staging area: %s",
+                              rm_r.stderr.decode(errors="replace").strip())
+            return False, "Could not clear staging area — try again"
         r = subprocess.run(["cp", "-R", tdata_src, tdata_new], capture_output=True, timeout=1800)
         if r.returncode != 0:
             state._log.error("restore_backup: cp failed: %s", r.stderr.decode(errors="replace").strip())
@@ -284,7 +288,11 @@ def backup_account(folder_path, account_name):
     # that list_backups() ignores, never a half backup that looks valid.
     partial_dir = backup_dir + ".partial"
     try:
-        subprocess.run(["rm", "-rf", partial_dir], capture_output=True, timeout=300)
+        rm_r = subprocess.run(["rm", "-rf", partial_dir], capture_output=True, timeout=300)
+        if rm_r.returncode != 0:
+            state._log.error("backup_account: could not clear staging area: %s",
+                              rm_r.stderr.decode(errors="replace").strip())
+            return False, "Could not clear staging area", ""
         os.makedirs(partial_dir, exist_ok=True)
         ok, err = _copy_tdata_excluding_cache(tdata_src, os.path.join(partial_dir, "tdata"))
         if not ok:
