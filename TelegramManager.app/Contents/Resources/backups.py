@@ -168,6 +168,9 @@ def restore_backup(backup_path, account_path):
     if real_backup is None:
         state._log.warning("restore_backup: invalid backup path %r", backup_path)
         return False, "Invalid backup path"
+    if not state.is_managed_account_path(account_path):
+        state._log.warning("restore_backup: invalid account path %r", account_path)
+        return False, "Restore destination is not a valid account folder"
     state._log.info("Restoring backup from %s into %s", real_backup, account_path)
     tdata_src = os.path.join(real_backup, "tdata")
     portable  = os.path.join(account_path, "TelegramForcePortable")
@@ -251,6 +254,9 @@ def restore_backup(backup_path, account_path):
 
 @state.serialize_account_op(lambda folder_path, account_name: folder_path, (False, state._BUSY_MSG, ""))
 def backup_account(folder_path, account_name):
+    if not state.is_managed_account_path(folder_path):
+        state._log.warning("backup_account: invalid account path %r", folder_path)
+        return False, "Path is not a valid account folder", ""
     # account_name comes straight from the client (server.py's /api/backup
     # passes data.get("name") unchecked). Strip it to a bare path component
     # so it can't traverse ("../../etc/pwned") or override the join outright
