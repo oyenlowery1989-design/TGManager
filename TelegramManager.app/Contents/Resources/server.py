@@ -518,6 +518,7 @@ def remove_cloned_app(account_path):
     _remove_account_clone(account_path)
 
 
+@serialize_account_op(lambda account_path, threshold_mb=0: account_path, (False, 0))
 def clear_account_caches(account_path, threshold_mb=0):
     """Delete all regenerable caches inside the account's tdata (media, file,
     emoji and the bot-WebView Chromium caches) — never session/login data.
@@ -1294,6 +1295,7 @@ def fix_all_dock_names():
     return results
 
 
+@serialize_account_op(lambda old_path, new_name: old_path, (False, _BUSY_MSG))
 def rename_account(old_path, new_name):
     """Rename an account folder and update all metadata keys.
 
@@ -1847,6 +1849,8 @@ def diagnose_account(account_path):
     return {"issues": issues, "warnings": warnings, "info": info}
 
 
+@serialize_account_op(lambda account_path, actions: account_path,
+                      [{"action": "operation", "ok": False, "msg": _BUSY_MSG}])
 def repair_account(account_path, actions):
     """
     Attempt to fix the account based on a list of requested repair actions.

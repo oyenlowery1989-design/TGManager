@@ -126,6 +126,34 @@ class ManagedAccountPathTests(unittest.TestCase):
         self.assertNotIn(os.path.join(tdata, "emoji"), removed)
         self.assertTrue(os.path.exists(os.path.join(outside, "keep")))
 
+    def test_clear_cache_returns_busy_while_account_operation_is_locked(self):
+        import threading
+        account = self._account("busy-cache-account")
+        lock = state._account_path_lock(account)
+        lock.acquire()
+        try:
+            result = []
+            thread = threading.Thread(target=lambda: result.append(
+                server.clear_account_caches(account)))
+            thread.start(); thread.join()
+            self.assertEqual(result, [(False, 0)])
+        finally:
+            lock.release()
+
+    def test_rename_returns_busy_while_account_operation_is_locked(self):
+        import threading
+        account = self._account("busy-rename-account")
+        lock = state._account_path_lock(account)
+        lock.acquire()
+        try:
+            result = []
+            thread = threading.Thread(target=lambda: result.append(
+                server.rename_account(account, "renamed")))
+            thread.start(); thread.join()
+            self.assertEqual(result, [(False, state._BUSY_MSG)])
+        finally:
+            lock.release()
+
     def test_shell_escaping_helpers(self):
         self.assertEqual(server._sq("a'b"), "'a'\\''b'")
         self.assertEqual(server._as_str("plain"), '"plain"')
