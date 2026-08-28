@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import importlib
+import json
 import os
 import sys
 import time
@@ -83,6 +84,28 @@ class ServerHelperTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIsNone(normalized)
         self.assertTrue(message)
+
+
+class ReadyFileTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp(prefix="tm_ready_test_")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_ready_file_is_atomic_and_contains_server_identity(self):
+        ready = os.path.join(self.tmp, "ready.json")
+        server._write_ready_file(ready, 8477, "test-token")
+        with open(ready, encoding="utf-8") as f:
+            self.assertEqual(json.load(f), {
+                "pid": os.getpid(), "port": 8477, "session_token": "test-token",
+            })
+        self.assertFalse(os.path.exists(ready + ".tmp"))
+
+    def test_ready_file_cleanup_ignores_missing_path(self):
+        server._remove_ready_file(os.path.join(self.tmp, "missing.json"))
 
 
 class TelegramUpdateLifecycleTests(unittest.TestCase):

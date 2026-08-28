@@ -3052,6 +3052,35 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
 
 
+def _write_ready_file(path, port, session_token):
+    """Atomically publish a bound server endpoint for the native launcher."""
+    if not path:
+        return
+    temporary = path + ".tmp"
+    try:
+        with open(temporary, "w", encoding="utf-8") as f:
+            json.dump({"pid": os.getpid(), "port": port,
+                       "session_token": session_token}, f)
+        os.replace(temporary, path)
+    except OSError as e:
+        _log.warning("Could not write launcher ready file: %s", e)
+        try:
+            os.remove(temporary)
+        except OSError:
+            pass
+
+
+def _remove_ready_file(path):
+    if not path:
+        return
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        _log.warning("Could not remove launcher ready file: %s", e)
+
+
 if __name__ == "__main__":
     threading.Thread(target=run_keeper_loop, daemon=True).start()
     threading.Thread(target=_app_watcher_loop, daemon=True).start()
@@ -3068,9 +3097,14 @@ if __name__ == "__main__":
         # Manual/standalone run — token exists only in this process, so print
         # the full URL to stdout for the developer (never to the log file).
         print(f"Session token generated. UI: http://127.0.0.1:{port}{ROUTE_PREFIX}/")
+    ready_file = os.environ.get("TG_READY_FILE", "")
+    _remove_ready_file(ready_file)
     server = ThreadedHTTPServer(("127.0.0.1", port), RequestHandler)
+    _write_ready_file(ready_file, port, SESSION_TOKEN)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
-    _log.info("Server shutting down")
+    finally:
+        _remove_ready_file(ready_file)
+        _log.info("Server shutting down")
