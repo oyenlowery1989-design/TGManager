@@ -109,6 +109,23 @@ class ManagedAccountPathTests(unittest.TestCase):
         self.assertIn("app bundle", results[-1]["msg"])
         chmod.assert_not_called()
 
+    def test_clear_cache_skips_symlinked_cache_target(self):
+        account = self._account("cache-link-account")
+        tdata = os.path.join(account, "TelegramForcePortable", "tdata")
+        outside = os.path.join(self.tmp, "outside-cache")
+        os.makedirs(outside)
+        with open(os.path.join(outside, "keep"), "w") as f:
+            f.write("must remain")
+        os.symlink(outside, os.path.join(tdata, "emoji"))
+        with mock.patch("server.find_telegram_pid", return_value=None), \
+             mock.patch("server.subprocess.run") as run:
+            run.return_value.returncode = 0
+            server.clear_account_caches(account)
+        removed = [call.args[0][-1] for call in run.call_args_list
+                   if call.args and call.args[0] and call.args[0][0] == "rm"]
+        self.assertNotIn(os.path.join(tdata, "emoji"), removed)
+        self.assertTrue(os.path.exists(os.path.join(outside, "keep")))
+
     def test_shell_escaping_helpers(self):
         self.assertEqual(server._sq("a'b"), "'a'\\''b'")
         self.assertEqual(server._as_str("plain"), '"plain"')
