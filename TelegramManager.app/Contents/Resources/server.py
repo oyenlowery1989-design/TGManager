@@ -1059,7 +1059,7 @@ def _validate_import_payload(data):
     allowed_metadata = {
         "notes": {}, "usernames": {}, "order": {}, "colors": {},
         "last_opened": {}, "pinned": [], "proxies": {}, "dock_names": {},
-        "avatars": {}
+        "avatars": {}, "account_ids": {}
     }
     cleaned_metadata = {}
 
@@ -1106,6 +1106,8 @@ def _validate_import_payload(data):
             ok, msg = _validate_import_string_map(f"metadata.{key}", value)
             if not ok:
                 return False, msg, None
+            if key == "account_ids" and not all(value.values()):
+                return False, "metadata.account_ids values must be non-empty strings", None
             if key == "avatars":
                 # Avatars are rendered as img src — drop anything that isn't a
                 # data: image URL (javascript:/http: would be an injection/SSRF).
@@ -1323,7 +1325,7 @@ def rename_account(old_path, new_name):
     with _meta_lock:
         new_meta = copy.deepcopy(metadata)
     for section in ("notes", "usernames", "order", "colors",
-                    "last_opened", "proxies", "dock_names", "avatars"):
+                    "last_opened", "proxies", "dock_names", "avatars", "account_ids"):
         d = new_meta.get(section, {})
         if old_path in d:
             d[new_path] = d.pop(old_path)

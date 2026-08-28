@@ -73,6 +73,15 @@ class ManagedAccountPathTests(unittest.TestCase):
         self.assertEqual(state.metadata["account_ids"][account], first)
         self.assertEqual(len(first), 32)
 
+    def test_rename_moves_account_id(self):
+        old_path = self._account("old")
+        state.metadata["account_ids"] = {old_path: "stable-id"}
+
+        ok, new_path = server.rename_account(old_path, "new")
+
+        self.assertTrue(ok)
+        self.assertEqual(state.metadata["account_ids"], {new_path: "stable-id"})
+
     def test_rejects_a_symlinked_account(self):
         account = self._account("real-account")
         alias = os.path.join(self.tmp, "account-alias")
@@ -240,6 +249,15 @@ class ManagedAccountPathTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIsNone(normalized)
         self.assertTrue(message)
+
+    def test_import_rejects_invalid_account_id_value(self):
+        payload = {
+            "metadata": {"account_ids": {"/tmp/account": 12}},
+            "config": {},
+            "workspaces": {},
+        }
+
+        self.assertFalse(server._validate_import_payload(payload)[0])
 
 
 class ReadyFileTests(unittest.TestCase):
