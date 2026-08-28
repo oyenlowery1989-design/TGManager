@@ -10,6 +10,7 @@ import os
 import plistlib
 import secrets
 import shlex
+import shutil
 import subprocess
 import threading
 import time
@@ -276,6 +277,8 @@ def _bundle_identifier(app_path):
 # native macOS Telegram (ru.keepcoder.Telegram) silently ignores it and opens
 # the user's personal session instead — a confusing, hard-to-diagnose mistake.
 TDESKTOP_BUNDLE_ID = "com.tdesktop.Telegram"
+TDESKTOP_TEAM_ID = "C67CF9S4VU"
+CLONE_STAMP_NAME = ".telegram-manager-clone.json"
 
 def _wrong_app_type_error(app_path):
     """Return an error string if app_path is not Telegram Desktop, else None."""
@@ -289,6 +292,115 @@ def _wrong_app_type_error(app_path):
     return (f"This app (bundle id {bid or 'unknown'}) is not Telegram Desktop — "
             "accounts need Telegram Desktop (com.tdesktop.Telegram) from "
             "desktop.telegram.org.")
+
+
+def _verify_tdesktop_bundle(app_path):
+    """Return ``(ok, message)`` for a clean, signed Telegram Desktop bundle.
+
+    A per-account clone is deliberately never accepted as an update source: it
+    is ephemeral and may have been altered by a failed in-app update.  This
+    check is used only for a user-selected source and the copied shared master,
+    before either can be launched for an account.
+    """
+    type_err = _wrong_app_type_error(app_path)
+    if type_err:
+        return False, type_err
+    executable = os.path.join(app_path, "Contents", "MacOS", "Telegram")
+    if not os.path.isfile(executable):
+        return False, "Telegram.app is missing its Telegram executable"
+    try:
+        verified = subprocess.run(
+            ["codesign", "--verify", "--deep", "--strict", app_path],
+            capture_output=True, text=True, timeout=120,
+        )
+        if verified.returncode != 0:
+            detail = (verified.stderr or verified.stdout).strip().splitlines()
+            return False, "Telegram.app has an invalid macOS signature" + (
+                f": {detail[-1]}" if detail else ""
+            )
+        identity = subprocess.run(
+            ["codesign", "-dvv", app_path], capture_output=True, text=True, timeout=30,
+        )
+    except FileNotFoundError:
+        return False, "macOS code-signing tools are unavailable"
+    except subprocess.TimeoutExpired:
+        return False, "Telegram.app signature verification timed out"
+    except Exception as e:
+        return False, f"Could not verify Telegram.app signature: {e}"
+    details = (identity.stderr or "") + "\n" + (identity.stdout or "")
+    if f"TeamIdentifier={TDESKTOP_TEAM_ID}" not in details:
+        return False, "Telegram.app is not signed by the expected Telegram Desktop developer"
+    return True, ""
+
+
+def _bundle_fingerprint(app_path):
+    """Small identity fingerprint for comparing a clone with its master.
+
+    It covers the executable, plist, and sealed-resource manifest, rather than
+    trusting the human-readable version alone.  The files are read only; no
+    app bundle is patched or re-signed by Telegram Manager.
+    """
+    files = (
+        "Contents/Info.plist",
+        "Contents/MacOS/Telegram",
+        "Contents/_CodeSignature/CodeResources",
+    )
+    digest = hashlib.sha256()
+    try:
+        for relative in files:
+            path = os.path.join(app_path, relative)
+            digest.update(relative.encode() + b"\0")
+            with open(path, "rb") as f:
+                for block in iter(lambda: f.read(1024 * 1024), b""):
+                    digest.update(block)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
+def _clone_stamp_path(account_path):
+    return os.path.join(account_path, CLONE_STAMP_NAME)
+
+
+def _read_clone_stamp(account_path):
+    try:
+        with open(_clone_stamp_path(account_path), "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        fingerprint = payload.get("master_fingerprint")
+        return fingerprint if isinstance(fingerprint, str) else None
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def _write_clone_stamp(account_path, fingerprint):
+    """Record which verified master created a disposable account clone."""
+    if not fingerprint:
+        return
+    destination = _clone_stamp_path(account_path)
+    temporary = destination + ".tmp"
+    try:
+        with open(temporary, "w", encoding="utf-8") as f:
+            json.dump({"master_fingerprint": fingerprint}, f)
+        os.replace(temporary, destination)
+    except OSError as e:
+        _log.warning("Could not write clone stamp for %s: %s", account_path, e)
+        try:
+            os.remove(temporary)
+        except OSError:
+            pass
+
+
+def _remove_account_clone(account_path, app_path=None):
+    """Remove only the disposable app clone and its manager sidecar, never tdata."""
+    app_path = app_path or find_account_app(account_path)
+    if app_path and os.path.isdir(app_path):
+        subprocess.run(["rm", "-rf", app_path], capture_output=True, timeout=300)
+    try:
+        os.remove(_clone_stamp_path(account_path))
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        _log.warning("Could not remove clone stamp for %s: %s", account_path, e)
 
 
 def _safe_bundle_name(name, fallback):
@@ -357,6 +469,7 @@ def clone_app_to_folder(account_path, shared_app_path=None, app_name=None):
     # ad-hoc re-sign that changes the app's code identity — which has corrupted tdata
     # sessions in the past. The Dock display name is applied only via the explicit
     # dock-name action (set_telegram_display_name), never on every open.
+    _write_clone_stamp(account_path, _bundle_fingerprint(shared_app_path))
     return True
 
 def find_account_app(account_path: str):
@@ -402,9 +515,7 @@ def _find_fallback_app_source(accs):
 def remove_cloned_app(account_path):
     if not get_shared_app():
         return
-    app = find_account_app(account_path)
-    if app and os.path.isdir(app):
-        subprocess.run(["rm", "-rf", app], capture_output=True, timeout=300)
+    _remove_account_clone(account_path)
 
 
 def clear_account_caches(account_path, threshold_mb=0):
@@ -743,7 +854,7 @@ def _app_watcher_loop():
                     app = find_account_app(p)
                     if app:
                         _log.info("Watcher: removing idle cloned app for %s", acc["name"])
-                        subprocess.run(["rm", "-rf", app], capture_output=True, timeout=300)
+                        _remove_account_clone(p, app)
                         invalidate_scan_cache()
                 # Auto-clear caches (media + WebView) if total is over threshold
                 if threshold_mb > 0:
@@ -839,16 +950,15 @@ def open_account(path):
         _log.info("open_account: already running for %s", path)
         return True, "already running"
     app = find_account_app(path)
-    # A leftover clone from an older master would silently launch the old
-    # version forever — replace it when its version differs from the master.
+    # A leftover clone must come from this exact shared master.  Version text
+    # alone is not enough: a failed updater can leave a modified bundle with
+    # the same version number and an invalid signature.
     shared = get_shared_app()
     if app and shared:
-        clone_id  = (_bundle_identifier(app), _bundle_version(app))
-        master_id = (_bundle_identifier(shared), _bundle_version(shared))
-        if all(clone_id) and all(master_id) and clone_id != master_id:
-            _log.info("open_account: replacing stale clone %s with master %s for %s",
-                      clone_id, master_id, path)
-            subprocess.run(["rm", "-rf", app], capture_output=True, timeout=300)
+        master_fingerprint = _bundle_fingerprint(shared)
+        if master_fingerprint and _read_clone_stamp(path) != master_fingerprint:
+            _log.info("open_account: replacing clone that does not match shared master for %s", path)
+            _remove_account_clone(path, app)
             app = None
     if not app:
         with _meta_lock:
@@ -1416,7 +1526,115 @@ def setup_account(folder_path):
 
     return True, "Setup complete"
 
-def update_all_apps():
+def _version_tuple(value):
+    """Comparable numeric tuple for Telegram's dotted version strings."""
+    if not isinstance(value, str):
+        return None
+    parts = value.split(".")
+    if not parts or any(not part.isdigit() for part in parts):
+        return None
+    return tuple(int(part) for part in (parts + ["0"] * 4)[:4])
+
+
+def _staged_update_version(account_path):
+    """Read the version from Telegram Desktop's small staged-update marker."""
+    base = os.path.join(account_path, "TelegramForcePortable", "tupdates", "temp")
+    ready = os.path.join(base, "ready")
+    version_file = os.path.join(base, "tdata", "version")
+    if not os.path.isfile(ready) or not os.path.isfile(version_file):
+        return None
+    try:
+        with open(version_file, "rb") as f:
+            raw = f.read()
+        # Telegram writes a small header then the dotted version as UTF-32LE.
+        value = raw[8:].decode("utf-32-le").rstrip("\0")
+    except (OSError, UnicodeError):
+        return None
+    return value if _version_tuple(value) is not None else None
+
+
+def _archive_stale_updates(accounts, master_version):
+    """Move stale updater state aside after a verified master replacement.
+
+    ``tupdates`` contains Telegram's downloaded updater files, not account
+    session data.  Moving it to a recovery area is reversible and prevents an
+    old ``ready`` marker from requesting the same update on every new clone.
+    """
+    master_key = _version_tuple(master_version)
+    if not master_key:
+        return 0, 0
+    archived = skipped = 0
+    recovery_root = os.path.join(
+        SHARED_APPS_DIR, "update-recovery", datetime.now().strftime("%Y%m%d-%H%M%S")
+    )
+    for acc in accounts:
+        if find_telegram_pid(acc["path"]):
+            skipped += 1
+            continue
+        staged_version = _staged_update_version(acc["path"])
+        if not staged_version:
+            continue
+        staged_key = _version_tuple(staged_version)
+        if not staged_key or staged_key > master_key:
+            skipped += 1
+            continue
+        source = os.path.join(acc["path"], "TelegramForcePortable", "tupdates")
+        destination = os.path.join(
+            recovery_root, hashlib.sha256(os.path.realpath(acc["path"]).encode()).hexdigest()[:16]
+        )
+        try:
+            os.makedirs(recovery_root, exist_ok=True)
+            shutil.move(source, destination)
+            archived += 1
+        except (OSError, shutil.Error) as e:
+            _log.warning("Could not archive stale Telegram updater for %s: %s", acc["path"], e)
+            skipped += 1
+    return archived, skipped
+
+
+def _replace_shared_app(app_source):
+    """Verify and atomically replace the canonical shared Telegram.app."""
+    ok, message = _verify_tdesktop_bundle(app_source)
+    if not ok:
+        return False, message
+    shared_dir = os.path.join(SHARED_APPS_DIR, "macOS")
+    shared = SHARED_MACOS_APP
+    if os.path.realpath(app_source) == os.path.realpath(shared):
+        return False, "Choose a newly downloaded Telegram.app, not the current shared master"
+    os.makedirs(shared_dir, exist_ok=True)
+    temporary = shared + ".new"
+    previous = shared + ".previous"
+    copied, error = _copy_app_bundle(app_source, temporary)
+    if not copied:
+        return False, "Failed to copy Telegram.app: " + error
+    ok, message = _verify_tdesktop_bundle(temporary)
+    if not ok:
+        subprocess.run(["rm", "-rf", temporary], capture_output=True, timeout=300)
+        return False, "Copied Telegram.app did not pass verification: " + message
+    # Quarantine metadata is not part of the code signature. Remove it only
+    # after verification so every fresh clone launches without Gatekeeper noise.
+    subprocess.run(["xattr", "-dr", "com.apple.quarantine", temporary],
+                   capture_output=True, timeout=120)
+    if os.path.lexists(previous):
+        subprocess.run(["rm", "-rf", previous], capture_output=True, timeout=300)
+    moved_previous = False
+    try:
+        if os.path.lexists(shared):
+            os.rename(shared, previous)
+            moved_previous = True
+        os.rename(temporary, shared)
+    except OSError as e:
+        # Keep the known-good previous master usable if the final swap fails.
+        if moved_previous and not os.path.lexists(shared) and os.path.lexists(previous):
+            try:
+                os.rename(previous, shared)
+            except OSError as restore_error:
+                _log.critical("Could not restore previous shared Telegram.app: %s", restore_error)
+        return False, f"Could not activate verified Telegram.app: {e}"
+    return True, _bundle_version(shared) or "unknown"
+
+
+def update_all_apps(app_source=""):
     running = [acc for acc in scan_accounts() if acc["running"]]
     if running:
         names = ", ".join(acc["name"] for acc in running[:5])
@@ -1424,67 +1642,46 @@ def update_all_apps():
             names += f" … (+{len(running) - 5} more)"
         return False, f"Close Telegram first for: {names}"
 
-    # Resolve source: explicit config → fallback to newest per-account copy
-    app_source = config.get("app_source", "")
-    if not os.path.isdir(app_source):
-        latest = _find_fallback_app_source(scan_accounts())
-        if latest:
-            app_source = latest
+    if not app_source:
+        return False, "Choose a freshly downloaded Telegram.app first"
+    if not is_allowed_app_source(app_source):
+        return False, "Source is not a valid or approved Telegram.app bundle"
+    accounts = scan_accounts()
+    started = [acc for acc in accounts if find_telegram_pid(acc["path"])]
+    if started:
+        names = ", ".join(acc["name"] for acc in started[:5])
+        return False, f"Close Telegram first for: {names}"
+    source_real = os.path.realpath(app_source)
+    if any(os.path.realpath(app) == source_real
+           for acc in accounts if (app := find_account_app(acc["path"]))):
+        return False, "Choose a freshly downloaded Telegram.app, not an account-local clone"
+    ok, result = _replace_shared_app(app_source)
+    if not ok:
+        return False, result
 
-    shared = get_shared_app()
-    if shared:
-        if not os.path.isdir(app_source):
-            return False, "Set Telegram.app source path in Settings first"
-        type_err = _wrong_app_type_error(app_source)
-        if type_err:
-            return False, type_err
-        shared_tmp = shared + ".new"
-        subprocess.run(["rm", "-rf", shared_tmp], capture_output=True, timeout=300)
-        r = subprocess.run(["cp", "-R", app_source, shared_tmp], capture_output=True, timeout=1800)
-        if r.returncode != 0:
-            subprocess.run(["rm", "-rf", shared_tmp], capture_output=True, timeout=300)
-            return False, "Failed to update shared Telegram.app"
-        subprocess.run(["rm", "-rf", shared], capture_output=True, timeout=300)
-        os.rename(shared_tmp, shared)
-        return True, "Shared Telegram.app updated"
-
-    if not os.path.isdir(app_source):
-        latest = _find_fallback_app_source(scan_accounts())
-        if not latest:
-            return False, "No Telegram app bundle found in any account"
-        app_source = latest
-
-    type_err = _wrong_app_type_error(app_source)
-    if type_err:
-        return False, type_err
-
-    count = 0
-    for acc in scan_accounts():
-        app_dest = find_account_app(acc["path"])
-        if os.path.isdir(os.path.join(acc["path"], "TelegramForcePortable")) and app_dest:
-            if os.path.abspath(app_dest) == os.path.abspath(app_source):
-                continue
-            # Re-check right before replacing — an account may have been launched
-            # after the up-front running check at the top of this function.
+    removed = 0
+    running_skipped = 0
+    for acc in accounts:
+        app = find_account_app(acc["path"])
+        if app:
+            # A launch can race the initial all-closed check. Never remove a
+            # bundle while its account is running; the normal watcher/fingerprint
+            # path will refresh it after the account closes.
             if find_telegram_pid(acc["path"]):
-                _log.warning("update_all_apps: %s is running — skipping", acc["path"])
+                running_skipped += 1
                 continue
-            # Copy to a temp name, then swap — keeps the bundle name unchanged
-            app_tmp = app_dest + ".new"
-            subprocess.run(["rm", "-rf", app_tmp], capture_output=True, timeout=300)
-            r = subprocess.run(["cp", "-R", app_source, app_tmp], capture_output=True, timeout=1800)
-            if r.returncode != 0:
-                subprocess.run(["rm", "-rf", app_tmp], capture_output=True, timeout=300)
-                _log.warning("update_all_apps: cp failed for %s — skipping", acc["path"])
-                continue
-            subprocess.run(["rm", "-rf", app_dest], capture_output=True, timeout=300)
-            os.rename(app_tmp, app_dest)
-            # Re-apply dock name after binary update (Info.plist was overwritten by cp)
-            with _meta_lock:
-                dock_name = metadata.get("dock_names", {}).get(acc["path"]) or acc["name"]
-            _patch_app_display_name(app_dest, dock_name)
-            count += 1
-    return True, f"Updated {count} accounts"
+            _remove_account_clone(acc["path"], app)
+            removed += 1
+    archived, skipped = _archive_stale_updates(accounts, result)
+    invalidate_scan_cache()
+    message = f"Shared Telegram.app {result} verified; {removed} local clone(s) will be recreated on next open"
+    if archived:
+        message += f"; archived stale updater state for {archived} account(s)"
+    if skipped:
+        message += f"; kept {skipped} newer or unreadable updater state(s)"
+    if running_skipped:
+        message += f"; left {running_skipped} running account clone(s) untouched"
+    return True, message
 
 
 # ── Diagnose & Repair ─────────────────────────────────────────────────────
@@ -2144,7 +2341,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.send_json(response)
 
     def _post_api_update_all(self, data):
-        ok, msg = update_all_apps()
+        ok, msg = update_all_apps(data.get("source", ""))
         self.send_json({"success": ok, "message": msg})
 
     def _post_api_note(self, data):
@@ -2617,29 +2814,23 @@ class RequestHandler(BaseHTTPRequestHandler):
 
 
     def _post_api_shared_app_setup(self, data):
-        # Copy best available Telegram.app to _apps/macOS/Telegram.app
-        # Priority: explicit request source → config → sibling ROOT_DIR/Telegram.app → newest per-account copy
+        # A shared master may only be replaced from a deliberately selected
+        # source, never from a disposable account-local clone.
         req_source = data.get("source", "")
-        if req_source:
-            if not is_allowed_app_source(req_source):
-                self.send_json({"success": False,
-                                "message": "Source is not a valid or approved .app bundle. "
-                                           "Use “Choose App…” to select it."})
-                return
-            app_source = req_source
-        else:
-            app_source = config.get("app_source", "")
+        if not req_source:
+            self.send_json({"success": False,
+                            "message": "Choose a freshly downloaded Telegram.app first."})
+            return
+        if not is_allowed_app_source(req_source):
+            self.send_json({"success": False,
+                            "message": "Source is not a valid or approved .app bundle. "
+                                       "Use “Choose App…” to select it."})
+            return
+        app_source = req_source
         if not os.path.isdir(app_source):
-            # Auto-detect: Telegram.app placed next to TelegramManager.app
-            if os.path.isdir(SIBLING_APP):
-                app_source = SIBLING_APP
-            else:
-                latest = _find_fallback_app_source(scan_accounts())
-                if not latest:
-                    self.send_json({"success": False,
-                                    "message": "No Telegram.app found. Place Telegram.app next to TelegramManager.app, or set the app path in Settings."})
-                    return
-                app_source = latest
+            self.send_json({"success": False,
+                            "message": "Choose a freshly downloaded Telegram.app first."})
+            return
         # Defense in depth: whatever the resolution path, never copy+launch
         # a bundle from an untrusted location.
         if not is_allowed_app_source(app_source):
@@ -2651,18 +2842,27 @@ class RequestHandler(BaseHTTPRequestHandler):
         if type_err:
             self.send_json({"success": False, "message": type_err})
             return
-        shared_dir = os.path.join(SHARED_APPS_DIR, "macOS")
-        os.makedirs(shared_dir, exist_ok=True)
-        dest = os.path.join(shared_dir, "Telegram.app")
-        ok, err = _copy_app_bundle(app_source, dest)
-        if not ok:
-            self.send_json({"success": False, "message": "Copy failed: " + err})
+        accounts = scan_accounts()
+        running = [acc for acc in accounts if acc["running"]]
+        if running:
+            names = ", ".join(acc["name"] for acc in running[:5])
+            if len(running) > 5:
+                names += f" … (+{len(running) - 5} more)"
+            self.send_json({"success": False, "message": f"Close Telegram first for: {names}"})
             return
-        # Strip quarantine so the master (and every clone from it) launches without Gatekeeper prompts
-        subprocess.run(["xattr", "-dr", "com.apple.quarantine", dest], capture_output=True, timeout=120)
+        source_real = os.path.realpath(app_source)
+        if any(os.path.realpath(app) == source_real
+               for acc in accounts if (app := find_account_app(acc["path"]))):
+            self.send_json({"success": False,
+                            "message": "Choose a freshly downloaded Telegram.app, not an account-local clone."})
+            return
+        ok, result = _replace_shared_app(app_source)
+        if not ok:
+            self.send_json({"success": False, "message": result})
+            return
         invalidate_scan_cache()
         self.send_json({"success": True,
-                        "message": "Shared Telegram.app is ready. Accounts will use it on next open."})
+                        "message": f"Verified shared Telegram.app {result} is ready. Accounts will use it on next open."})
 
     def _post_api_shared_app_remove_account_app(self, data):
         acc_path = data.get("path", "")

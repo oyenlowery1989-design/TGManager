@@ -1109,7 +1109,7 @@
 <div class="toolbar-expanded">
   <button class="btn" onclick="openPinned()" id="btn-open-pinned" data-tip="Launch only pinned accounts">Open Pinned</button>
   <button class="btn" onclick="setupAll()" data-tip="Copy Telegram.app into accounts that are missing it">Setup</button>
-  <button class="btn" onclick="updateAll()" data-tip="Replace all per-account Telegram.app copies with the latest version from your source">Update All</button>
+  <button class="btn" onclick="updateAll()" data-tip="Choose a clean Telegram.app, verify it, then refresh account clones safely">Update Telegram</button>
   <div class="toolbar-sep"></div>
   <button class="btn" onclick="backupAll()" data-tip="Save a backup of every account's session data (tdata)">Backup All</button>
   <button class="btn" onclick="showBackupBrowser()" data-tip="View saved backups and restore one to an account">Browse Backups</button>
@@ -1461,8 +1461,7 @@
       <p class="settings-section-title" style="margin-top:20px">Shared App (saves ~435 MB per account)</p>
       <div id="shared-app-status" style="font-size:12px;color:var(--text-dim);background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:7px;padding:9px 12px;margin-bottom:10px;line-height:1.7">Loading…</div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:4px">
-        <button class="btn primary" style="font-size:11px;padding:5px 12px" onclick="setupSharedApp()">⚡ Set Up Shared App</button>
-        <button class="btn" style="font-size:11px;padding:5px 12px" onclick="setupSharedAppPick()" data-tip="Pick a Telegram.app with a file dialog and use it as the shared master">📂 Choose App…</button>
+        <button class="btn primary" style="font-size:11px;padding:5px 12px" onclick="setupSharedAppPick()" data-tip="Pick a clean Telegram.app, verify it, and use it as the shared master">📂 Choose Shared App…</button>
         <button class="btn danger" style="font-size:11px;padding:5px 12px" onclick="removeAllAccountApps()">🗑 Remove All Account Apps</button>
       </div>
 
@@ -2405,9 +2404,19 @@ async function setupAll() {
 }
 
 async function updateAll() {
-  toast("Checking that all accounts are closed, then updating Telegram apps…", "info", 7000);
-  const r = await api("/api/update-all", "POST");
+  toast("Choose a freshly downloaded Telegram.app to verify and install…", "info", 7000);
+  const picked = await api("/api/pick-app");
+  if (!picked.success) {
+    if (picked.message !== "canceled") toast(picked.message || "Could not choose Telegram.app", "error");
+    return;
+  }
+  toast("Checking accounts, signature, and updater state…", "info", 9000);
+  const r = await api("/api/update-all", "POST", { source: picked.path });
   toastResult(r, "Done", "Failed");
+  if (r.success) {
+    loadSharedAppStatus();
+    await refresh();
+  }
 }
 
 async function backupAccount(path, name) {
