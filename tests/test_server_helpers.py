@@ -44,6 +44,7 @@ class ManagedAccountPathTests(unittest.TestCase):
         self.tmp = tempfile.mkdtemp(prefix="tm_account_path_")
         self.original_root = state.ROOT_DIR
         self.original_metadata_file = state.METADATA_FILE
+        self.original_metadata = copy.deepcopy(state.metadata)
         state.ROOT_DIR = self.tmp
         state.METADATA_FILE = os.path.join(self.tmp, "manager_data.json")
 
@@ -51,6 +52,8 @@ class ManagedAccountPathTests(unittest.TestCase):
         import shutil
         state.ROOT_DIR = self.original_root
         state.METADATA_FILE = self.original_metadata_file
+        state.metadata.clear()
+        state.metadata.update(self.original_metadata)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _account(self, name="account"):
@@ -492,6 +495,8 @@ class BackupPathTests(unittest.TestCase):
         self._orig_data = state.DATA_DIR
         self._orig_root = state.ROOT_DIR
         self._orig_metadata_file = state.METADATA_FILE
+        self._orig_metadata = copy.deepcopy(state.metadata)
+        self._orig_backup_map_cache = copy.deepcopy(backups._backup_map_cache)
         self.tmp = tempfile.mkdtemp(prefix="tm_test_")
         state.DATA_DIR = self.tmp
         state.ROOT_DIR = self.tmp
@@ -504,11 +509,19 @@ class BackupPathTests(unittest.TestCase):
         state.DATA_DIR = self._orig_data
         state.ROOT_DIR = self._orig_root
         state.METADATA_FILE = self._orig_metadata_file
+        state.metadata.clear()
+        state.metadata.update(self._orig_metadata)
+        backups._backup_map_cache.clear()
+        backups._backup_map_cache.update(self._orig_backup_map_cache)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def _make_backup(self, date="2026-01-01_00-00", account="acct"):
+    def _make_backup(self, date="2026-01-01_00-00", account="acct", account_id=None, account_name=None):
         b = os.path.join(self.tmp, "Backups", date, account)
         os.makedirs(os.path.join(b, "tdata"))
+        if account_id is not None:
+            with open(os.path.join(b, "backup.json"), "w", encoding="utf-8") as f:
+                json.dump({"account_id": account_id, "account_name": account_name,
+                           "created_at": "2026-01-01T00:00:00"}, f)
         return b
 
     def test_resolve_backup_dir_accepts_two_level_paths(self):
@@ -534,12 +547,28 @@ class BackupPathTests(unittest.TestCase):
         names = [b["account"] for b in server.list_backups()]
         self.assertEqual(names, ["good"])
 
+    def test_list_backups_uses_manifest_identity_with_legacy_fallback(self):
+        manifest = self._make_backup(account="uuid-2", account_id="uuid", account_name="Visible account")
+        legacy = self._make_backup(account="legacy")
+        listed = {b["backup_path"]: b for b in backups.list_backups()}
+        self.assertEqual(listed[manifest]["account"], "Visible account")
+        self.assertEqual(listed[manifest]["account_name"], "Visible account")
+        self.assertEqual(listed[manifest]["account_id"], "uuid")
+        self.assertEqual(listed[legacy]["account"], "legacy")
+        self.assertEqual(listed[legacy]["account_name"], "legacy")
+        self.assertIsNone(listed[legacy]["account_id"])
+        self.assertEqual(backups._last_backup_map()["Visible account"], "2026-01-01_00-00")
+
     def test_same_second_backups_get_distinct_destinations(self):
         first = backups.backup_account(self.account, "Account")
         second = backups.backup_account(self.account, "Account")
         self.assertTrue(first[0]); self.assertTrue(second[0])
         self.assertNotEqual(first[2], second[2])
-        self.assertTrue(os.path.isfile(os.path.join(first[2], "backup.json")))
+        with open(os.path.join(first[2], "backup.json"), encoding="utf-8") as f:
+            manifest = json.load(f)
+        self.assertEqual(manifest["account_id"], state.metadata["account_ids"][self.account])
+        self.assertEqual(manifest["account_name"], "Account")
+        self.assertTrue(manifest["created_at"])
 
     def test_failed_second_backup_keeps_existing_completed_backup(self):
         first = backups.backup_account(self.account, "Account")
@@ -829,18 +858,23 @@ class PruneBackupsTests(unittest.TestCase):
         state.config["backup_keep_per_account"] = self._orig_keep
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def _make_backup(self, date, account):
+    def _make_backup(self, date, account, account_id=None, account_name=None):
         b = os.path.join(self.tmp, "Backups", date, account)
         os.makedirs(os.path.join(b, "tdata"))
+        if account_id is not None:
+            with open(os.path.join(b, "backup.json"), "w", encoding="utf-8") as f:
+                json.dump({"account_id": account_id, "account_name": account_name,
+                           "created_at": date}, f)
         return b
 
     def test_prune_keeps_only_newest_n(self):
+        account_id = "account-uuid"
         dates = ["2026-01-01_00-00", "2026-01-02_00-00", "2026-01-03_00-00", "2026-01-04_00-00"]
-        for d in dates:
-            self._make_backup(d, "acct")
+        for suffix, d in enumerate(dates, 1):
+            self._make_backup(d, f"{account_id}-{suffix}", account_id, "acct")
         state.config["backup_keep_per_account"] = 2
-        backups.prune_backups("acct")
-        remaining = sorted(b["date"] for b in backups.list_backups() if b["account"] == "acct")
+        backups.prune_backups(account_id)
+        remaining = sorted(b["date"] for b in backups.list_backups() if b["account_id"] == account_id)
         self.assertEqual(remaining, ["2026-01-03_00-00", "2026-01-04_00-00"])
 
     def test_prune_is_noop_when_keep_is_zero(self):

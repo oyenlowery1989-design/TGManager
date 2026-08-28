@@ -45,6 +45,20 @@ def _copy_tdata_excluding_cache(src, dst):
                                  else r.stderr.decode(errors="replace").strip()[:200])
 
 
+def _read_backup_manifest(backup_dir):
+    """Return a valid backup manifest, or None for legacy/corrupt backups."""
+    try:
+        with open(os.path.join(backup_dir, "backup.json"), encoding="utf-8") as f:
+            manifest = json.load(f)
+        if (isinstance(manifest, dict)
+                and isinstance(manifest.get("account_id"), str) and manifest["account_id"]
+                and isinstance(manifest.get("account_name"), str) and manifest["account_name"]):
+            return manifest
+    except (OSError, ValueError, TypeError):
+        pass
+    return None
+
+
 def list_backups():
     """Return all tdata backups found in ROOT_DIR/Backups/, newest first."""
     backup_root = os.path.join(state.DATA_DIR, "Backups")
@@ -61,10 +75,14 @@ def list_backups():
             acc_path  = os.path.join(date_path, account)
             tdata_src = os.path.join(acc_path, "tdata")
             if os.path.isdir(tdata_src):
+                manifest = _read_backup_manifest(acc_path)
+                account_name = manifest["account_name"] if manifest else account
                 size = state.get_folder_size(tdata_src)
                 backups.append({
                     "date":       date_folder,
-                    "account":    account,
+                    "account":    account_name,
+                    "account_id": manifest["account_id"] if manifest else None,
+                    "account_name": account_name,
                     "backup_path": acc_path,
                     "size":       size,
                     "size_human": state.human_size(size),
@@ -93,7 +111,8 @@ def _last_backup_map():
                 for account in os.listdir(date_path):
                     if account.endswith(".partial"):
                         continue
-                    result.setdefault(account, date_folder)
+                    manifest = _read_backup_manifest(os.path.join(date_path, account))
+                    result.setdefault(manifest["account_name"] if manifest else account, date_folder)
         except OSError as e:
             state._log.warning("_last_backup_map: %s", e)
     _backup_map_cache["map"] = result
@@ -139,7 +158,7 @@ def delete_backup(backup_path):
     return True, "Backup deleted"
 
 
-def prune_backups(account_name):
+def prune_backups(account_id):
     """Enforce backup_keep_per_account for one account (0 = keep all)."""
     try:
         keep = int(state.config.get("backup_keep_per_account", 0))
@@ -147,7 +166,7 @@ def prune_backups(account_name):
         keep = 0
     if keep <= 0:
         return
-    mine = [b for b in list_backups() if b["account"] == account_name]  # newest first
+    mine = [b for b in list_backups() if b["account_id"] == account_id]  # newest first
     for b in mine[keep:]:
         ok, msg = delete_backup(b["backup_path"])
         if ok:
@@ -329,6 +348,6 @@ def backup_account(folder_path, account_name):
         state._log.error("backup_account: finalize failed for %s: %s", folder_path, e)
         return False, f"Backup copied but could not be finalized — kept at {partial_dir}", ""
     state._log.info("Backup complete: %s", backup_dir)
-    prune_backups(account_name)
+    prune_backups(account_id)
     _backup_map_cache["ts"] = 0.0
     return True, f"Backed up to Backups/{date_str}/{account_name}", backup_dir
