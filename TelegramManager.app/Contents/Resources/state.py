@@ -288,7 +288,7 @@ _config_lock = threading.RLock()
 # while save_workspaces() re-acquires it internally without deadlocking.
 _ws_lock     = threading.RLock()
 
-# One lock per account path, so open/backup/restore for the SAME account can't
+# One lock per account path, so open/backup/restore/mutations for the SAME account can't
 # interleave (double-launch against one tdata, torn backup, tdata-less restore).
 # Different accounts stay fully parallel. kill/close intentionally stays
 # lock-free so an account can always be force-closed, even mid-backup.
@@ -300,7 +300,7 @@ def _account_path_lock(path):
     with _account_op_locks_guard:
         lk = _account_op_locks.get(key)
         if lk is None:
-            lk = _account_op_locks[key] = threading.Lock()
+            lk = _account_op_locks[key] = threading.RLock()
     return lk
 
 def serialize_account_op(get_path, busy_result):
