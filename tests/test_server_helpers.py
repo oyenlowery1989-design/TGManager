@@ -43,11 +43,14 @@ class ManagedAccountPathTests(unittest.TestCase):
         import tempfile
         self.tmp = tempfile.mkdtemp(prefix="tm_account_path_")
         self.original_root = state.ROOT_DIR
+        self.original_metadata_file = state.METADATA_FILE
         state.ROOT_DIR = self.tmp
+        state.METADATA_FILE = os.path.join(self.tmp, "manager_data.json")
 
     def tearDown(self):
         import shutil
         state.ROOT_DIR = self.original_root
+        state.METADATA_FILE = self.original_metadata_file
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _account(self, name="account"):
@@ -59,6 +62,13 @@ class ManagedAccountPathTests(unittest.TestCase):
         account = self._account()
         self.assertTrue(state.is_managed_account_path(account))
         self.assertFalse(state.is_managed_account_path(os.path.join(self.tmp, "ordinary-folder")))
+
+    def test_ensure_account_id_is_stable_and_persisted(self):
+        account = self._account()
+        first = state.ensure_account_id(account)
+        self.assertEqual(first, state.ensure_account_id(account))
+        self.assertEqual(state.metadata["account_ids"][account], first)
+        self.assertEqual(len(first), 32)
 
     def test_rejects_a_symlinked_account(self):
         account = self._account("real-account")
