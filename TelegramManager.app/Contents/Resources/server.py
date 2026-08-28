@@ -1483,6 +1483,7 @@ def close_all():
         invalidate_scan_cache()
     threading.Thread(target=_cleanup_all, daemon=True).start()
 
+@serialize_account_op(lambda folder_path: folder_path, (False, _BUSY_MSG))
 def setup_account(folder_path):
     # Resolve app source: explicit config → shared master → any existing account copy
     app_source = config.get("app_source", "")
@@ -1534,6 +1535,39 @@ def setup_account(folder_path):
     set_telegram_display_name(folder_path, account_name)
 
     return True, "Setup complete"
+
+@serialize_account_op(lambda account_path: account_path, (False, _BUSY_MSG, ""))
+def delete_account(account_path):
+    if not account_path or not os.path.isdir(account_path):
+        return False, "Folder not found", ""
+    if is_running(account_path):
+        return False, "Telegram is still running for this account — close it first", ""
+    try:
+        tdata_path = os.path.join(account_path, "TelegramForcePortable", "tdata")
+        backup_path = ""
+        if os.path.isdir(tdata_path):
+            ok, msg, backup_path = backup_account(account_path, os.path.basename(account_path))
+            if not ok:
+                return False, f"Backup before delete failed: {msg}", ""
+        # Move to Trash via Finder — safe, recoverable
+        script = f'tell application "Finder" to move (POSIX file {_as_str(account_path)}) to trash'
+        r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            return False, r.stderr.strip() or "Move to Trash failed", ""
+        with _meta_lock:
+            for section in ("notes", "usernames", "order", "colors", "last_opened",
+                            "dock_names", "proxies", "avatars"):
+                metadata.get(section, {}).pop(account_path, None)
+            pinned = metadata.get("pinned", [])
+            if account_path in pinned:
+                pinned.remove(account_path)
+            save_metadata(metadata)
+        msg = "Moved to Trash"
+        if backup_path:
+            msg += f"; backup saved at {backup_path}"
+        return True, msg, backup_path
+    except Exception as e:
+        return False, str(e), ""
 
 def _version_tuple(value):
     """Comparable numeric tuple for Telegram's dotted version strings."""
@@ -2622,41 +2656,11 @@ class RequestHandler(BaseHTTPRequestHandler):
         if not is_managed_account_path(acc_path):
             self.send_json({"success": False, "message": "Invalid path"})
             return
-        if not acc_path or not os.path.isdir(acc_path):
-            self.send_json({"success": False, "message": "Folder not found"})
-        elif is_running(acc_path):
-            self.send_json({"success": False, "message": "Telegram is still running for this account — close it first"})
+        ok, msg, backup_path = delete_account(acc_path)
+        if not ok:
+            self.send_json({"success": False, "message": msg})
         else:
-            try:
-                tdata_path = os.path.join(acc_path, "TelegramForcePortable", "tdata")
-                backup_path = ""
-                if os.path.isdir(tdata_path):
-                    ok, msg, backup_path = backup_account(acc_path, os.path.basename(acc_path))
-                    if not ok:
-                        self.send_json({"success": False, "message": f"Backup before delete failed: {msg}"})
-                        return
-                # Move to Trash via Finder — safe, recoverable
-                script = f'tell application "Finder" to move (POSIX file {_as_str(acc_path)}) to trash'
-                r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=30)
-                if r.returncode != 0:
-                    self.send_json({"success": False, "message": r.stderr.strip() or "Move to Trash failed"})
-                else:
-                    # Clean up all metadata for this path
-                    with _meta_lock:
-                        for section in ("notes", "usernames", "order",
-                                        "colors", "last_opened", "dock_names",
-                                        "proxies", "avatars"):
-                            metadata.get(section, {}).pop(acc_path, None)
-                        pinned = metadata.get("pinned", [])
-                        if acc_path in pinned:
-                            pinned.remove(acc_path)
-                        save_metadata(metadata)
-                    msg = "Moved to Trash"
-                    if backup_path:
-                        msg += f"; backup saved at {backup_path}"
-                    self.send_json({"success": True, "message": msg, "backup_path": backup_path})
-            except Exception as e:
-                self.send_json({"success": False, "message": str(e)})
+            self.send_json({"success": True, "message": msg, "backup_path": backup_path})
 
     def _post_api_create_account(self, data):
         name        = data.get("name", "")

@@ -154,6 +154,32 @@ class ManagedAccountPathTests(unittest.TestCase):
         finally:
             lock.release()
 
+    def test_setup_returns_busy_while_account_operation_is_locked(self):
+        import threading
+        account = self._account("busy-setup-account")
+        lock = state._account_path_lock(account)
+        lock.acquire()
+        try:
+            result = []
+            thread = threading.Thread(target=lambda: result.append(server.setup_account(account)))
+            thread.start(); thread.join()
+            self.assertEqual(result, [(False, state._BUSY_MSG)])
+        finally:
+            lock.release()
+
+    def test_delete_returns_busy_while_account_operation_is_locked(self):
+        import threading
+        account = self._account("busy-delete-account")
+        lock = state._account_path_lock(account)
+        lock.acquire()
+        try:
+            result = []
+            thread = threading.Thread(target=lambda: result.append(server.delete_account(account)))
+            thread.start(); thread.join()
+            self.assertEqual(result, [(False, state._BUSY_MSG, "")])
+        finally:
+            lock.release()
+
     def test_shell_escaping_helpers(self):
         self.assertEqual(server._sq("a'b"), "'a'\\''b'")
         self.assertEqual(server._as_str("plain"), '"plain"')
