@@ -78,6 +78,21 @@ class ManagedAccountPathTests(unittest.TestCase):
         self.assertIn("valid account", message)
         rename.assert_not_called()
 
+    def test_repair_refuses_a_symlinked_app_bundle(self):
+        account = self._account()
+        outside = os.path.join(self.tmp, "outside.app")
+        os.makedirs(os.path.join(outside, "Contents", "MacOS"))
+        with open(os.path.join(outside, "Contents", "MacOS", "Telegram"), "w") as f:
+            f.write("external")
+        os.symlink(outside, os.path.join(account, "Telegram.app"))
+        with mock.patch("server.backup_account", return_value=(True, "ok", "backup")), \
+             mock.patch("server.find_telegram_pid", return_value=None), \
+             mock.patch("server.os.chmod") as chmod:
+            results = server.repair_account(account, ["fix_perms"])
+        self.assertFalse(results[-1]["ok"])
+        self.assertIn("app bundle", results[-1]["msg"])
+        chmod.assert_not_called()
+
     def test_shell_escaping_helpers(self):
         self.assertEqual(server._sq("a'b"), "'a'\\''b'")
         self.assertEqual(server._as_str("plain"), '"plain"')

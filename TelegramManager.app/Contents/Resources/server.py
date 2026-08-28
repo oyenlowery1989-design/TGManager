@@ -1857,6 +1857,9 @@ def repair_account(account_path, actions):
     portable = os.path.join(account_path, "TelegramForcePortable")
     tdata    = os.path.join(portable, "tdata")
     app      = find_account_app(account_path) or os.path.join(account_path, "Telegram.app")
+    if os.path.lexists(app) and (os.path.islink(app) or not is_safe_path(app)):
+        return [{"action": "validation", "ok": False,
+                 "msg": "Path contains an invalid app bundle"}]
 
     if "kill_zombie" in actions:
         pid = find_telegram_pid(account_path)
