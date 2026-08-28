@@ -34,7 +34,7 @@ from state import (
     ROOT_DIR, DATA_DIR, PATH_WARNINGS,
     METADATA_FILE, WORKSPACES_FILE,
     _log, _log_file, DEFAULT_CONFIG, _sq, _as_str,
-    is_safe_path,
+    is_safe_path, is_managed_account_path,
     load_config, save_config, load_metadata, save_metadata,
     _meta_lock, _config_lock, _ws_lock, serialize_account_op, _BUSY_MSG,
     config, metadata, load_workspaces, save_workspaces,
@@ -523,6 +523,8 @@ def clear_account_caches(account_path, threshold_mb=0):
     emoji and the bot-WebView Chromium caches) — never session/login data.
     Refuses while Telegram is running. threshold_mb>0 clears only when the
     total exceeds it; 0 = always. Returns (cleared, freed_bytes)."""
+    if not is_managed_account_path(account_path):
+        return False, 0
     tdata = os.path.join(account_path, "TelegramForcePortable", "tdata")
     if not os.path.isdir(tdata):
         return False, 0
@@ -1301,6 +1303,8 @@ def rename_account(old_path, new_name):
       Commit   – only after both writes succeed do we update the in-memory global.
     """
     _log.info("Renaming account %s → %r", old_path, new_name)
+    if not is_managed_account_path(old_path):
+        return False, "Path is not a valid account folder"
     if is_running(old_path):
         _log.warning("rename_account: refused — Telegram is running for %s", old_path)
         return False, "Close Telegram first"
@@ -1846,10 +1850,20 @@ def repair_account(account_path, actions):
     `actions` is a list of strings: e.g. ["kill_zombie", "remove_locks", "clear_cache", "fix_perms", "recreate_portable"]
     Returns a list of result dicts.
     """
+    if not is_managed_account_path(account_path):
+        return [{"action": "validation", "ok": False,
+                 "msg": "Path is not a valid account folder"}]
     results = []
     portable = os.path.join(account_path, "TelegramForcePortable")
     tdata    = os.path.join(portable, "tdata")
     app      = find_account_app(account_path) or os.path.join(account_path, "Telegram.app")
+    if os.path.lexists(app) and (os.path.islink(app) or not is_safe_path(app)):
+        return [{"action": "validation", "ok": False,
+                 "msg": "Path contains an invalid app bundle"}]
+    binary = os.path.join(app, "Contents", "MacOS", "Telegram")
+    if os.path.lexists(binary) and (os.path.islink(binary) or not is_safe_path(binary)):
+        return [{"action": "validation", "ok": False,
+                 "msg": "Path contains an invalid app bundle"}]
 
     if "kill_zombie" in actions:
         pid = find_telegram_pid(account_path)
@@ -1912,7 +1926,6 @@ def repair_account(account_path, actions):
                             "msg": f"Cleared {human_size(freed)}" if cleared else "Nothing to clear"})
 
     if "fix_perms" in actions:
-        binary = os.path.join(app, "Contents", "MacOS", "Telegram")
         if os.path.exists(binary):
             try:
                 os.chmod(binary, 0o755)
@@ -2255,7 +2268,7 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def _post_api_clear_cache(self, data):
         acc_path = data.get("path", "")
-        if not is_safe_path(acc_path):
+        if not is_managed_account_path(acc_path):
             self.send_json({"success": False, "message": "Invalid path"})
             return
         cleared, freed = clear_account_caches(acc_path)
@@ -2401,7 +2414,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         # otherwise crash .strip() with an unhandled 500 instead of the clean
         # "Invalid name" response a same-shaped-but-empty value already gets.
         new_name = new_name.strip() if isinstance(new_name, str) else ""
-        if not is_safe_path(old_path):
+        if not is_managed_account_path(old_path):
             self.send_json({"success": False, "message": "Invalid path"})
         elif (not new_name or "/" in new_name or new_name in (".", "..")
               or new_name in SKIP_NAMES or new_name.startswith(".")):
@@ -2522,7 +2535,7 @@ class RequestHandler(BaseHTTPRequestHandler):
     def _post_api_restore(self, data):
         backup_path  = data.get("backup_path", "")
         account_path = data.get("account_path", "")
-        if not is_safe_path(backup_path) or not is_safe_path(account_path):
+        if not is_safe_path(backup_path) or not is_managed_account_path(account_path):
             self.send_json({"success": False, "message": "Invalid path"})
             return
         ok, msg = restore_backup(backup_path, account_path)
@@ -2599,7 +2612,7 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def _post_api_delete(self, data):
         acc_path = data.get("path", "")
-        if not is_safe_path(acc_path):
+        if not is_managed_account_path(acc_path):
             self.send_json({"success": False, "message": "Invalid path"})
             return
         if not acc_path or not os.path.isdir(acc_path):
@@ -2673,7 +2686,7 @@ class RequestHandler(BaseHTTPRequestHandler):
     def _post_api_repair(self, data):
         try:
             acc_path = data.get("path", "")
-            if not is_safe_path(acc_path):
+            if not is_managed_account_path(acc_path):
                 self.send_json({"success": False, "message": "Invalid path"})
                 return
             actions  = data.get("actions", [])

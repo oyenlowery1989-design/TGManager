@@ -215,6 +215,29 @@ def is_safe_path(path: str) -> bool:
     except Exception:
         return False
 
+def is_managed_account_path(path: str) -> bool:
+    """Return True only for a real account folder inside ROOT_DIR."""
+    if not path:
+        return False
+    try:
+        root = os.path.abspath(ROOT_DIR)
+        candidate = os.path.abspath(path)
+        if not candidate.startswith(root + os.sep):
+            return False
+        current = root
+        for part in os.path.relpath(candidate, root).split(os.sep):
+            current = os.path.join(current, part)
+            if os.path.islink(current):
+                return False
+        portable = os.path.join(candidate, "TelegramForcePortable")
+        tdata = os.path.join(portable, "tdata")
+        return (os.path.isdir(candidate) and os.path.isdir(portable)
+                and os.path.isdir(tdata) and not os.path.islink(portable)
+                and not os.path.islink(tdata)
+                and os.path.realpath(candidate).startswith(os.path.realpath(root) + os.sep))
+    except Exception:
+        return False
+
 def load_config():
     cfg = _load_json_file(CONFIG_FILE, DEFAULT_CONFIG)
     for k, v in DEFAULT_CONFIG.items():

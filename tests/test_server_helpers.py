@@ -37,6 +37,78 @@ class ServerHelperTests(unittest.TestCase):
         self.assertFalse(server.is_safe_path("/tmp/../etc/passwd"))
         self.assertFalse(server.is_safe_path("../outside"))
 
+
+class ManagedAccountPathTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp(prefix="tm_account_path_")
+        self.original_root = state.ROOT_DIR
+        state.ROOT_DIR = self.tmp
+
+    def tearDown(self):
+        import shutil
+        state.ROOT_DIR = self.original_root
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _account(self, name="account"):
+        path = os.path.join(self.tmp, name)
+        os.makedirs(os.path.join(path, "TelegramForcePortable", "tdata"))
+        return path
+
+    def test_requires_a_real_account_with_tdata(self):
+        account = self._account()
+        self.assertTrue(state.is_managed_account_path(account))
+        self.assertFalse(state.is_managed_account_path(os.path.join(self.tmp, "ordinary-folder")))
+
+    def test_rejects_a_symlinked_account(self):
+        account = self._account("real-account")
+        alias = os.path.join(self.tmp, "account-alias")
+        os.symlink(account, alias)
+        self.assertFalse(state.is_managed_account_path(alias))
+
+    def test_rename_refuses_a_non_account_folder(self):
+        ordinary = os.path.join(self.tmp, "ordinary-folder")
+        os.makedirs(ordinary)
+        with mock.patch("server.is_running", return_value=False), \
+             mock.patch("server.os.rename") as rename, \
+             mock.patch("server.save_metadata"), \
+             mock.patch("server.set_telegram_display_name"):
+            ok, message = server.rename_account(ordinary, "renamed")
+        self.assertFalse(ok)
+        self.assertIn("valid account", message)
+        rename.assert_not_called()
+
+    def test_repair_refuses_a_symlinked_app_bundle(self):
+        account = self._account()
+        outside = os.path.join(self.tmp, "outside.app")
+        os.makedirs(os.path.join(outside, "Contents", "MacOS"))
+        with open(os.path.join(outside, "Contents", "MacOS", "Telegram"), "w") as f:
+            f.write("external")
+        os.symlink(outside, os.path.join(account, "Telegram.app"))
+        with mock.patch("server.backup_account", return_value=(True, "ok", "backup")), \
+             mock.patch("server.find_telegram_pid", return_value=None), \
+             mock.patch("server.os.chmod") as chmod:
+            results = server.repair_account(account, ["fix_perms"])
+        self.assertFalse(results[-1]["ok"])
+        self.assertIn("app bundle", results[-1]["msg"])
+        chmod.assert_not_called()
+
+    def test_repair_refuses_a_symlinked_app_binary(self):
+        account = self._account("binary-link-account")
+        app = os.path.join(account, "Telegram.app", "Contents", "MacOS")
+        os.makedirs(app)
+        outside = os.path.join(self.tmp, "external-telegram")
+        with open(outside, "w") as f:
+            f.write("external")
+        os.symlink(outside, os.path.join(app, "Telegram"))
+        with mock.patch("server.backup_account", return_value=(True, "ok", "backup")), \
+             mock.patch("server.find_telegram_pid", return_value=None), \
+             mock.patch("server.os.chmod") as chmod:
+            results = server.repair_account(account, ["fix_perms"])
+        self.assertFalse(results[-1]["ok"])
+        self.assertIn("app bundle", results[-1]["msg"])
+        chmod.assert_not_called()
+
     def test_shell_escaping_helpers(self):
         self.assertEqual(server._sq("a'b"), "'a'\\''b'")
         self.assertEqual(server._as_str("plain"), '"plain"')
@@ -591,12 +663,15 @@ class RestoreBackupRollbackTests(unittest.TestCase):
     def setUp(self):
         import tempfile
         self._orig_data = state.DATA_DIR
+        self._orig_root = state.ROOT_DIR
         self.tmp = tempfile.mkdtemp(prefix="tm_restore_")
         state.DATA_DIR = self.tmp
+        state.ROOT_DIR = self.tmp
 
     def tearDown(self):
         import shutil
         state.DATA_DIR = self._orig_data
+        state.ROOT_DIR = self._orig_root
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _make_backup(self, date="2026-01-01_00-00", account="acct"):
