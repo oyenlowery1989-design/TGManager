@@ -531,7 +531,10 @@ def clear_account_caches(account_path, threshold_mb=0):
     if find_telegram_pid(account_path):
         _log.info("clear_account_caches: skipped — Telegram running for %s", account_path)
         return False, 0
-    targets = _find_cache_dirs(tdata)
+    real_tdata = os.path.realpath(tdata)
+    targets = [target for target in _find_cache_dirs(tdata)
+               if not os.path.islink(target)
+               and os.path.realpath(target).startswith(real_tdata + os.sep)]
     total = sum(get_folder_size(t) for t in targets)
     if threshold_mb > 0 and total < threshold_mb * 1024 * 1024:
         return False, 0
