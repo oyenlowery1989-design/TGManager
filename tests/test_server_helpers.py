@@ -490,12 +490,20 @@ class BackupPathTests(unittest.TestCase):
     def setUp(self):
         import tempfile
         self._orig_data = state.DATA_DIR
+        self._orig_root = state.ROOT_DIR
+        self._orig_metadata_file = state.METADATA_FILE
         self.tmp = tempfile.mkdtemp(prefix="tm_test_")
         state.DATA_DIR = self.tmp
+        state.ROOT_DIR = self.tmp
+        state.METADATA_FILE = os.path.join(self.tmp, "manager_data.json")
+        self.account = os.path.join(self.tmp, "account")
+        os.makedirs(os.path.join(self.account, "TelegramForcePortable", "tdata"))
 
     def tearDown(self):
         import shutil
         state.DATA_DIR = self._orig_data
+        state.ROOT_DIR = self._orig_root
+        state.METADATA_FILE = self._orig_metadata_file
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _make_backup(self, date="2026-01-01_00-00", account="acct"):
@@ -525,6 +533,20 @@ class BackupPathTests(unittest.TestCase):
         os.makedirs(os.path.join(crashed, "tdata"))
         names = [b["account"] for b in server.list_backups()]
         self.assertEqual(names, ["good"])
+
+    def test_same_second_backups_get_distinct_destinations(self):
+        first = backups.backup_account(self.account, "Account")
+        second = backups.backup_account(self.account, "Account")
+        self.assertTrue(first[0]); self.assertTrue(second[0])
+        self.assertNotEqual(first[2], second[2])
+        self.assertTrue(os.path.isfile(os.path.join(first[2], "backup.json")))
+
+    def test_failed_second_backup_keeps_existing_completed_backup(self):
+        first = backups.backup_account(self.account, "Account")
+        with mock.patch("backups.os.rename", side_effect=OSError("finalize failed")):
+            second = backups.backup_account(self.account, "Account")
+        self.assertTrue(first[0]); self.assertFalse(second[0])
+        self.assertTrue(os.path.isdir(first[2]))
 
     def test_restore_rejects_non_backup_source(self):
         live = os.path.join(self.tmp, "live-account")

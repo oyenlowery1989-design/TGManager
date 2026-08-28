@@ -6,6 +6,7 @@ inside function bodies, never at import time, so the circular import back to
 server.py is safe; see server.py's `sys.modules.setdefault` alias).
 """
 
+import json
 import os
 import subprocess
 import time
@@ -279,8 +280,15 @@ def backup_account(folder_path, account_name):
         parent = os.path.basename(os.path.dirname(folder_path))
         account_name = f"{account_name} ({parent})"
     state._log.info("Backing up account %r from %s", account_name, folder_path)
-    date_str   = datetime.now().strftime("%Y-%m-%d_%H-%M")
-    backup_dir = os.path.join(state.DATA_DIR, "Backups", date_str, account_name)
+    created_at = datetime.now()
+    date_str = created_at.strftime("%Y-%m-%d_%H-%M-%S")
+    account_id = state.ensure_account_id(folder_path)
+    base = os.path.join(state.DATA_DIR, "Backups", date_str, account_id)
+    backup_dir = base
+    suffix = 2
+    while os.path.exists(backup_dir) or os.path.exists(backup_dir + ".partial"):
+        backup_dir = f"{base}-{suffix}"
+        suffix += 1
     tdata_src  = os.path.join(folder_path, "TelegramForcePortable", "tdata")
     if not os.path.isdir(tdata_src):
         state._log.warning("backup_account: tdata not found at %s", tdata_src)
@@ -304,17 +312,18 @@ def backup_account(folder_path, account_name):
         if not ok:
             subprocess.run(["rm", "-rf", partial_dir], capture_output=True, timeout=300)
             return False, f"Copy failed: {err}", ""
-    except subprocess.TimeoutExpired:
-        state._log.error("backup_account: timed out backing up %s", folder_path)
+        with open(os.path.join(partial_dir, "backup.json"), "w", encoding="utf-8") as f:
+            json.dump({"account_id": account_id, "account_name": account_name,
+                       "created_at": created_at.isoformat(timespec="seconds")}, f)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        state._log.error("backup_account: failed backing up %s: %s", folder_path, e)
         try:
             subprocess.run(["rm", "-rf", partial_dir], capture_output=True, timeout=300)
         except subprocess.TimeoutExpired:
             pass
-        return False, "Backup timed out", ""
+        return False, "Backup timed out" if isinstance(e, subprocess.TimeoutExpired) else "Could not write backup", ""
     try:
         # Copy finished — from here on, never delete partial_dir on failure.
-        if os.path.isdir(backup_dir):   # same account backed up twice in one minute
-            subprocess.run(["rm", "-rf", backup_dir], capture_output=True, timeout=300)
         os.rename(partial_dir, backup_dir)
     except (subprocess.TimeoutExpired, OSError) as e:
         state._log.error("backup_account: finalize failed for %s: %s", folder_path, e)
