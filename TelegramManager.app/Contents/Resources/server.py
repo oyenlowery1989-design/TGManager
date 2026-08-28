@@ -1860,6 +1860,10 @@ def repair_account(account_path, actions):
     if os.path.lexists(app) and (os.path.islink(app) or not is_safe_path(app)):
         return [{"action": "validation", "ok": False,
                  "msg": "Path contains an invalid app bundle"}]
+    binary = os.path.join(app, "Contents", "MacOS", "Telegram")
+    if os.path.lexists(binary) and (os.path.islink(binary) or not is_safe_path(binary)):
+        return [{"action": "validation", "ok": False,
+                 "msg": "Path contains an invalid app bundle"}]
 
     if "kill_zombie" in actions:
         pid = find_telegram_pid(account_path)
@@ -1922,7 +1926,6 @@ def repair_account(account_path, actions):
                             "msg": f"Cleared {human_size(freed)}" if cleared else "Nothing to clear"})
 
     if "fix_perms" in actions:
-        binary = os.path.join(app, "Contents", "MacOS", "Telegram")
         if os.path.exists(binary):
             try:
                 os.chmod(binary, 0o755)
