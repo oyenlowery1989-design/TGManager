@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import importlib
+import json
 import os
 import sys
 import time
@@ -83,6 +84,251 @@ class ServerHelperTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIsNone(normalized)
         self.assertTrue(message)
+
+
+class ReadyFileTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp(prefix="tm_ready_test_")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_ready_file_is_atomic_and_contains_server_identity(self):
+        ready = os.path.join(self.tmp, "ready.json")
+        server._write_ready_file(ready, 8477, "test-token")
+        with open(ready, encoding="utf-8") as f:
+            self.assertEqual(json.load(f), {
+                "pid": os.getpid(), "port": 8477, "session_token": "test-token",
+            })
+        self.assertFalse(os.path.exists(ready + ".tmp"))
+
+    def test_ready_file_cleanup_ignores_missing_path(self):
+        server._remove_ready_file(os.path.join(self.tmp, "missing.json"))
+
+
+class TelegramUpdateLifecycleTests(unittest.TestCase):
+    """Regression coverage for the shared-master / disposable-clone lifecycle."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp(prefix="tm_update_test_")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _make_bundle(self, parent, version="7.1.3"):
+        app = os.path.join(parent, "Telegram.app")
+        os.makedirs(os.path.join(app, "Contents", "MacOS"))
+        os.makedirs(os.path.join(app, "Contents", "_CodeSignature"))
+        with open(os.path.join(app, "Contents", "Info.plist"), "wb") as f:
+            import plistlib
+            plistlib.dump({"CFBundleIdentifier": server.TDESKTOP_BUNDLE_ID,
+                           "CFBundleShortVersionString": version}, f)
+        with open(os.path.join(app, "Contents", "MacOS", "Telegram"), "wb") as f:
+            f.write(b"test executable")
+        with open(os.path.join(app, "Contents", "_CodeSignature", "CodeResources"), "wb") as f:
+            f.write(b"test resources")
+        return app
+
+    def test_clone_stamp_tracks_master_fingerprint(self):
+        master = self._make_bundle(self.tmp)
+        account = os.path.join(self.tmp, "account")
+        os.makedirs(account)
+        fingerprint = server._bundle_fingerprint(master)
+        self.assertIsNotNone(fingerprint)
+        server._write_clone_stamp(account, fingerprint)
+        self.assertEqual(server._read_clone_stamp(account), fingerprint)
+
+    def test_staged_update_version_reads_telegram_marker(self):
+        account = os.path.join(self.tmp, "account")
+        marker_dir = os.path.join(account, "TelegramForcePortable", "tupdates", "temp", "tdata")
+        os.makedirs(marker_dir)
+        with open(os.path.join(os.path.dirname(marker_dir), "ready"), "wb") as f:
+            f.write(b"1")
+        with open(os.path.join(marker_dir, "version"), "wb") as f:
+            f.write(b"header00" + "7.1.3".encode("utf-32-le"))
+        self.assertEqual(server._staged_update_version(account), "7.1.3")
+
+    def test_update_never_falls_back_to_an_account_clone(self):
+        with mock.patch("server.scan_accounts", return_value=[]):
+            ok, message = server.update_all_apps()
+        self.assertFalse(ok)
+        self.assertIn("Choose a freshly downloaded", message)
+
+    def test_update_rejects_an_explicit_account_clone(self):
+        account = os.path.join(self.tmp, "account")
+        os.makedirs(account)
+        clone = self._make_bundle(account)
+        accounts = [{"path": account, "name": "account", "running": False}]
+        with mock.patch("server.scan_accounts", return_value=accounts), \
+             mock.patch("server.is_allowed_app_source", return_value=True):
+            ok, message = server.update_all_apps(clone)
+        self.assertFalse(ok)
+        self.assertIn("account-local clone", message)
+
+    def test_shared_app_setup_refuses_to_replace_master_while_an_account_runs(self):
+        source = self._make_bundle(self.tmp)
+        account = {"path": os.path.join(self.tmp, "account"), "name": "account", "running": True}
+        response = {}
+
+        class Handler:
+            def send_json(self, payload):
+                response.update(payload)
+
+        with mock.patch("server.is_allowed_app_source", return_value=True), \
+             mock.patch("server._replace_shared_app", return_value=(True, "7.1.3")), \
+             mock.patch("server.scan_accounts", return_value=[account]):
+            server.RequestHandler._post_api_shared_app_setup(Handler(), {"source": source})
+
+        self.assertFalse(response["success"])
+        self.assertIn("Close Telegram first", response["message"])
+
+    def test_shared_app_setup_requires_a_selected_source(self):
+        source = self._make_bundle(self.tmp)
+        response = {}
+
+        class Handler:
+            def send_json(self, payload):
+                response.update(payload)
+
+        previous = server.config.get("app_source")
+        server.config["app_source"] = source
+        try:
+            with mock.patch("server.is_allowed_app_source", return_value=True), \
+                 mock.patch("server._replace_shared_app", return_value=(True, "7.1.3")), \
+                 mock.patch("server.scan_accounts", return_value=[]):
+                server.RequestHandler._post_api_shared_app_setup(Handler(), {})
+        finally:
+            server.config["app_source"] = previous
+
+        self.assertFalse(response["success"])
+        self.assertIn("Choose a freshly downloaded", response["message"])
+
+    def test_shared_app_setup_rejects_an_account_clone(self):
+        account_path = os.path.join(self.tmp, "account")
+        os.makedirs(account_path)
+        clone = self._make_bundle(account_path)
+        response = {}
+
+        class Handler:
+            def send_json(self, payload):
+                response.update(payload)
+
+        account = {"path": account_path, "name": "account", "running": False}
+        with mock.patch("server.is_allowed_app_source", return_value=True), \
+             mock.patch("server._replace_shared_app", return_value=(True, "7.1.3")), \
+             mock.patch("server.scan_accounts", return_value=[account]):
+            server.RequestHandler._post_api_shared_app_setup(Handler(), {"source": clone})
+
+        self.assertFalse(response["success"])
+        self.assertIn("account-local clone", response["message"])
+
+    def test_replace_shared_app_copies_then_verifies_the_new_master(self):
+        source_parent = os.path.join(self.tmp, "source")
+        shared_parent = os.path.join(self.tmp, "shared", "macOS")
+        os.makedirs(source_parent)
+        os.makedirs(shared_parent)
+        source = self._make_bundle(source_parent, "7.2.0")
+        old_master = self._make_bundle(shared_parent, "7.1.3")
+        original_shared = server.SHARED_MACOS_APP
+        original_apps_dir = server.SHARED_APPS_DIR
+        server.SHARED_MACOS_APP = old_master
+        server.SHARED_APPS_DIR = os.path.dirname(shared_parent)
+        checked = []
+        original_run = server.subprocess.run
+
+        def run(command, *args, **kwargs):
+            if command[0] == "xattr":
+                return mock.Mock(returncode=0)
+            return original_run(command, *args, **kwargs)
+
+        try:
+            with mock.patch("server._verify_tdesktop_bundle", side_effect=lambda path: (checked.append(path) or (True, ""))), \
+                 mock.patch("server.subprocess.run", side_effect=run):
+                ok, version = server._replace_shared_app(source)
+        finally:
+            server.SHARED_MACOS_APP = original_shared
+            server.SHARED_APPS_DIR = original_apps_dir
+
+        self.assertTrue(ok)
+        self.assertEqual(version, "7.2.0")
+        self.assertEqual(checked, [source, old_master + ".new"])
+        self.assertEqual(server._bundle_version(old_master), "7.2.0")
+        self.assertEqual(server._bundle_version(old_master + ".previous"), "7.1.3")
+
+    def test_update_blocks_running_accounts_before_replacing_the_master(self):
+        account = {"path": os.path.join(self.tmp, "account"), "name": "account", "running": True}
+        with mock.patch("server.scan_accounts", return_value=[account]), \
+             mock.patch("server._replace_shared_app", return_value=(True, "7.1.3")) as replace:
+            ok, message = server.update_all_apps("/chosen/Telegram.app")
+
+        self.assertFalse(ok)
+        self.assertIn("Close Telegram first", message)
+        replace.assert_not_called()
+
+    def test_open_replaces_a_fingerprint_mismatched_clone_without_touching_tdata(self):
+        master_parent = os.path.join(self.tmp, "master")
+        account = os.path.join(self.tmp, "account")
+        os.makedirs(master_parent)
+        os.makedirs(account)
+        master = self._make_bundle(master_parent, "7.2.0")
+        clone = self._make_bundle(account, "7.1.3")
+        tdata = os.path.join(account, "TelegramForcePortable", "tdata")
+        os.makedirs(tdata)
+        session_file = os.path.join(tdata, "session")
+        with open(session_file, "wb") as f:
+            f.write(b"keep this session")
+        server._write_clone_stamp(account, "not-the-master")
+        original_run = server.subprocess.run
+
+        def run(command, *args, **kwargs):
+            if command[0] == "xattr":
+                return mock.Mock(returncode=0)
+            if command[0] == "open":
+                return mock.Mock(returncode=0, stderr=b"")
+            return original_run(command, *args, **kwargs)
+
+        with mock.patch("server.get_shared_app", return_value=master), \
+             mock.patch("server.is_running", return_value=False), \
+             mock.patch("server.subprocess.run", side_effect=run), \
+             mock.patch("server.save_metadata"), \
+             mock.patch("server._watcher_exempt"), \
+             mock.patch("server.invalidate_tdata_size"):
+            ok, _ = server.open_account(account)
+
+        self.assertTrue(ok)
+        with open(session_file, "rb") as f:
+            self.assertEqual(f.read(), b"keep this session")
+        self.assertEqual(server._bundle_version(server.find_account_app(account)), "7.2.0")
+        self.assertEqual(server._read_clone_stamp(account), server._bundle_fingerprint(master))
+
+    def test_stale_updater_state_is_archived_not_deleted(self):
+        account = os.path.join(self.tmp, "account")
+        marker_dir = os.path.join(account, "TelegramForcePortable", "tupdates", "temp", "tdata")
+        os.makedirs(marker_dir)
+        with open(os.path.join(os.path.dirname(marker_dir), "ready"), "wb") as f:
+            f.write(b"1")
+        with open(os.path.join(marker_dir, "version"), "wb") as f:
+            f.write(b"header00" + "7.0.7".encode("utf-32-le"))
+        original_shared_apps = server.SHARED_APPS_DIR
+        server.SHARED_APPS_DIR = os.path.join(self.tmp, "shared-apps")
+        try:
+            archived, skipped = server._archive_stale_updates(
+                [{"path": account, "name": "account"}], "7.1.3"
+            )
+        finally:
+            server.SHARED_APPS_DIR = original_shared_apps
+        self.assertEqual((archived, skipped), (1, 0))
+        self.assertFalse(os.path.exists(os.path.join(account, "TelegramForcePortable", "tupdates")))
+        recovery = os.path.join(self.tmp, "shared-apps", "update-recovery")
+        self.assertTrue(any("ready" in files for _, _, files in os.walk(recovery)))
+
+    def test_version_comparison_handles_short_versions(self):
+        self.assertEqual(server._version_tuple("7.1"), server._version_tuple("7.1.0"))
+        self.assertLess(server._version_tuple("7.0.7"), server._version_tuple("7.1.3"))
 
 
 class BackupPathTests(unittest.TestCase):

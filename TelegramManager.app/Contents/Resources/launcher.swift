@@ -9,46 +9,20 @@ func readSessionToken() -> String {
     return UUID().uuidString.replacingOccurrences(of: "-", with: "")
 }
 
-// ── Read port from manager_config.json (fallback 8477) ───────────────────────
-func readPort() -> Int {
-    // ROOT_DIR is two levels up from the .app bundle: ROOT_DIR/TelegramManager.app/
-    let bundleURL   = Bundle.main.bundleURL
-    let rootURL     = bundleURL.deletingLastPathComponent()
-    let configURL   = rootURL.appendingPathComponent("manager_config.json")
-    guard let data  = try? Data(contentsOf: configURL),
-          let json  = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-          let port  = json["port"] as? Int else {
-        return 8477
-    }
-    return port
-}
-
-// ── Best-effort cleanup of an older TelegramManager server only ──────────────
-func killExistingServer(port: Int) {
-    let p = Process()
-    p.executableURL = URL(fileURLWithPath: "/bin/bash")
-    p.arguments = ["-c", "pgrep -f 'TelegramManager.app/Contents/Resources/[s]erver.py' 2>/dev/null | xargs kill 2>/dev/null || true"]
-    p.standardOutput = FileHandle.nullDevice
-    p.standardError  = FileHandle.nullDevice
-    try? p.run()
-    p.waitUntilExit()
-    Thread.sleep(forTimeInterval: 0.25)
-}
-
 // ── App Delegate ─────────────────────────────────────────────────────────────
 class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, NSWindowDelegate {
 
     var window: NSWindow!
     var webView: WKWebView!
     var serverProcess: Process?
+    var serverLog: FileHandle?
     var statusItem: NSStatusItem?
-    var port = 8477
     var sessionToken = readSessionToken()
+    var readyFileURL: URL?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
-        port = readPort()
-        killExistingServer(port: port)
+        prepareReadyFile()
         startPythonServer()
         createWindow()
         setupMenuBar()
@@ -56,17 +30,45 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
     }
 
     // ── Python HTTP server ───────────────────────────────────────────────────
+    func prepareReadyFile() {
+        let name = "telegram-manager-\(UUID().uuidString).ready"
+        let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(name)
+        try? FileManager.default.removeItem(at: url)
+        readyFileURL = url
+    }
+
+    func serverURLFromReadyFile() -> URL? {
+        guard let readyFileURL,
+              let data = try? Data(contentsOf: readyFileURL),
+              let record = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let token = record["session_token"] as? String, token == sessionToken,
+              let port = record["port"] as? Int, (1024...65535).contains(port) else {
+            return nil
+        }
+        return URL(string: "http://127.0.0.1:\(port)/\(sessionToken)/")
+    }
+
     func startPythonServer() {
-        guard let res = Bundle.main.resourcePath else { return }
+        guard let res = Bundle.main.resourcePath, let readyFileURL else { return }
         let script = "\(res)/server.py"
+        let dataURL = Bundle.main.bundleURL.deletingLastPathComponent()
+            .appendingPathComponent("data/manager.log")
+        FileManager.default.createFile(atPath: dataURL.path, contents: nil)
+        if let log = try? FileHandle(forWritingTo: dataURL) {
+            log.seekToEndOfFile()
+            serverLog = log
+        }
 
         func tryLaunch(python: String) -> Bool {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: python)
             p.arguments = [script]
-            p.environment = ProcessInfo.processInfo.environment.merging(["TG_SESSION_TOKEN": sessionToken]) { _, new in new }
-            p.standardOutput = FileHandle.nullDevice
-            p.standardError  = FileHandle.nullDevice
+            p.environment = ProcessInfo.processInfo.environment.merging([
+                "TG_SESSION_TOKEN": sessionToken,
+                "TG_READY_FILE": readyFileURL.path,
+            ]) { _, new in new }
+            p.standardOutput = serverLog ?? FileHandle.nullDevice
+            p.standardError  = serverLog ?? FileHandle.nullDevice
             do {
                 try p.run()
                 serverProcess = p
@@ -151,14 +153,25 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
     // ── Poll until server responds ────────────────────────────────────────────
     func waitForServer(attempt: Int) {
         guard attempt < 60 else {
-            // Poll exhausted — the server never came up. Show an inline error
-            // page instead of leaving a permanently blank window.
             DispatchQueue.main.async { [weak self] in
-                self?.showServerError()
+                self?.showServerError("The local server did not publish readiness in time.")
             }
             return
         }
-        let url = URL(string: "http://127.0.0.1:\(port)/\(sessionToken)/")!
+        guard let process = serverProcess else {
+            showServerError("Python could not be launched. Check data/manager.log.")
+            return
+        }
+        guard process.isRunning else {
+            showServerError("Python exited before the local server became ready. Check data/manager.log.")
+            return
+        }
+        guard let url = serverURLFromReadyFile() else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                self.waitForServer(attempt: attempt + 1)
+            }
+            return
+        }
         let task = URLSession.shared.dataTask(with: url) { [weak self] _, response, _ in
             guard let self = self else { return }
             if (response as? HTTPURLResponse)?.statusCode == 200 {
@@ -173,7 +186,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
     }
 
     // ── Inline error page when the server fails to start ──────────────────────
-    func showServerError() {
+    func showServerError(_ reason: String) {
         let html = """
         <html><head><meta charset="utf-8"><style>
           html,body{height:100%;margin:0}
@@ -188,7 +201,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         </style></head><body><div class="box">
           <div style="font-size:40px">⚠</div>
           <h1>TelegramManager server failed to start</h1>
-          <p>The local server did not respond in time.</p>
+          <p>\(reason)</p>
           <p>Check <code>data/manager.log</code> for details, then relaunch TelegramManager.</p>
         </div></body></html>
         """
@@ -253,6 +266,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
     // ── Lifecycle ────────────────────────────────────────────────────────────
     func applicationWillTerminate(_ notification: Notification) {
         serverProcess?.terminate()
+        if let readyFileURL { try? FileManager.default.removeItem(at: readyFileURL) }
+        serverLog?.closeFile()
     }
 
     // Keep running in menu bar when window is closed
