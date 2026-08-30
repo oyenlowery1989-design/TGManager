@@ -666,6 +666,19 @@ class BackupPathTests(unittest.TestCase):
         accounts = handler.send_json.call_args.args[0]
         self.assertEqual(accounts[0]["last_backup"], "2026-01-01_00-00")
 
+    def test_accounts_endpoint_ignores_malformed_account_id_map(self):
+        self._make_backup(account="Account")
+        state.metadata["account_ids"] = []
+        backups._backup_map_cache["ts"] = 0.0
+        handler = mock.Mock()
+
+        with mock.patch("server.scan_accounts_cached", return_value=[{
+                "path": self.account, "name": "Account", "group": "Root"}]):
+            server.RequestHandler._get_api_accounts(handler)
+
+        accounts = handler.send_json.call_args.args[0]
+        self.assertEqual(accounts[0]["last_backup"], "2026-01-01_00-00")
+
     def test_same_second_backups_get_distinct_destinations(self):
         first = backups.backup_account(self.account, "Account")
         second = backups.backup_account(self.account, "Account")

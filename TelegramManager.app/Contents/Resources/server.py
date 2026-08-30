@@ -2078,7 +2078,8 @@ class RequestHandler(BaseHTTPRequestHandler):
         accs = scan_accounts_cached()
         last_map = _last_backup_map()
         with _meta_lock:
-            account_ids = metadata.get("account_ids", {}).copy()
+            stored_ids = metadata.get("account_ids", {})
+            account_ids = stored_ids.copy() if isinstance(stored_ids, dict) else {}
         for a in accs:
             # Duplicate folder names get backed up as "name (parent)" — check
             # the suffixed key first, then the bare name (older backups).
