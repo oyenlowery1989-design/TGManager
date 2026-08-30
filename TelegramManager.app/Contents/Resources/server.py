@@ -1059,7 +1059,7 @@ def _validate_import_payload(data):
     allowed_metadata = {
         "notes": {}, "usernames": {}, "order": {}, "colors": {},
         "last_opened": {}, "pinned": [], "proxies": {}, "dock_names": {},
-        "avatars": {}
+        "avatars": {}, "account_ids": {}
     }
     cleaned_metadata = {}
 
@@ -1106,6 +1106,11 @@ def _validate_import_payload(data):
             ok, msg = _validate_import_string_map(f"metadata.{key}", value)
             if not ok:
                 return False, msg, None
+            if key == "account_ids":
+                if not all(state.is_canonical_account_id(item) for item in value.values()):
+                    return False, "metadata.account_ids values must be canonical UUIDs", None
+                if len(set(value.values())) != len(value):
+                    return False, "metadata.account_ids values must be unique", None
             if key == "avatars":
                 # Avatars are rendered as img src — drop anything that isn't a
                 # data: image URL (javascript:/http: would be an injection/SSRF).
@@ -1323,7 +1328,7 @@ def rename_account(old_path, new_name):
     with _meta_lock:
         new_meta = copy.deepcopy(metadata)
     for section in ("notes", "usernames", "order", "colors",
-                    "last_opened", "proxies", "dock_names", "avatars"):
+                    "last_opened", "proxies", "dock_names", "avatars", "account_ids"):
         d = new_meta.get(section, {})
         if old_path in d:
             d[new_path] = d.pop(old_path)
@@ -1556,7 +1561,7 @@ def delete_account(account_path):
             return False, r.stderr.strip() or "Move to Trash failed", ""
         with _meta_lock:
             for section in ("notes", "usernames", "order", "colors", "last_opened",
-                            "dock_names", "proxies", "avatars"):
+                            "dock_names", "proxies", "avatars", "account_ids"):
                 metadata.get(section, {}).pop(account_path, None)
             pinned = metadata.get("pinned", [])
             if account_path in pinned:
@@ -2072,11 +2077,15 @@ class RequestHandler(BaseHTTPRequestHandler):
     def _get_api_accounts(self):
         accs = scan_accounts_cached()
         last_map = _last_backup_map()
+        with _meta_lock:
+            stored_ids = metadata.get("account_ids", {})
+            account_ids = stored_ids.copy() if isinstance(stored_ids, dict) else {}
         for a in accs:
             # Duplicate folder names get backed up as "name (parent)" — check
             # the suffixed key first, then the bare name (older backups).
             parent = os.path.basename(os.path.dirname(a["path"]))
-            a["last_backup"] = (last_map.get(f'{a["name"]} ({parent})')
+            a["last_backup"] = (last_map.get(account_ids.get(a["path"]))
+                                or last_map.get(f'{a["name"]} ({parent})')
                                 or last_map.get(a["name"], ""))
         self.send_json(accs)
 

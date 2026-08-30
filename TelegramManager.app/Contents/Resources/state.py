@@ -15,6 +15,7 @@ import os
 import shlex
 import subprocess
 import threading
+import uuid
 from logging.handlers import RotatingFileHandler
 
 # Layout (clean-root mode):
@@ -328,6 +329,33 @@ def save_metadata(meta):
     """Atomic write: write to .tmp then rename, so a crash can't corrupt the file."""
     with _meta_lock:
         _save_json_atomic(METADATA_FILE, meta)
+
+def is_canonical_account_id(value):
+    try:
+        return isinstance(value, str) and str(uuid.UUID(value)) == value
+    except (ValueError, AttributeError):
+        return False
+
+def ensure_account_id(path):
+    with _meta_lock:
+        ids = metadata.get("account_ids", {})
+        if not isinstance(ids, dict):
+            ids = {}
+        account_id = ids.get(path)
+        if (is_canonical_account_id(account_id)
+                and sum(value == account_id for value in ids.values()) == 1):
+            return account_id
+        used = {value for value in ids.values() if is_canonical_account_id(value)}
+        account_id = str(uuid.uuid4())
+        while account_id in used:
+            account_id = str(uuid.uuid4())
+        new_metadata = copy.deepcopy(metadata)
+        new_metadata["account_ids"] = ids.copy()
+        new_metadata["account_ids"][path] = account_id
+        save_metadata(new_metadata)
+        metadata.clear()
+        metadata.update(new_metadata)
+        return account_id
 
 
 config   = load_config()

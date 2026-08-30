@@ -6,6 +6,7 @@ inside function bodies, never at import time, so the circular import back to
 server.py is safe; see server.py's `sys.modules.setdefault` alias).
 """
 
+import json
 import os
 import subprocess
 import time
@@ -44,6 +45,21 @@ def _copy_tdata_excluding_cache(src, dst):
                                  else r.stderr.decode(errors="replace").strip()[:200])
 
 
+def _read_backup_manifest(backup_dir):
+    """Return a valid backup manifest, or None for legacy/corrupt backups."""
+    try:
+        with open(os.path.join(backup_dir, "backup.json"), encoding="utf-8") as f:
+            manifest = json.load(f)
+        if (isinstance(manifest, dict)
+                and state.is_canonical_account_id(manifest.get("account_id"))
+                and isinstance(manifest.get("account_name"), str) and manifest["account_name"].strip()
+                and isinstance(manifest.get("created_at"), str)):
+            return manifest
+    except (OSError, ValueError, TypeError):
+        pass
+    return None
+
+
 def list_backups():
     """Return all tdata backups found in ROOT_DIR/Backups/, newest first."""
     backup_root = os.path.join(state.DATA_DIR, "Backups")
@@ -60,21 +76,33 @@ def list_backups():
             acc_path  = os.path.join(date_path, account)
             tdata_src = os.path.join(acc_path, "tdata")
             if os.path.isdir(tdata_src):
+                manifest = _read_backup_manifest(acc_path)
+                account_name = manifest["account_name"] if manifest else account
                 size = state.get_folder_size(tdata_src)
                 backups.append({
                     "date":       date_folder,
-                    "account":    account,
+                    "account":    account_name,
+                    "account_id": manifest["account_id"] if manifest else None,
+                    "account_name": account_name,
                     "backup_path": acc_path,
                     "size":       size,
                     "size_human": state.human_size(size),
                 })
+    def sort_key(backup):
+        suffix = 1
+        name = os.path.basename(backup["backup_path"])
+        prefix = (backup["account_id"] or "") + "-"
+        if backup["account_id"] and name.startswith(prefix) and name[len(prefix):].isdigit():
+            suffix = int(name[len(prefix):])
+        return backup["date"], suffix
+    backups.sort(key=sort_key, reverse=True)
     return backups
 
 
 _backup_map_cache = {"ts": 0.0, "map": {}}
 
 def _last_backup_map():
-    """Map account name → newest backup date folder ("YYYY-MM-DD_HH-MM").
+    """Map stable account ID (or legacy name) → newest backup date folder.
 
     listdir-only (no sizes), cached 30 s — cheap enough for the accounts poll.
     """
@@ -92,7 +120,8 @@ def _last_backup_map():
                 for account in os.listdir(date_path):
                     if account.endswith(".partial"):
                         continue
-                    result.setdefault(account, date_folder)
+                    manifest = _read_backup_manifest(os.path.join(date_path, account))
+                    result.setdefault(manifest["account_id"] if manifest else account, date_folder)
         except OSError as e:
             state._log.warning("_last_backup_map: %s", e)
     _backup_map_cache["map"] = result
@@ -138,7 +167,7 @@ def delete_backup(backup_path):
     return True, "Backup deleted"
 
 
-def prune_backups(account_name):
+def prune_backups(account_id):
     """Enforce backup_keep_per_account for one account (0 = keep all)."""
     try:
         keep = int(state.config.get("backup_keep_per_account", 0))
@@ -146,7 +175,7 @@ def prune_backups(account_name):
         keep = 0
     if keep <= 0:
         return
-    mine = [b for b in list_backups() if b["account"] == account_name]  # newest first
+    mine = [b for b in list_backups() if b["account_id"] == account_id]  # newest first
     for b in mine[keep:]:
         ok, msg = delete_backup(b["backup_path"])
         if ok:
@@ -279,8 +308,24 @@ def backup_account(folder_path, account_name):
         parent = os.path.basename(os.path.dirname(folder_path))
         account_name = f"{account_name} ({parent})"
     state._log.info("Backing up account %r from %s", account_name, folder_path)
-    date_str   = datetime.now().strftime("%Y-%m-%d_%H-%M")
-    backup_dir = os.path.join(state.DATA_DIR, "Backups", date_str, account_name)
+    created_at = datetime.now()
+    date_str = created_at.strftime("%Y-%m-%d_%H-%M-%S")
+    account_id = state.ensure_account_id(folder_path)
+    base = os.path.join(state.DATA_DIR, "Backups", date_str, account_id)
+    backup_root = os.path.realpath(os.path.join(state.DATA_DIR, "Backups"))
+    data_root = os.path.realpath(state.DATA_DIR)
+    try:
+        safe_root = os.path.commonpath((backup_root, data_root)) == data_root
+    except ValueError:
+        safe_root = False
+    if not safe_root or _resolve_backup_dir(base) != os.path.realpath(base):
+        state._log.error("backup_account: unsafe backup destination %s", base)
+        return False, "Could not create a safe backup destination", ""
+    backup_dir = base
+    suffix = 2
+    while os.path.exists(backup_dir) or os.path.exists(backup_dir + ".partial"):
+        backup_dir = f"{base}-{suffix}"
+        suffix += 1
     tdata_src  = os.path.join(folder_path, "TelegramForcePortable", "tdata")
     if not os.path.isdir(tdata_src):
         state._log.warning("backup_account: tdata not found at %s", tdata_src)
@@ -304,22 +349,23 @@ def backup_account(folder_path, account_name):
         if not ok:
             subprocess.run(["rm", "-rf", partial_dir], capture_output=True, timeout=300)
             return False, f"Copy failed: {err}", ""
-    except subprocess.TimeoutExpired:
-        state._log.error("backup_account: timed out backing up %s", folder_path)
+        with open(os.path.join(partial_dir, "backup.json"), "w", encoding="utf-8") as f:
+            json.dump({"account_id": account_id, "account_name": account_name,
+                       "created_at": created_at.isoformat(timespec="seconds")}, f)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        state._log.error("backup_account: failed backing up %s: %s", folder_path, e)
         try:
             subprocess.run(["rm", "-rf", partial_dir], capture_output=True, timeout=300)
         except subprocess.TimeoutExpired:
             pass
-        return False, "Backup timed out", ""
+        return False, "Backup timed out" if isinstance(e, subprocess.TimeoutExpired) else "Could not write backup", ""
     try:
         # Copy finished — from here on, never delete partial_dir on failure.
-        if os.path.isdir(backup_dir):   # same account backed up twice in one minute
-            subprocess.run(["rm", "-rf", backup_dir], capture_output=True, timeout=300)
         os.rename(partial_dir, backup_dir)
     except (subprocess.TimeoutExpired, OSError) as e:
         state._log.error("backup_account: finalize failed for %s: %s", folder_path, e)
         return False, f"Backup copied but could not be finalized — kept at {partial_dir}", ""
     state._log.info("Backup complete: %s", backup_dir)
-    prune_backups(account_name)
+    prune_backups(account_id)
     _backup_map_cache["ts"] = 0.0
-    return True, f"Backed up to Backups/{date_str}/{account_name}", backup_dir
+    return True, f"Backed up to {os.path.relpath(backup_dir, state.DATA_DIR)}", backup_dir
