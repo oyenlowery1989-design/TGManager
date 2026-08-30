@@ -6,6 +6,7 @@ import os
 import sys
 import time
 import unittest
+import uuid
 from pathlib import Path
 from unittest import mock
 
@@ -16,6 +17,8 @@ os.environ.setdefault("TG_SESSION_TOKEN", "unit-test-token")
 server = importlib.import_module("server")
 state = importlib.import_module("state")
 backups = importlib.import_module("backups")
+
+ACCOUNT_ID = "11111111-1111-4a11-8b11-111111111111"
 
 
 class ServerHelperTests(unittest.TestCase):
@@ -71,16 +74,55 @@ class ManagedAccountPathTests(unittest.TestCase):
         first = state.ensure_account_id(account)
         self.assertEqual(first, state.ensure_account_id(account))
         self.assertEqual(state.metadata["account_ids"][account], first)
-        self.assertEqual(len(first), 32)
+        self.assertEqual(str(uuid.UUID(first)), first)
+
+    def test_ensure_account_id_replaces_noncanonical_or_duplicate_state(self):
+        account = self._account()
+        other = self._account("other")
+        state.metadata["account_ids"] = {other: ACCOUNT_ID, account: ACCOUNT_ID}
+
+        replacement = state.ensure_account_id(account)
+
+        self.assertEqual(state.metadata["account_ids"][other], ACCOUNT_ID)
+        self.assertNotEqual(replacement, ACCOUNT_ID)
+        self.assertEqual(str(uuid.UUID(replacement)), replacement)
+
+        state.metadata["account_ids"] = {account: uuid.UUID(ACCOUNT_ID).hex}
+        replacement = state.ensure_account_id(account)
+        self.assertEqual(str(uuid.UUID(replacement)), replacement)
+        self.assertNotEqual(replacement, uuid.UUID(ACCOUNT_ID).hex)
+
+    def test_failed_account_id_persistence_does_not_change_memory(self):
+        account = self._account()
+        state.metadata.pop("account_ids", None)
+
+        with mock.patch("state.save_metadata", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                state.ensure_account_id(account)
+
+        self.assertNotIn(account, state.metadata.get("account_ids", {}))
 
     def test_rename_moves_account_id(self):
         old_path = self._account("old")
-        state.metadata["account_ids"] = {old_path: "stable-id"}
+        state.metadata["account_ids"] = {old_path: ACCOUNT_ID}
 
         ok, new_path = server.rename_account(old_path, "new")
 
         self.assertTrue(ok)
-        self.assertEqual(state.metadata["account_ids"], {new_path: "stable-id"})
+        self.assertEqual(state.metadata["account_ids"], {new_path: ACCOUNT_ID})
+
+    def test_delete_removes_account_id(self):
+        account = self._account("delete-me")
+        state.metadata["account_ids"] = {account: ACCOUNT_ID}
+
+        completed = mock.Mock(returncode=0, stderr="")
+        with mock.patch("server.is_running", return_value=False), \
+             mock.patch("server.backup_account", return_value=(True, "ok", "/backup")), \
+             mock.patch("server.subprocess.run", return_value=completed):
+            ok, _, _ = server.delete_account(account)
+
+        self.assertTrue(ok)
+        self.assertNotIn(account, state.metadata["account_ids"])
 
     def test_rejects_a_symlinked_account(self):
         account = self._account("real-account")
@@ -222,6 +264,7 @@ class ManagedAccountPathTests(unittest.TestCase):
                     "/tmp/account": {"type": "socks5", "host": "127.0.0.1", "port": 1080}
                 },
                 "dock_names": {"/tmp/account": "Alice"},
+                "account_ids": {"/tmp/account": ACCOUNT_ID},
             },
             "config": copy.deepcopy(server.DEFAULT_CONFIG),
             "workspaces": {
@@ -237,6 +280,7 @@ class ManagedAccountPathTests(unittest.TestCase):
         self.assertTrue(ok, message)
         self.assertEqual(normalized["config"]["port"], 8477)
         self.assertEqual(normalized["metadata"]["notes"]["/tmp/account"], "note")
+        self.assertEqual(normalized["metadata"]["account_ids"]["/tmp/account"], ACCOUNT_ID)
         self.assertEqual(normalized["workspaces"]["Ops"]["accounts"], ["/tmp/account"])
 
     def test_validate_import_payload_rejects_bad_types(self):
@@ -251,8 +295,21 @@ class ManagedAccountPathTests(unittest.TestCase):
         self.assertTrue(message)
 
     def test_import_rejects_invalid_account_id_value(self):
+        for value in (12, "", uuid.UUID(ACCOUNT_ID).hex, ACCOUNT_ID.upper()):
+            payload = {
+                "metadata": {"account_ids": {"/tmp/account": value}},
+                "config": {},
+                "workspaces": {},
+            }
+            with self.subTest(value=value):
+                self.assertFalse(server._validate_import_payload(payload)[0])
+
+    def test_import_rejects_duplicate_account_ids(self):
         payload = {
-            "metadata": {"account_ids": {"/tmp/account": 12}},
+            "metadata": {"account_ids": {
+                "/tmp/first": ACCOUNT_ID,
+                "/tmp/second": ACCOUNT_ID,
+            }},
             "config": {},
             "workspaces": {},
         }
@@ -566,27 +623,68 @@ class BackupPathTests(unittest.TestCase):
         self.assertEqual(names, ["good"])
 
     def test_list_backups_uses_manifest_identity_with_legacy_fallback(self):
-        manifest = self._make_backup(account="uuid-2", account_id="uuid", account_name="Visible account")
+        manifest = self._make_backup(account=ACCOUNT_ID + "-2", account_id=ACCOUNT_ID,
+                                     account_name="Visible account")
         legacy = self._make_backup(account="legacy")
         listed = {b["backup_path"]: b for b in backups.list_backups()}
         self.assertEqual(listed[manifest]["account"], "Visible account")
         self.assertEqual(listed[manifest]["account_name"], "Visible account")
-        self.assertEqual(listed[manifest]["account_id"], "uuid")
+        self.assertEqual(listed[manifest]["account_id"], ACCOUNT_ID)
         self.assertEqual(listed[legacy]["account"], "legacy")
         self.assertEqual(listed[legacy]["account_name"], "legacy")
         self.assertIsNone(listed[legacy]["account_id"])
-        self.assertEqual(backups._last_backup_map()["Visible account"], "2026-01-01_00-00")
+        self.assertEqual(backups._last_backup_map()[ACCOUNT_ID], "2026-01-01_00-00")
+
+    def test_malformed_manifests_fall_back_to_legacy(self):
+        manifests = (
+            {"account_id": uuid.UUID(ACCOUNT_ID).hex, "account_name": "Account",
+             "created_at": "2026-01-01T00:00:00"},
+            {"account_id": ACCOUNT_ID, "account_name": "",
+             "created_at": "2026-01-01T00:00:00"},
+            {"account_id": ACCOUNT_ID, "account_name": "Account", "created_at": 1},
+        )
+        for index, manifest in enumerate(manifests):
+            stored_name = f"legacy-{index}"
+            path = self._make_backup(date=f"2026-01-0{index + 1}_00-00", account=stored_name)
+            with open(os.path.join(path, "backup.json"), "w", encoding="utf-8") as f:
+                json.dump(manifest, f)
+            listed = {b["backup_path"]: b for b in backups.list_backups()}[path]
+            with self.subTest(manifest=manifest):
+                self.assertEqual(listed["account"], stored_name)
+                self.assertIsNone(listed["account_id"])
+
+    def test_last_backup_status_follows_account_id_after_rename(self):
+        self._make_backup(account=ACCOUNT_ID, account_id=ACCOUNT_ID, account_name="Old name")
+        state.metadata["account_ids"] = {self.account: ACCOUNT_ID}
+        backups._backup_map_cache["ts"] = 0.0
+        handler = mock.Mock()
+
+        with mock.patch("server.scan_accounts_cached", return_value=[{
+                "path": self.account, "name": "Renamed", "group": "Root"}]):
+            server.RequestHandler._get_api_accounts(handler)
+
+        accounts = handler.send_json.call_args.args[0]
+        self.assertEqual(accounts[0]["last_backup"], "2026-01-01_00-00")
 
     def test_same_second_backups_get_distinct_destinations(self):
         first = backups.backup_account(self.account, "Account")
         second = backups.backup_account(self.account, "Account")
         self.assertTrue(first[0]); self.assertTrue(second[0])
         self.assertNotEqual(first[2], second[2])
+        self.assertIn(os.path.relpath(second[2], state.DATA_DIR), second[1])
         with open(os.path.join(first[2], "backup.json"), encoding="utf-8") as f:
             manifest = json.load(f)
         self.assertEqual(manifest["account_id"], state.metadata["account_ids"][self.account])
         self.assertEqual(manifest["account_name"], "Account")
         self.assertTrue(manifest["created_at"])
+
+    def test_backup_rejects_destination_outside_backups_root(self):
+        with mock.patch("backups.state.ensure_account_id", return_value="../../escape"), \
+             mock.patch("backups._copy_tdata_excluding_cache", return_value=(True, "")):
+            ok, _, _ = backups.backup_account(self.account, "Account")
+
+        self.assertFalse(ok)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "escape")))
 
     def test_failed_second_backup_keeps_existing_completed_backup(self):
         first = backups.backup_account(self.account, "Account")
@@ -886,7 +984,7 @@ class PruneBackupsTests(unittest.TestCase):
         return b
 
     def test_prune_keeps_only_newest_n(self):
-        account_id = "account-uuid"
+        account_id = ACCOUNT_ID
         dates = ["2026-01-01_00-00", "2026-01-02_00-00", "2026-01-03_00-00", "2026-01-04_00-00"]
         for suffix, d in enumerate(dates, 1):
             self._make_backup(d, f"{account_id}-{suffix}", account_id, "acct")
@@ -894,6 +992,26 @@ class PruneBackupsTests(unittest.TestCase):
         backups.prune_backups(account_id)
         remaining = sorted(b["date"] for b in backups.list_backups() if b["account_id"] == account_id)
         self.assertEqual(remaining, ["2026-01-03_00-00", "2026-01-04_00-00"])
+
+    def test_prune_keeps_newest_same_second_collision(self):
+        for account in (ACCOUNT_ID, ACCOUNT_ID + "-2", ACCOUNT_ID + "-3"):
+            self._make_backup("2026-01-01_00-00-00", account, ACCOUNT_ID, "acct")
+        state.config["backup_keep_per_account"] = 1
+
+        backups.prune_backups(ACCOUNT_ID)
+
+        remaining = [os.path.basename(b["backup_path"]) for b in backups.list_backups()
+                     if b["account_id"] == ACCOUNT_ID]
+        self.assertEqual(remaining, [ACCOUNT_ID + "-3"])
+
+    def test_prune_never_removes_manifest_free_legacy_backups(self):
+        legacy = [self._make_backup(date, "acct") for date in (
+            "2026-01-01_00-00", "2026-01-02_00-00")]
+        state.config["backup_keep_per_account"] = 1
+
+        backups.prune_backups(ACCOUNT_ID)
+
+        self.assertTrue(all(os.path.isdir(path) for path in legacy))
 
     def test_prune_is_noop_when_keep_is_zero(self):
         dates = ["2026-01-01_00-00", "2026-01-02_00-00", "2026-01-03_00-00"]

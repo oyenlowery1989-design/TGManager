@@ -51,8 +51,9 @@ def _read_backup_manifest(backup_dir):
         with open(os.path.join(backup_dir, "backup.json"), encoding="utf-8") as f:
             manifest = json.load(f)
         if (isinstance(manifest, dict)
-                and isinstance(manifest.get("account_id"), str) and manifest["account_id"]
-                and isinstance(manifest.get("account_name"), str) and manifest["account_name"]):
+                and state.is_canonical_account_id(manifest.get("account_id"))
+                and isinstance(manifest.get("account_name"), str) and manifest["account_name"].strip()
+                and isinstance(manifest.get("created_at"), str)):
             return manifest
     except (OSError, ValueError, TypeError):
         pass
@@ -87,13 +88,21 @@ def list_backups():
                     "size":       size,
                     "size_human": state.human_size(size),
                 })
+    def sort_key(backup):
+        suffix = 1
+        name = os.path.basename(backup["backup_path"])
+        prefix = (backup["account_id"] or "") + "-"
+        if backup["account_id"] and name.startswith(prefix) and name[len(prefix):].isdigit():
+            suffix = int(name[len(prefix):])
+        return backup["date"], suffix
+    backups.sort(key=sort_key, reverse=True)
     return backups
 
 
 _backup_map_cache = {"ts": 0.0, "map": {}}
 
 def _last_backup_map():
-    """Map account name → newest backup date folder ("YYYY-MM-DD_HH-MM").
+    """Map stable account ID (or legacy name) → newest backup date folder.
 
     listdir-only (no sizes), cached 30 s — cheap enough for the accounts poll.
     """
@@ -112,7 +121,7 @@ def _last_backup_map():
                     if account.endswith(".partial"):
                         continue
                     manifest = _read_backup_manifest(os.path.join(date_path, account))
-                    result.setdefault(manifest["account_name"] if manifest else account, date_folder)
+                    result.setdefault(manifest["account_id"] if manifest else account, date_folder)
         except OSError as e:
             state._log.warning("_last_backup_map: %s", e)
     _backup_map_cache["map"] = result
@@ -303,6 +312,15 @@ def backup_account(folder_path, account_name):
     date_str = created_at.strftime("%Y-%m-%d_%H-%M-%S")
     account_id = state.ensure_account_id(folder_path)
     base = os.path.join(state.DATA_DIR, "Backups", date_str, account_id)
+    backup_root = os.path.realpath(os.path.join(state.DATA_DIR, "Backups"))
+    data_root = os.path.realpath(state.DATA_DIR)
+    try:
+        safe_root = os.path.commonpath((backup_root, data_root)) == data_root
+    except ValueError:
+        safe_root = False
+    if not safe_root or _resolve_backup_dir(base) != os.path.realpath(base):
+        state._log.error("backup_account: unsafe backup destination %s", base)
+        return False, "Could not create a safe backup destination", ""
     backup_dir = base
     suffix = 2
     while os.path.exists(backup_dir) or os.path.exists(backup_dir + ".partial"):
@@ -350,4 +368,4 @@ def backup_account(folder_path, account_name):
     state._log.info("Backup complete: %s", backup_dir)
     prune_backups(account_id)
     _backup_map_cache["ts"] = 0.0
-    return True, f"Backed up to Backups/{date_str}/{account_name}", backup_dir
+    return True, f"Backed up to {os.path.relpath(backup_dir, state.DATA_DIR)}", backup_dir
