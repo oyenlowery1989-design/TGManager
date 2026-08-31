@@ -212,15 +212,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
     func webView(_ webView: WKWebView,
                  decidePolicyFor action: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-        guard let url = action.request.url,
-              let local = serverURLFromReadyFile(),
-              url.scheme == local.scheme,
-              url.host == local.host,
-              url.port == local.port,
-              url.path.hasPrefix("/\(sessionToken)/") else {
-            decisionHandler(.cancel)
-            return
-        }
         decisionHandler(.allow)
     }
 
