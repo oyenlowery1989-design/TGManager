@@ -63,6 +63,9 @@ class BrowserFallbackLauncherTests(unittest.TestCase):
         self.assertIn('trap cleanup EXIT', source)
         self.assertNotIn('lsof -ti:$PORT', source)
 
+    def test_obsolete_revert_command_is_not_shipped(self):
+        self.assertFalse((RESOURCES_DIR / "Revert_to_Chrome.command").exists())
+
 
 class PersistedJsonTests(unittest.TestCase):
     def setUp(self):
