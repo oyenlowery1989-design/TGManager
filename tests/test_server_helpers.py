@@ -45,13 +45,19 @@ class ServerHelperTests(unittest.TestCase):
 
 
 class NativeLauncherTests(unittest.TestCase):
-    def test_navigation_policy_keeps_webview_loads_in_app(self):
+    def test_navigation_policy_allows_only_trusted_top_level_loads(self):
         source = LAUNCHER_FILE.read_text()
+        self.assertIn("var serverURL: URL?", source)
+        self.assertIn("self.serverURL = url", source)
         start = source.index("func webView(_ webView: WKWebView,")
         end = source.index("    // ── WKUIDelegate", start)
         policy = source[start:end]
+        self.assertIn("isTrustedServerURL", policy)
+        self.assertIn("action.targetFrame?.isMainFrame == true", policy)
         self.assertIn("decisionHandler(.allow)", policy)
-        self.assertNotIn("decisionHandler(.cancel)", policy)
+        self.assertIn("decisionHandler(.cancel)", policy)
+        self.assertNotIn("serverURLFromReadyFile()", policy)
+        self.assertNotIn("NSWorkspace", source)
 
 
 class BrowserFallbackLauncherTests(unittest.TestCase):
