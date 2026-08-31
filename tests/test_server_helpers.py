@@ -129,6 +129,17 @@ class ManagedAccountPathTests(unittest.TestCase):
         self.assertTrue(state.is_managed_account_path(account))
         self.assertFalse(state.is_managed_account_path(os.path.join(self.tmp, "ordinary-folder")))
 
+    def test_accepts_real_account_in_configured_extra_scan_dir(self):
+        external = os.path.join(self.tmp, "external")
+        account = os.path.join(external, "account")
+        os.makedirs(os.path.join(account, "TelegramForcePortable", "tdata"))
+        original = state.config.get("extra_scan_dirs")
+        state.config["extra_scan_dirs"] = [external]
+        try:
+            self.assertTrue(state.is_managed_account_path(account))
+        finally:
+            state.config["extra_scan_dirs"] = original
+
     def test_ensure_account_id_is_stable_and_persisted(self):
         account = self._account()
         first = state.ensure_account_id(account)
