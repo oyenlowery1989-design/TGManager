@@ -1337,6 +1337,9 @@ def rename_account(old_path, new_name):
       Rollback – if Phase 3 fails, undo the folder rename before returning the error.
       Commit   – only after both writes succeed do we update the in-memory global.
     """
+    valid, new_name = validate_account_name(new_name)
+    if not valid:
+        return False, new_name
     _log.info("Renaming account %s → %r", old_path, new_name)
     if not is_managed_account_path(old_path):
         return False, "Path is not a valid account folder"
@@ -1426,6 +1429,21 @@ def list_groups():
     return ordered
 
 
+def validate_account_name(name):
+    name = name.strip() if isinstance(name, str) else ""
+    if not name:
+        return False, "Account name cannot be empty"
+    if len(name) > 120 or any(ord(c) < 32 for c in name):
+        return False, "Account name contains invalid characters"
+    if name.startswith("."):
+        return False, "Account name cannot start with a dot"
+    if name in SKIP_NAMES:
+        return False, f'"{name}" is a reserved folder name'
+    if any(c in '/\\:*?"<>|' for c in name):
+        return False, "Account name contains invalid characters"
+    return True, name
+
+
 def create_account(name, parent_path, open_after=True):
     """
     Create a brand-new account folder, copy Telegram.app into it, and open it
@@ -1433,16 +1451,9 @@ def create_account(name, parent_path, open_after=True):
     """
     _log.info("Creating account %r in %s", name, parent_path or ROOT_DIR)
     # Sanitise name
-    name = name.strip()
-    bad_chars = set('/\\:*?"<>|')
-    if not name:
-        return False, "Account name cannot be empty"
-    if any(c in bad_chars for c in name):
-        return False, "Name contains invalid characters (/ \\ : * ? \" < > |)"
-    if name in (".", "..") or name.startswith("."):
-        return False, "Account name cannot start with a dot"
-    if name in SKIP_NAMES:
-        return False, f'"{name}" is a reserved folder name'
+    valid, name = validate_account_name(name)
+    if not valid:
+        return False, name
 
     # Validate parent path
     if not parent_path:
