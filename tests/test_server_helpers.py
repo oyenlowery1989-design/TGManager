@@ -66,6 +66,9 @@ class BrowserFallbackLauncherTests(unittest.TestCase):
     def test_obsolete_revert_command_is_not_shipped(self):
         self.assertFalse((RESOURCES_DIR / "Revert_to_Chrome.command").exists())
 
+    def test_unused_pyobjc_launcher_is_not_shipped(self):
+        self.assertFalse((RESOURCES_DIR / "app_window.py").exists())
+
 
 class PersistedJsonTests(unittest.TestCase):
     def setUp(self):
