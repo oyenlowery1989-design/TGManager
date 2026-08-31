@@ -5,12 +5,20 @@ Depends only on state.py — no other repo-internal imports.
 """
 
 import json
+import hashlib
+import glob
 import os
 import shlex
 import subprocess
 from datetime import datetime
 
 import state
+
+
+def _proxy_recovery_path(service, channel):
+    """Contained, stable recovery record for one network service/channel."""
+    key = hashlib.sha256(f"{service}\0{channel}".encode()).hexdigest()
+    return os.path.join(state.DATA_DIR, "proxy_recovery", f"{key}.json")
 
 
 def get_active_network_service():
@@ -131,19 +139,20 @@ def apply_proxy(proxy_config):
     # proxy and leave it stuck on. Reading back the authoritative baseline
     # makes every concurrent restore converge on the same true original.
     channel = "socks" if proxy_type.startswith("socks") else "http"
+    recovery_path = _proxy_recovery_path(service, channel)
     r_enabled, r_host, r_port = orig_enabled, orig_host, orig_port
     our_saved_at = datetime.now().isoformat()
     wrote_baseline = False
     with state._proxy_state_lock:
-        if not os.path.exists(state.PROXY_ORIGINAL_FILE):
-            state._save_json_atomic(state.PROXY_ORIGINAL_FILE, {
+        if not os.path.exists(recovery_path):
+            state._save_json_atomic(recovery_path, {
                 "service": service, "proxy_type": proxy_type,
                 "enabled": orig_enabled, "host": orig_host, "port": orig_port,
                 "saved_at": our_saved_at,
             })
             wrote_baseline = True
         try:
-            with open(state.PROXY_ORIGINAL_FILE) as _pf:
+            with open(recovery_path) as _pf:
                 _base = json.load(_pf)
             _base_channel = "socks" if str(_base.get("proxy_type", "")).startswith("socks") else "http"
             # Only trust the file when it describes THIS proxy channel; a
@@ -189,10 +198,10 @@ def apply_proxy(proxy_config):
             # apply_proxy() call has since taken it over as its own baseline.
             with state._proxy_state_lock:
                 try:
-                    with open(state.PROXY_ORIGINAL_FILE) as _pf:
+                    with open(recovery_path) as _pf:
                         _cur = json.load(_pf)
                     if _cur.get("saved_at") == our_saved_at:
-                        os.unlink(state.PROXY_ORIGINAL_FILE)
+                        os.unlink(recovery_path)
                 except (OSError, ValueError):
                     pass
         return
@@ -212,7 +221,7 @@ def apply_proxy(proxy_config):
             restore_lines = [off_cmd]
         # Runs under `set -e`: only reached when the restore succeeded, so a
         # leftover file always means "system proxy may still be modified".
-        restore_lines.append(f"rm -f {shlex.quote(state.PROXY_ORIGINAL_FILE)}")
+        restore_lines.append(f"rm -f {shlex.quote(recovery_path)}")
 
         fd_restore, restore_path = tempfile.mkstemp(suffix=".sh", prefix="tm_proxy_restore_cmd_")
         fd_wrapper, wrapper_path = tempfile.mkstemp(suffix=".sh", prefix="tm_proxy_restore_job_")
@@ -262,7 +271,7 @@ def apply_proxy(proxy_config):
     schedule_restore()
 
 
-def _recover_stale_proxy():
+def _recover_stale_proxy(record_path=None):
     """Restore system proxy settings left modified by a previous run.
 
     state.PROXY_ORIGINAL_FILE existing at startup means apply_proxy() changed the
@@ -276,22 +285,29 @@ def _recover_stale_proxy():
     account during this startup check) could read the file mid-decision here
     and drive an unsynchronized second `networksetup` command against it.
     """
+    if record_path is None:
+        paths = [state.PROXY_ORIGINAL_FILE]
+        paths.extend(glob.glob(os.path.join(state.DATA_DIR, "proxy_recovery", "*.json")))
+        for path in paths:
+            _recover_stale_proxy(path)
+        return
+
     with state._proxy_state_lock:
         try:
-            with open(state.PROXY_ORIGINAL_FILE) as f:
+            with open(record_path) as f:
                 rec = json.load(f)
         except FileNotFoundError:
             return
         except Exception as e:
             state._log.error("stale proxy record unreadable (%s) — remove %s and check "
-                       "System Settings → Network manually", e, state.PROXY_ORIGINAL_FILE)
+                       "System Settings → Network manually", e, record_path)
             return
 
         service = rec.get("service", "")
         ptype   = str(rec.get("proxy_type", "socks5"))
         if not service:
             try:
-                os.unlink(state.PROXY_ORIGINAL_FILE)
+                os.unlink(record_path)
             except OSError:
                 pass
             return
@@ -327,7 +343,7 @@ def _recover_stale_proxy():
         )
         if r.returncode == 0:
             try:
-                os.unlink(state.PROXY_ORIGINAL_FILE)
+                os.unlink(record_path)
             except OSError:
                 pass
             state._log.info("Stale proxy state restored for service %r", service)

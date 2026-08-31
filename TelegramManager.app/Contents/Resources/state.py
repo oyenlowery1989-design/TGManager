@@ -182,7 +182,12 @@ def _load_json_file(path, default_value):
     try:
         if os.path.exists(path):
             with open(path) as f:
-                return json.load(f)
+                value = json.load(f)
+            if isinstance(value, type(default_value)):
+                return value
+            corrupt = f"{path}.corrupt-{uuid.uuid4().hex}"
+            os.replace(path, corrupt)
+            _log.warning("Quarantined JSON with wrong top-level type from %s to %s", path, corrupt)
     except Exception as e:
         _log.warning("Failed to load JSON from %s: %s", path, e)
     return copy.deepcopy(default_value)
@@ -193,7 +198,12 @@ def _load_json_file_with_fallbacks(path, default_value, fallback_paths=()):
         try:
             if os.path.exists(candidate):
                 with open(candidate) as f:
-                    return json.load(f), candidate
+                    value = json.load(f)
+                if isinstance(value, type(default_value)):
+                    return value, candidate
+                corrupt = f"{candidate}.corrupt-{uuid.uuid4().hex}"
+                os.replace(candidate, corrupt)
+                _log.warning("Quarantined JSON with wrong top-level type from %s to %s", candidate, corrupt)
         except Exception as e:
             _log.warning("Failed to load JSON from %s: %s", candidate, e)
     return copy.deepcopy(default_value), None

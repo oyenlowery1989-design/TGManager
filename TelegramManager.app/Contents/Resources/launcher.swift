@@ -212,6 +212,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
     func webView(_ webView: WKWebView,
                  decidePolicyFor action: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        guard let url = action.request.url,
+              let local = serverURLFromReadyFile(),
+              url.scheme == local.scheme,
+              url.host == local.host,
+              url.port == local.port,
+              url.path.hasPrefix("/\(sessionToken)/") else {
+            if action.targetFrame?.isMainFrame == true, let url = action.request.url {
+                NSWorkspace.shared.open(url)
+            }
+            decisionHandler(.cancel)
+            return
+        }
         decisionHandler(.allow)
     }
 

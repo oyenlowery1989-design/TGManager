@@ -1191,6 +1191,31 @@ def _validate_import_payload(data):
     return True, "", {"metadata": cleaned_metadata, "config": cleaned_config, "workspaces": cleaned_workspaces}
 
 
+def _snapshot_files(paths):
+    snapshots = {}
+    for path in paths:
+        try:
+            with open(path, "rb") as f:
+                snapshots[path] = f.read()
+        except FileNotFoundError:
+            snapshots[path] = None
+    return snapshots
+
+
+def _restore_files(snapshots):
+    for path, content in snapshots.items():
+        if content is None:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+            continue
+        tmp = path + ".rollback"
+        with open(tmp, "wb") as f:
+            f.write(content)
+        os.replace(tmp, path)
+
+
 # ── Per-process Telegram control ───────────────────────────────────────────
 
 def find_telegram_pid(account_path):
@@ -1335,6 +1360,12 @@ def rename_account(old_path, new_name):
     pinned = new_meta.get("pinned", [])
     if old_path in pinned:
         pinned[pinned.index(old_path)] = new_path
+    with _ws_lock:
+        old_workspaces = load_workspaces()
+    new_workspaces = copy.deepcopy(old_workspaces)
+    for workspace in new_workspaces.values():
+        accounts = workspace.get("accounts", [])
+        workspace["accounts"] = [new_path if path == old_path else path for path in accounts]
 
     # Phase 2: rename folder on disk
     try:
@@ -1343,9 +1374,10 @@ def rename_account(old_path, new_name):
         _log.warning("rename_account: os.rename failed: %s", e)
         return False, str(e)
 
-    # Phase 3: persist metadata (atomic .tmp → replace)
+    # Phase 3: persist metadata and workspace references (atomic .tmp → replace)
     try:
         save_metadata(new_meta)
+        save_workspaces(new_workspaces)
     except Exception as e:
         # Undo the folder rename so disk and metadata stay consistent
         try:
@@ -1356,6 +1388,11 @@ def rename_account(old_path, new_name):
                 "rename_account: CRITICAL — folder is at %s but metadata save failed (%s) "
                 "and undo also failed (%s). Manual fix required.", new_path, e, undo_e
             )
+        try:
+            save_metadata(metadata)
+            save_workspaces(old_workspaces)
+        except Exception as rollback_error:
+            _log.error("rename_account: state rollback failed: %s", rollback_error)
         return False, f"Could not save metadata: {e}"
 
     # Commit: update in-memory global only after both disk operations succeeded
@@ -2967,20 +3004,33 @@ class RequestHandler(BaseHTTPRequestHandler):
         # export files still validate) but overwrite with live values.
         imported_cfg["lock_password_hash"] = config.get("lock_password_hash")
         imported_cfg["lock_password_salt"] = config.get("lock_password_salt")
+        with _meta_lock, _config_lock, _ws_lock:
+            old_metadata = copy.deepcopy(metadata)
+            old_config = copy.deepcopy(config)
+            snapshots = _snapshot_files((state.METADATA_FILE, state.CONFIG_FILE,
+                                         state.WORKSPACES_FILE))
         try:
-            with _meta_lock:
+            with _meta_lock, _config_lock, _ws_lock:
                 save_metadata(normalized["metadata"])
+                save_config(imported_cfg)
+                save_workspaces(normalized["workspaces"])
                 metadata.clear()
                 metadata.update(normalized["metadata"])
-            with _config_lock:
-                save_config(imported_cfg)
                 config.clear()
                 config.update(imported_cfg)
-            save_workspaces(normalized["workspaces"])
             invalidate_scan_cache()
             _log.info("Config imported from client")
             self.send_json({"success": True, "message": "Config imported successfully"})
         except Exception as e:
+            try:
+                _restore_files(snapshots)
+            except OSError as rollback_error:
+                _log.error("import-config rollback failed: %s", rollback_error)
+            with _meta_lock, _config_lock:
+                metadata.clear()
+                metadata.update(old_metadata)
+                config.clear()
+                config.update(old_config)
             _log.warning("import-config failed: %s", e)
             self.send_json({"success": False, "message": str(e)})
 
@@ -3053,6 +3103,8 @@ class RequestHandler(BaseHTTPRequestHandler):
         body = json.dumps(data).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -3064,6 +3116,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                 content = f.read()
             self.send_response(200)
             self.send_header("Content-Type", content_type)
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Content-Length", str(len(content)))
             self.end_headers()
             self.wfile.write(content)
