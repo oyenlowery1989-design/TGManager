@@ -20,6 +20,7 @@ backups = importlib.import_module("backups")
 proxy = importlib.import_module("proxy")
 
 ACCOUNT_ID = "11111111-1111-4a11-8b11-111111111111"
+LAUNCHER_FILE = RESOURCES_DIR / "launcher.swift"
 
 
 class ServerHelperTests(unittest.TestCase):
@@ -40,6 +41,16 @@ class ServerHelperTests(unittest.TestCase):
         self.assertTrue(server.is_safe_path(safe_path))
         self.assertFalse(server.is_safe_path("/tmp/../etc/passwd"))
         self.assertFalse(server.is_safe_path("../outside"))
+
+
+class NativeLauncherTests(unittest.TestCase):
+    def test_navigation_policy_keeps_webview_loads_in_app(self):
+        source = LAUNCHER_FILE.read_text()
+        start = source.index("func webView(_ webView: WKWebView,")
+        end = source.index("    // ── WKUIDelegate", start)
+        policy = source[start:end]
+        self.assertIn("decisionHandler(.allow)", policy)
+        self.assertNotIn("decisionHandler(.cancel)", policy)
 
 
 class PersistedJsonTests(unittest.TestCase):
