@@ -227,13 +227,16 @@ def is_safe_path(path: str) -> bool:
         return False
 
 def is_managed_account_path(path: str) -> bool:
-    """Return True only for a real account folder inside ROOT_DIR."""
+    """Return True only for a real account folder in a configured scan root."""
     if not path:
         return False
     try:
-        root = os.path.abspath(ROOT_DIR)
         candidate = os.path.abspath(path)
-        if not candidate.startswith(root + os.sep):
+        roots = [ROOT_DIR] + [os.path.expanduser(p) for p in config.get("extra_scan_dirs", [])
+                              if isinstance(p, str)]
+        root = next((os.path.abspath(p) for p in roots
+                     if candidate.startswith(os.path.abspath(p) + os.sep)), None)
+        if not root:
             return False
         current = root
         for part in os.path.relpath(candidate, root).split(os.sep):
