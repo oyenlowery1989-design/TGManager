@@ -19,6 +19,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
     var statusItem: NSStatusItem?
     var sessionToken = readSessionToken()
     var readyFileURL: URL?
+    var serverURL: URL?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -175,7 +176,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         let task = URLSession.shared.dataTask(with: url) { [weak self] _, response, _ in
             guard let self = self else { return }
             if (response as? HTTPURLResponse)?.statusCode == 200 {
-                DispatchQueue.main.async { self.webView.load(URLRequest(url: url)) }
+                DispatchQueue.main.async {
+                    self.serverURL = url
+                    self.webView.load(URLRequest(url: url))
+                }
             } else {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                     self.waitForServer(attempt: attempt + 1)
@@ -209,9 +213,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
     }
 
     // ── WKNavigationDelegate ─────────────────────────────────────────────────
+    func isTrustedServerURL(_ url: URL) -> Bool {
+        guard let serverURL else { return false }
+        return url.scheme == serverURL.scheme &&
+               url.host == serverURL.host &&
+               url.port == serverURL.port &&
+               url.path.hasPrefix(serverURL.path)
+    }
+
     func webView(_ webView: WKWebView,
                  decidePolicyFor action: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        if action.targetFrame?.isMainFrame == true,
+           let url = action.request.url,
+           !isTrustedServerURL(url) {
+            decisionHandler(.cancel)
+            return
+        }
         decisionHandler(.allow)
     }
 
