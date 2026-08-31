@@ -60,6 +60,25 @@ class NativeLauncherTests(unittest.TestCase):
         self.assertNotIn("NSWorkspace", source)
 
 
+class MetadataRefreshTests(unittest.TestCase):
+    def test_refresh_only_preserves_currently_focused_metadata(self):
+        source = (RESOURCES_DIR / "index.html").read_text()
+        start = source.index("function mergeLocalEdits(fresh)")
+        end = source.index("\nasync function refresh()", start)
+        merge = source[start:end]
+        self.assertIn("document.activeElement", merge)
+        self.assertIn("pendingNoteEdits[fa.path]", merge)
+        self.assertIn("pendingUsernameEdits[fa.path]", merge)
+        self.assertNotIn("fa.note = old.note; fa.username = old.username", merge)
+
+    def test_pending_edits_clear_only_after_the_matching_save_finishes(self):
+        source = (RESOURCES_DIR / "index.html").read_text()
+        self.assertIn("pendingNoteEdits[acc.path] = ta.value", source)
+        self.assertIn("if (pendingNoteEdits[path] === note) delete pendingNoteEdits[path]", source)
+        self.assertIn("pendingUsernameEdits[path] = username", source)
+        self.assertIn("if (pendingUsernameEdits[path] === username) delete pendingUsernameEdits[path]", source)
+
+
 class BrowserFallbackLauncherTests(unittest.TestCase):
     def test_fallback_uses_an_authenticated_isolated_lifecycle(self):
         source = CHROME_LAUNCHER_FILE.read_text()

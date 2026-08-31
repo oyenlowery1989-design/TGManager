@@ -1545,6 +1545,7 @@ let sortMode = localStorage.getItem("tm_sort") || "custom";
 document.getElementById("sort-select").value = sortMode;
 let dragSrc     = null;
 let noteTimers  = {};
+let pendingNoteEdits = {};
 let _keeperInfo = { enabled: false, interval_days: 30 };
 // Fallback until /api/config delivers the server's authoritative SKIP_NAMES
 let _reservedNames = ["TelegramForcePortable","Backups","TelegramManager.app","Telegram.app","tdata","tupdates","modules","_apps",".DS_Store"];
@@ -1824,6 +1825,7 @@ function renderAccounts() {
     if (ta) {
       ta.value = acc.note || "";
       ta.addEventListener("input", () => {
+        pendingNoteEdits[acc.path] = ta.value;
         clearTimeout(noteTimers[acc.path]);
         noteTimers[acc.path] = setTimeout(() => saveNote(acc.path, ta.value), 800);
       });
@@ -2057,19 +2059,18 @@ function setServerDisconnected(down) {
 
 let _refreshing = false;   // guard against concurrent auto-refreshes
 
-// Shared by refresh() and the auto-refresh poller below: flushes in-progress
-// textarea edits into accounts[], then carries local note/username edits
-// over onto the freshly-fetched list (a Map keyed by path avoids an O(n)
-// .find() per account on every poll tick).
+// Shared by refresh() and the auto-refresh poller below: retain the one
+// field the user is actively editing, but otherwise accept fresh server data.
 function mergeLocalEdits(fresh) {
-  accounts.forEach(acc => {
-    const ta = document.getElementById("note-" + pathKey(acc.path));
-    if (ta) acc.note = ta.value;
-  });
-  const byPath = new Map(accounts.map(a => [a.path, a]));
+  const active = document.activeElement;
   fresh.forEach(fa => {
-    const old = byPath.get(fa.path);
-    if (old) { fa.note = old.note; fa.username = old.username; }
+    const key = pathKey(fa.path);
+    if (active?.id === "note-" + key || pendingNoteEdits[fa.path] !== undefined) {
+      fa.note = active?.id === "note-" + key ? active.value : pendingNoteEdits[fa.path];
+    }
+    if (active?.id === "uname-" + key || pendingUsernameEdits[fa.path] !== undefined) {
+      fa.username = active?.id === "uname-" + key ? active.textContent.trim() : pendingUsernameEdits[fa.path];
+    }
   });
 }
 
@@ -2133,12 +2134,18 @@ document.addEventListener("click", () => {
 // ── Username (manual edit) ─────────────────────────────────────────────────
 
 let usernameTimers = {};
+let pendingUsernameEdits = {};
 
 async function saveUsername(path, username) {
+  pendingUsernameEdits[path] = username;
   clearTimeout(usernameTimers[path]);
   usernameTimers[path] = setTimeout(async () => {
     const r = await api("/api/username", "POST", { path, username });
-    if (!r || r.success === false) { toast(r?.message || "Username not saved", "error"); return; }
+    if (!r || r.success === false) {
+      if (pendingUsernameEdits[path] === username) delete pendingUsernameEdits[path];
+      toast(r?.message || "Username not saved", "error"); return;
+    }
+    if (pendingUsernameEdits[path] === username) delete pendingUsernameEdits[path];
     const acc = accounts.find(a => a.path === path);
     if (acc) acc.username = username;
   }, 600);
@@ -2465,7 +2472,11 @@ async function backupAll() {
 
 async function saveNote(path, note) {
   const r = await api("/api/note", "POST", { path, note });
-  if (!r || r.success === false) { toast(r?.message || "Note not saved", "error"); return; }
+  if (!r || r.success === false) {
+    if (pendingNoteEdits[path] === note) delete pendingNoteEdits[path];
+    toast(r?.message || "Note not saved", "error"); return;
+  }
+  if (pendingNoteEdits[path] === note) delete pendingNoteEdits[path];
   const acc = accounts.find(a => a.path === path);
   if (acc) acc.note = note;
 }
@@ -2805,6 +2816,7 @@ async function confirmDelete() {
     // Clean up dangling debounce timers for the removed account
     clearTimeout(noteTimers[path]);     delete noteTimers[path];
     clearTimeout(usernameTimers[path]); delete usernameTimers[path];
+    delete pendingNoteEdits[path];       delete pendingUsernameEdits[path];
     const msg = r.backup_path ? `Moved to Trash ✓ (backup: ${r.backup_path})` : "Moved to Trash ✓";
     toast(msg, "success");
     renderAccounts();
