@@ -21,6 +21,7 @@ proxy = importlib.import_module("proxy")
 
 ACCOUNT_ID = "11111111-1111-4a11-8b11-111111111111"
 LAUNCHER_FILE = RESOURCES_DIR / "launcher.swift"
+CHROME_LAUNCHER_FILE = RESOURCES_DIR.parent / "MacOS" / "launcher_chrome.sh"
 
 
 class ServerHelperTests(unittest.TestCase):
@@ -51,6 +52,16 @@ class NativeLauncherTests(unittest.TestCase):
         policy = source[start:end]
         self.assertIn("decisionHandler(.allow)", policy)
         self.assertNotIn("decisionHandler(.cancel)", policy)
+
+
+class BrowserFallbackLauncherTests(unittest.TestCase):
+    def test_fallback_uses_an_authenticated_isolated_lifecycle(self):
+        source = CHROME_LAUNCHER_FILE.read_text()
+        self.assertIn('SESSION_TOKEN="${TG_SESSION_TOKEN:-}"', source)
+        self.assertIn('URL="http://127.0.0.1:$PORT/$SESSION_TOKEN/"', source)
+        self.assertIn('mktemp -d', source)
+        self.assertIn('trap cleanup EXIT', source)
+        self.assertNotIn('lsof -ti:$PORT', source)
 
 
 class PersistedJsonTests(unittest.TestCase):
