@@ -17,6 +17,7 @@ os.environ.setdefault("TG_SESSION_TOKEN", "unit-test-token")
 server = importlib.import_module("server")
 state = importlib.import_module("state")
 backups = importlib.import_module("backups")
+proxy = importlib.import_module("proxy")
 
 ACCOUNT_ID = "11111111-1111-4a11-8b11-111111111111"
 
@@ -39,6 +40,65 @@ class ServerHelperTests(unittest.TestCase):
         self.assertTrue(server.is_safe_path(safe_path))
         self.assertFalse(server.is_safe_path("/tmp/../etc/passwd"))
         self.assertFalse(server.is_safe_path("../outside"))
+
+
+class PersistedJsonTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp(prefix="tm_json_")
+        self.original_config_file = state.CONFIG_FILE
+        state.CONFIG_FILE = os.path.join(self.tmp, "manager_config.json")
+
+    def tearDown(self):
+        import shutil
+        state.CONFIG_FILE = self.original_config_file
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_load_config_quarantines_valid_json_with_wrong_top_level_type(self):
+        with open(state.CONFIG_FILE, "w") as f:
+            json.dump([], f)
+
+        config = state.load_config()
+
+        self.assertEqual(config["port"], 8477)
+        self.assertFalse(os.path.exists(state.CONFIG_FILE))
+        self.assertEqual(len(list(Path(self.tmp).glob("manager_config.json.corrupt-*"))), 1)
+
+
+class ImportTransactionTests(unittest.TestCase):
+    def test_import_keeps_memory_unchanged_when_workspace_save_fails(self):
+        original_meta = copy.deepcopy(state.metadata)
+        original_config = copy.deepcopy(state.config)
+        responses = []
+
+        class Handler:
+            def send_json(self, body):
+                responses.append(body)
+
+        payload = {"metadata": {"notes": {"/tmp/account": "new"}},
+                   "config": {"port": 8478}, "workspaces": {}}
+        try:
+            with mock.patch("server.save_metadata"), mock.patch("server.save_config"), \
+                 mock.patch("server.save_workspaces", side_effect=OSError("disk full")):
+                server.RequestHandler._post_api_import_config(Handler(), payload)
+            self.assertFalse(responses[-1]["success"])
+            self.assertEqual(state.metadata, original_meta)
+            self.assertEqual(state.config, original_config)
+        finally:
+            state.metadata.clear(); state.metadata.update(original_meta)
+            state.config.clear(); state.config.update(original_config)
+
+
+class ProxyRecoveryTests(unittest.TestCase):
+    def test_proxy_recovery_paths_are_isolated_by_service_and_channel(self):
+        paths = {
+            proxy._proxy_recovery_path("Wi-Fi", "socks"),
+            proxy._proxy_recovery_path("Wi-Fi", "http"),
+            proxy._proxy_recovery_path("Ethernet", "socks"),
+        }
+        self.assertEqual(len(paths), 3)
+        self.assertTrue(all(path.startswith(os.path.join(state.DATA_DIR, "proxy_recovery") + os.sep)
+                            for path in paths))
 
 
 class ManagedAccountPathTests(unittest.TestCase):
@@ -110,6 +170,19 @@ class ManagedAccountPathTests(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertEqual(state.metadata["account_ids"], {new_path: ACCOUNT_ID})
+
+    def test_rename_rewrites_workspace_account_paths(self):
+        old_path = self._account("workspace-old")
+        workspaces = {"Ops": {"accounts": [old_path], "icon": "📁", "created": ""}}
+        saved = []
+
+        with mock.patch("server.load_workspaces", return_value=copy.deepcopy(workspaces)), \
+             mock.patch("server.save_workspaces", side_effect=lambda ws: saved.append(copy.deepcopy(ws))), \
+             mock.patch("server.set_telegram_display_name"):
+            ok, new_path = server.rename_account(old_path, "workspace-new")
+
+        self.assertTrue(ok)
+        self.assertEqual(saved[-1]["Ops"]["accounts"], [new_path])
 
     def test_delete_removes_account_id(self):
         account = self._account("delete-me")

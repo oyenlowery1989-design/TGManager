@@ -101,6 +101,17 @@ class HTTPLayerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIsInstance(json.loads(body), list)
 
+    def test_json_responses_include_local_security_headers(self):
+        conn = self._conn()
+        try:
+            conn.request("GET", server.ROUTE_PREFIX + "/api/accounts")
+            response = conn.getresponse()
+            response.read()
+        finally:
+            conn.close()
+        self.assertEqual(response.getheader("Referrer-Policy"), "no-referrer")
+        self.assertEqual(response.getheader("X-Content-Type-Options"), "nosniff")
+
     # ── Lock gate ────────────────────────────────────────────────────────
 
     def test_lock_status_is_reachable_while_locked(self):
