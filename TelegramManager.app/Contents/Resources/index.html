@@ -1698,7 +1698,7 @@ function renderAccounts() {
   // autosaving. Any render triggered mid-drag (poller tick, another action)
   // defers instead; onDragEnd's own listener cleanup still runs normally,
   // and the next poll/action re-render fires once the drag ends.
-  if (dragSrc) return;
+  if (dragSrc || dragGroupSrc) return;
 
   const content = document.getElementById("content");
 
@@ -3341,6 +3341,7 @@ function onGroupDragEnd(e) {
   if (dragGroupSrc) dragGroupSrc.classList.remove("dragging-group");
   document.querySelectorAll(".group-section").forEach(el => el.classList.remove("drag-over-group"));
   dragGroupSrc = null;
+  renderAccounts();
 }
 
 function onGroupDragOver(e) {
