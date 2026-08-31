@@ -218,7 +218,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
               url.host == local.host,
               url.port == local.port,
               url.path.hasPrefix("/\(sessionToken)/") else {
-            if action.targetFrame?.isMainFrame == true, let url = action.request.url {
+            if action.targetFrame?.isMainFrame == true,
+               let url = action.request.url,
+               url.scheme == "http" || url.scheme == "https" {
                 NSWorkspace.shared.open(url)
             }
             decisionHandler(.cancel)
