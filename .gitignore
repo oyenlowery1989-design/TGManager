@@ -9,6 +9,7 @@ manager_data.json
 
 # ── Build artifacts & local backups ─────────────────────────────────────
 TelegramManager.app/Contents/MacOS/launcher_swift
+TelegramManager.app/launcher_compile.log
 TelegramManager.app/Contents/MacOS/*backup*
 TelegramManager.app/Contents/MacOS/*.stale-backup
 TelegramManager.app/Contents/Resources/*.pre-fix-backup

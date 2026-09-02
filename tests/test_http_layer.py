@@ -168,6 +168,73 @@ class _StubHandler:
         self.responses.append((code, data))
 
 
+class AccountLifecycleEndpointTests(unittest.TestCase):
+    def test_move_accepts_source_and_group_paths_and_returns_new_path(self):
+        stub = _StubHandler()
+        with mock.patch("server.is_managed_account_path", return_value=True), \
+             mock.patch("server.list_groups", return_value=[{"name": "Archive", "path": "/archive"}]), \
+             mock.patch("server.move_account", return_value=(True, "/archive/account")):
+            server.RequestHandler._post_api_move_account(
+                stub, {"path": "/account", "parent_path": "/archive"})
+
+        self.assertEqual(stub.responses[-1][1], {"success": True, "new_path": "/archive/account"})
+
+    def test_folder_pin_toggles_without_changing_global_pin(self):
+        stub = _StubHandler()
+        path = os.path.join(server.ROOT_DIR, "account")
+        with mock.patch("server.is_safe_path", return_value=True), \
+             mock.patch("server.save_metadata"):
+            server.RequestHandler._post_api_folder_pin(stub, {"path": path})
+
+        self.assertEqual(stub.responses[-1][1], {"success": True, "folder_pinned": True})
+        self.assertNotIn(path, state.metadata.get("pinned", []))
+        self.assertIn(path, state.metadata.get("folder_pinned", []))
+
+    def test_open_rejects_a_safe_but_unmanaged_directory(self):
+        stub = _StubHandler()
+        with mock.patch("server.is_managed_account_path", return_value=False) as managed, \
+             mock.patch("server.open_account") as open_account:
+            server.RequestHandler._post_api_open(stub, {"path": os.path.join(server.ROOT_DIR, "group")})
+
+        self.assertTrue(managed.called)
+        open_account.assert_not_called()
+        self.assertFalse(stub.responses[-1][1]["success"])
+
+    def test_open_allows_a_fresh_portable_login_folder(self):
+        stub = _StubHandler()
+        with mock.patch("server.is_managed_account_path", return_value=False), \
+             mock.patch("server._is_fresh_portable_account_path", return_value=True), \
+             mock.patch("server.open_account", return_value=(True, "")), \
+             mock.patch("server.invalidate_scan_cache"):
+            server.RequestHandler._post_api_open(stub, {"path": "/account"})
+
+        self.assertTrue(stub.responses[-1][1]["success"])
+
+    def test_close_of_an_already_stopped_account_is_idempotent_and_refreshes_cache(self):
+        stub = _StubHandler()
+        with mock.patch("server.is_managed_account_path", return_value=True), \
+             mock.patch("server.kill_account", return_value=False), \
+             mock.patch("server.invalidate_scan_cache") as invalidate:
+            server.RequestHandler._post_api_close_account(stub, {"path": "/account"})
+
+        self.assertTrue(stub.responses[-1][1]["success"])
+        invalidate.assert_called_once()
+
+    def test_remove_account_app_reports_a_failed_clone_deletion(self):
+        stub = _StubHandler()
+        with mock.patch("server.is_managed_account_path", return_value=True), \
+             mock.patch("server.get_shared_app", return_value="/master/Telegram.app"), \
+             mock.patch("server.find_account_app", return_value="/account/Telegram.app"), \
+             mock.patch("server.find_telegram_pid", return_value=None), \
+             mock.patch("server.get_folder_size", return_value=123), \
+             mock.patch("server._remove_account_clone", return_value=False), \
+             mock.patch("server.invalidate_scan_cache") as invalidate:
+            server.RequestHandler._post_api_shared_app_remove_account_app(stub, {"path": "/account"})
+
+        self.assertFalse(stub.responses[-1][1]["success"])
+        invalidate.assert_not_called()
+
+
 class TypeValidationRegressionTests(unittest.TestCase):
     """One of round 1's routing-refactor benefits: individual endpoint
     methods are now directly callable. These guard the round-2 fixes for

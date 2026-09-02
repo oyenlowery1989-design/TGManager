@@ -304,8 +304,9 @@ _ws_lock     = threading.RLock()
 
 # One lock per account path, so open/backup/restore/mutations for the SAME account can't
 # interleave (double-launch against one tdata, torn backup, tdata-less restore).
-# Different accounts stay fully parallel. kill/close intentionally stays
-# lock-free so an account can always be force-closed, even mid-backup.
+# Different accounts stay fully parallel. The kill signal remains lock-free so
+# an account can always be force-closed; clone cleanup takes this lock before
+# deleting a bundle so it cannot race an open.
 _account_op_locks = {}
 _account_op_locks_guard = threading.Lock()
 

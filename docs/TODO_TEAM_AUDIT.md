@@ -33,7 +33,10 @@ No confirmed critical remote vulnerability, remote-code execution, authenticatio
   rename updates, per-service/channel proxy recovery, external account safety,
   account-name validation, and drag-refresh safety.
 - PR #11–#18 completed native WebView loading/navigation, browser fallback
-  cleanup, and multi-window metadata refresh. **105 tests pass**.
+  cleanup, and multi-window metadata refresh. Account drag ordering has since
+  been removed in favor of deterministic natural-name ordering and separate
+  global/folder pin states; physical account moves use a transactional action.
+  The current regression suite has **130 passing tests**.
 
 ## Priority 1 — Account path and operation safety
 
@@ -133,10 +136,11 @@ No confirmed critical remote vulnerability, remote-code execution, authenticatio
 
 ## Priority 4 — Frontend, fallbacks, and distribution
 
-- [x] Prevent refresh while either an account-card drag or group drag is active.
-  - Guard on both `dragSrc` and `dragGroupSrc`.
-  - Re-render safely after group drag completion.
-  - Verify visible and persisted group ordering remain identical.
+- [x] Remove account-card and group drag ordering.
+  - Accounts now use natural-name ordering within each folder.
+  - Global pin remains cross-folder; folder pin is a separate per-folder
+    priority state.
+  - Physical moves are exposed through the account action menu.
 
 - [x] Repair or remove obsolete fallback launchers.
   - Update `launcher_chrome.sh` for the token-prefixed URL.
@@ -182,3 +186,6 @@ At the time of the audit:
 - Shell scripts passed syntax checks.
 - `Info.plist` passed validation.
 - Git whitespace checks passed.
+
+Current verification (2026-09-02): 121 tests, Python compilation, and Git
+whitespace checks pass after the clone-lifecycle and drag/drop fixes.

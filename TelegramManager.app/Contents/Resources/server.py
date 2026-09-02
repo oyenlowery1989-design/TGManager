@@ -8,6 +8,7 @@ import hmac
 import json
 import os
 import plistlib
+import re
 import secrets
 import shlex
 import shutil
@@ -36,7 +37,8 @@ from state import (
     _log, _log_file, DEFAULT_CONFIG, _sq, _as_str,
     is_safe_path, is_managed_account_path,
     load_config, save_config, load_metadata, save_metadata,
-    _meta_lock, _config_lock, _ws_lock, serialize_account_op, _BUSY_MSG,
+    _meta_lock, _config_lock, _ws_lock, _account_path_lock,
+    serialize_account_op, _BUSY_MSG,
     config, metadata, load_workspaces, save_workspaces,
     get_folder_size, human_size,
     _find_cache_dirs,
@@ -394,13 +396,18 @@ def _remove_account_clone(account_path, app_path=None):
     """Remove only the disposable app clone and its manager sidecar, never tdata."""
     app_path = app_path or find_account_app(account_path)
     if app_path and os.path.isdir(app_path):
-        subprocess.run(["rm", "-rf", app_path], capture_output=True, timeout=300)
+        result = subprocess.run(["rm", "-rf", app_path], capture_output=True, timeout=300)
+        if result.returncode != 0 or os.path.lexists(app_path):
+            _log.warning("Could not remove Telegram clone %s", app_path)
+            return False
     try:
         os.remove(_clone_stamp_path(account_path))
     except FileNotFoundError:
         pass
     except OSError as e:
         _log.warning("Could not remove clone stamp for %s: %s", account_path, e)
+        return False
+    return True
 
 
 def _safe_bundle_name(name, fallback):
@@ -514,8 +521,8 @@ def _find_fallback_app_source(accs):
 
 def remove_cloned_app(account_path):
     if not get_shared_app():
-        return
-    _remove_account_clone(account_path)
+        return False
+    return _remove_account_clone(account_path)
 
 
 @serialize_account_op(lambda account_path, threshold_mb=0: account_path, (False, 0))
@@ -547,6 +554,37 @@ def clear_account_caches(account_path, threshold_mb=0):
     return True, total
 
 
+def _natural_name_key(name):
+    return [int(part) if part.isdigit() else part.casefold()
+            for part in re.split(r"(\d+)", name)]
+
+
+def _is_fresh_portable_account_path(path):
+    """Return True for a symlink-free new-login folder in a scan root."""
+    if not path:
+        return False
+    try:
+        candidate = os.path.abspath(path)
+        roots = [ROOT_DIR] + [os.path.expanduser(p) for p in config.get("extra_scan_dirs", [])
+                              if isinstance(p, str)]
+        root = next((os.path.abspath(p) for p in roots
+                     if candidate.startswith(os.path.abspath(p) + os.sep)), None)
+        if not root:
+            return False
+        current = root
+        for part in os.path.relpath(candidate, root).split(os.sep):
+            current = os.path.join(current, part)
+            if os.path.islink(current):
+                return False
+        portable = os.path.join(candidate, "TelegramForcePortable")
+        return (os.path.isdir(candidate) and os.path.isdir(portable)
+                and not os.path.islink(portable)
+                and not os.path.isdir(os.path.join(portable, "tdata"))
+                and os.path.realpath(candidate).startswith(os.path.realpath(root) + os.sep))
+    except Exception:
+        return False
+
+
 def scan_accounts():
     """Recursively find all account folders across ROOT_DIR and extra_scan_dirs."""
     accounts = []
@@ -559,12 +597,8 @@ def scan_accounts():
     # Use the shared ps cache — all accounts share one ps call per second
     _ps_out = _get_ps_output()
 
-    def _is_running(folder_path):
-        prefix = folder_path.rstrip("/") + "/"
-        return any(
-            prefix in line and ".app/Contents/MacOS/Telegram" in line
-            for line in _ps_out.split("\n")
-        )
+    def _is_running(folder_path, app_path=None):
+        return _telegram_pid_from_ps_output(folder_path, _ps_out, app_path) is not None
 
     _shared_app = get_shared_app()
 
@@ -589,7 +623,8 @@ def scan_accounts():
 
             tdata_path    = os.path.join(full_path, "TelegramForcePortable", "tdata")
             raw_tdata     = os.path.join(full_path, "tdata")
-            has_app       = find_account_app(full_path) is not None
+            app_path      = find_account_app(full_path)
+            has_app       = app_path is not None
             has_tdata     = os.path.isdir(tdata_path)
             has_raw_tdata = os.path.isdir(raw_tdata)
             has_portable  = os.path.isdir(os.path.join(full_path, "TelegramForcePortable"))
@@ -622,7 +657,7 @@ def scan_accounts():
                     "rel_path":         rel_path,
                     "group":            group,
                     "status":           status,
-                    "running":          _is_running(full_path),
+                    "running":          _is_running(full_path, app_path),
                     "has_app":          has_app,
                     "has_tdata":        has_tdata or has_raw_tdata,
                     "can_backup":       has_tdata,
@@ -634,6 +669,7 @@ def scan_accounts():
                     "color":            _meta.get("colors",       {}).get(full_path, ""),
                     "last_opened":      _meta.get("last_opened",  {}).get(full_path, ""),
                     "pinned":           full_path in _meta.get("pinned", []),
+                    "folder_pinned":    full_path in _meta.get("folder_pinned", []),
                     "proxy":            _meta.get("proxies",      {}).get(full_path),
 "uses_shared_app":  not has_app and bool(_shared_app),
                     "dock_name":        _meta.get("dock_names",    {}).get(full_path, ""),
@@ -654,7 +690,7 @@ def scan_accounts():
             folder_name = os.path.basename(extra.rstrip("/"))
             scan_dir(extra, depth=0, group_parts=[f"📂 {folder_name}"])
 
-    accounts.sort(key=lambda a: (0 if a["pinned"] else 1, a["group"], a["order"], a["name"]))
+    accounts.sort(key=lambda a: (0 if a["pinned"] else 1, a["group"], a["order"], _natural_name_key(a["name"])))
     return accounts
 
 # Per-account tdata size cache. get_folder_size() is a full tree walk; the
@@ -795,6 +831,34 @@ def _watcher_exempt(path, seconds=60):
     with _watcher_grace_lock:
         _watcher_grace[path] = time.time() + seconds
 
+
+def _clear_watcher_exempt(path):
+    with _watcher_grace_lock:
+        _watcher_grace.pop(path, None)
+
+
+def _remove_clone_if_idle(path):
+    """Atomically recheck open state and remove only an idle account clone."""
+    lock = _account_path_lock(path)
+    if not lock.acquire(blocking=False):
+        return False
+    try:
+        with _watcher_grace_lock:
+            if _watcher_grace.get(path, 0) > time.time():
+                return False
+        ps_output = _get_ps_output(force=True, allow_stale=False)
+        if ps_output is None or _telegram_pid_from_ps_output(path, ps_output):
+            return False
+        if not get_shared_app():
+            return False
+        app = find_account_app(path)
+        if app:
+            return _remove_account_clone(path, app)
+        return False
+    finally:
+        lock.release()
+
+
 def _app_watcher_loop():
     """Remove cloned Telegram.app bundles when the user quits Telegram outside the manager.
 
@@ -817,9 +881,12 @@ def _app_watcher_loop():
                     del _watcher_grace[p]
             threshold_mb = config.get("auto_clear_cache_mb", 0)
 
-            # If we can't read the process list, treat every account as "unknown"
-            # and skip the entire deletion pass this cycle to avoid false removals.
-            ps_known = bool(_get_ps_output())
+            # Cleanup must never rely on a stale snapshot: it can be older than
+            # a just-started Telegram process and delete its running bundle.
+            ps_output = _get_ps_output(force=True, allow_stale=False)
+            if ps_output is None:
+                time.sleep(5)
+                continue
 
             live_paths = set()
             for acc in scan_accounts_cached():
@@ -836,7 +903,7 @@ def _app_watcher_loop():
                     continue
 
                 # Re-check the live process state immediately before deleting.
-                if not ps_known or is_running(p):
+                if _telegram_pid_from_ps_output(p, ps_output):
                     any_running = True
                     idle_counts[p] = 0
                     continue
@@ -846,22 +913,9 @@ def _app_watcher_loop():
                 if idle_counts[p] < _IDLE_CYCLES_REQUIRED:
                     continue
 
-                # Final freshness re-check under the lock + live process check
-                # right before removal, in case state changed mid-loop.
-                with _watcher_grace_lock:
-                    exempt = _watcher_grace.get(p, 0) > time.time()
-                if exempt or is_running(p):
-                    any_running = True
-                    idle_counts[p] = 0
-                    continue
-
-                # Remove cloned app bundle (only if shared master exists)
-                if get_shared_app():
-                    app = find_account_app(p)
-                    if app:
-                        _log.info("Watcher: removing idle cloned app for %s", acc["name"])
-                        _remove_account_clone(p, app)
-                        invalidate_scan_cache()
+                if _remove_clone_if_idle(p):
+                    _log.info("Watcher: removing idle cloned app for %s", acc["name"])
+                    invalidate_scan_cache()
                 # Auto-clear caches (media + WebView) if total is over threshold
                 if threshold_mb > 0:
                     clear_account_caches(p, threshold_mb)
@@ -876,7 +930,7 @@ def _app_watcher_loop():
         # Poll frequently while accounts are open; back off when everything is idle
         time.sleep(5 if any_running else 30)
 
-def _get_ps_output() -> str:
+def _get_ps_output(force=False, allow_stale=True):
     """Return cached `ps` output, refreshing at most once per second.
 
     scan_accounts(), find_telegram_pid(), and is_running() all need the process
@@ -884,35 +938,52 @@ def _get_ps_output() -> str:
     share a single call for any burst of activity within 1 s.
     """
     with _ps_cache_lock:
-        if time.time() - _ps_cache["ts"] < _PS_TTL:
+        if not force and time.time() - _ps_cache["ts"] < _PS_TTL:
             return _ps_cache["output"]
     try:
         output = subprocess.run(
             ["ps", "-e", "-o", "pid=,args="], capture_output=True, text=True, timeout=15
         ).stdout
     except Exception as e:
-        # On failure, keep serving the last good output rather than caching "".
         # Do NOT advance the timestamp so the next call retries immediately.
         _log.warning("_get_ps_output: ps failed (%s); returning last cached output", e)
         with _ps_cache_lock:
-            return _ps_cache["output"]
+            return _ps_cache["output"] if allow_stale else None
     if not output:
         # Empty output is treated as "unknown" — don't advance ts so we retry,
         # and fall back to the last good cached output if we have one.
         with _ps_cache_lock:
-            return _ps_cache["output"]
+            return _ps_cache["output"] if allow_stale else None
     with _ps_cache_lock:
         _ps_cache["output"] = output
         _ps_cache["ts"]     = time.time()
     return output
 
+def _telegram_pid_from_ps_output(account_path, ps_output, app_path=None):
+    """Return a Telegram PID only when argv starts with this account's binary."""
+    app_path = app_path or find_account_app(account_path)
+    if not app_path or not ps_output:
+        return None
+    executable = os.path.join(app_path, "Contents", "MacOS", "Telegram")
+    for line in ps_output.splitlines():
+        try:
+            pid_text, args = line.strip().split(None, 1)
+            if args == executable or args.startswith(executable + " "):
+                return int(pid_text)
+        except (ValueError, IndexError):
+            continue
+    return None
+
+
+def find_telegram_pid(account_path, fresh=False):
+    """Return the PID for this account's exact Telegram executable, if running."""
+    return _telegram_pid_from_ps_output(
+        account_path, _get_ps_output(force=fresh, allow_stale=not fresh))
+
+
 def is_running(folder_path):
     """Single-account running check (used outside scan_accounts)."""
-    prefix = folder_path.rstrip("/") + "/"
-    return any(
-        prefix in line and ".app/Contents/MacOS/Telegram" in line
-        for line in _get_ps_output().split("\n")
-    )
+    return find_telegram_pid(folder_path) is not None
 
 # Short-lived scan cache: /api/stats and /api/alerts called in the same browser
 # refresh as /api/accounts — reuse the result if it's < 4 seconds old.
@@ -952,9 +1023,12 @@ def invalidate_scan_cache():
 def open_account(path):
     """Open the Telegram account at path. Returns (ok, message)."""
     _log.info("Opening account: %s", path)
-    if is_running(path):
+    if find_telegram_pid(path, fresh=True):
         _log.info("open_account: already running for %s", path)
         return True, "already running"
+    # Cover cloning and `open -n`, not merely the period after launch returns:
+    # the watcher otherwise can remove a new clone before its process appears.
+    _watcher_exempt(path)
     app = find_account_app(path)
     # A leftover clone must come from this exact shared master.  Version text
     # alone is not enough: a failed updater can leave a modified bundle with
@@ -964,7 +1038,10 @@ def open_account(path):
         master_fingerprint = _bundle_fingerprint(shared)
         if master_fingerprint and _read_clone_stamp(path) != master_fingerprint:
             _log.info("open_account: replacing clone that does not match shared master for %s", path)
-            _remove_account_clone(path, app)
+            if not _remove_account_clone(path, app):
+                msg = "Could not remove outdated Telegram clone"
+                _log.warning("open_account: %s (%s)", msg, path)
+                return False, msg
             app = None
     if not app:
         with _meta_lock:
@@ -999,10 +1076,17 @@ def open_account(path):
     except Exception as e:
         _log.error("open_account: exception launching %s: %s", path, e)
         return False, f"Failed to launch Telegram: {e}"
-    # Arm the watcher grace period AFTER launch begins so the watcher doesn't
-    # remove the cloned app before the Telegram process appears in the ps list.
-    _watcher_exempt(path)
-
+    # `open -n` returns before Telegram enters the process table. Waiting here
+    # makes Open/Close linear: a Close received after Open succeeds has a PID
+    # to terminate instead of silently missing a still-starting app.
+    for _ in range(20):
+        if find_telegram_pid(path, fresh=True):
+            break
+        time.sleep(0.5)
+    else:
+        msg = "Telegram did not start within 10 seconds"
+        _log.error("open_account: %s (%s)", msg, path)
+        return False, msg
     with _meta_lock:
         metadata.setdefault("last_opened", {})[path] = datetime.now().isoformat()
         save_metadata(metadata)
@@ -1058,7 +1142,7 @@ def _validate_import_payload(data):
 
     allowed_metadata = {
         "notes": {}, "usernames": {}, "order": {}, "colors": {},
-        "last_opened": {}, "pinned": [], "proxies": {}, "dock_names": {},
+        "last_opened": {}, "pinned": [], "folder_pinned": [], "proxies": {}, "dock_names": {},
         "avatars": {}, "account_ids": {}
     }
     cleaned_metadata = {}
@@ -1218,56 +1302,52 @@ def _restore_files(snapshots):
 
 # ── Per-process Telegram control ───────────────────────────────────────────
 
-def find_telegram_pid(account_path):
-    """Return the PID of the Telegram process that launched from this account folder."""
-    prefix = account_path.rstrip("/") + "/"
-    for line in _get_ps_output().split("\n"):
-        if prefix in line and ".app/Contents/MacOS/Telegram" in line:
-            try:
-                return int(line.strip().split()[0])
-            except (ValueError, IndexError):
-                pass
-    return None
-
-def _pid_alive(pid):
-    """True if the process still exists (signal 0 probe)."""
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
+def _pid_matches_account(pid, account_path):
+    """Return True/False, or None when a fresh process check is unavailable."""
+    output = _get_ps_output(force=True, allow_stale=False)
+    if output is None:
+        return None
+    return _telegram_pid_from_ps_output(account_path, output) == pid
 
 
 def kill_account(account_path):
     """Kill only the Telegram process for this account."""
-    pid = find_telegram_pid(account_path)
-    if pid:
-        _log.info("Killing Telegram PID %d for account %s", pid, account_path)
-        subprocess.run(["kill", str(pid)], capture_output=True, timeout=10)
-        def _cleanup(p, pid):
-            # Wait for Telegram to actually exit (it may still be flushing
-            # tdata) before touching the cloned app; escalate to SIGKILL if
-            # it ignores SIGTERM.
-            deadline = time.time() + 8
-            while _pid_alive(pid) and time.time() < deadline:
-                time.sleep(0.5)
-            if _pid_alive(pid):
-                _log.warning("kill_account: PID %d ignored SIGTERM — sending SIGKILL", pid)
+    _clear_watcher_exempt(account_path)
+    pid = find_telegram_pid(account_path, fresh=True)
+    if not pid or _pid_matches_account(pid, account_path) is not True:
+        return False
+    _log.info("Killing Telegram PID %d for account %s", pid, account_path)
+    subprocess.run(["kill", str(pid)], capture_output=True, timeout=10)
+
+    def _cleanup(p, pid):
+        # Verify the executable identity before every signal: a recycled PID
+        # must never receive SIGKILL meant for Telegram.
+        deadline = time.time() + 8
+        state = _pid_matches_account(pid, p)
+        while state is True and time.time() < deadline:
+            time.sleep(0.5)
+            state = _pid_matches_account(pid, p)
+        if state is True:
+            _log.warning("kill_account: PID %d ignored SIGTERM — sending SIGKILL", pid)
+            if _pid_matches_account(pid, p) is True:
                 subprocess.run(["kill", "-9", str(pid)], capture_output=True, timeout=10)
-                deadline = time.time() + 4
-                while _pid_alive(pid) and time.time() < deadline:
-                    time.sleep(0.5)
-            if is_running(p):
-                # Account was reopened while we waited — leave the clone alone
-                return
-            remove_cloned_app(p)
-            invalidate_tdata_size(p)   # tdata settled (and cache may auto-clear on close)
-            invalidate_scan_cache()
-        threading.Thread(target=_cleanup, args=(account_path, pid), daemon=True).start()
-        return True
-    return False
+            deadline = time.time() + 4
+            state = _pid_matches_account(pid, p)
+            while state is True and time.time() < deadline:
+                time.sleep(0.5)
+                state = _pid_matches_account(pid, p)
+        # Do not delete the clone if the process list is unavailable, Telegram
+        # is still alive, or this account was reopened under another PID.
+        with _watcher_grace_lock:
+            reopened = _watcher_grace.get(p, 0) > time.time()
+        if reopened or state is None or state is True or find_telegram_pid(p, fresh=True):
+            return
+        _remove_clone_if_idle(p)
+        invalidate_tdata_size(p)   # tdata settled (and cache may auto-clear on close)
+        invalidate_scan_cache()
+
+    threading.Thread(target=_cleanup, args=(account_path, pid), daemon=True).start()
+    return True
 
 
 
@@ -1325,6 +1405,70 @@ def fix_all_dock_names():
     return results
 
 
+def _relocate_account(old_path, new_path):
+    """Move an account folder and update all metadata keys transactionally."""
+    if os.path.exists(new_path):
+        return False, f'A folder named "{os.path.basename(new_path)}" already exists'
+
+    # Phase 1: build updated metadata without touching the global dict yet
+    with _meta_lock:
+        new_meta = copy.deepcopy(metadata)
+    for section in ("notes", "usernames", "order", "colors",
+                    "last_opened", "proxies", "dock_names", "avatars", "account_ids"):
+        d = new_meta.get(section, {})
+        if old_path in d:
+            d[new_path] = d.pop(old_path)
+    pinned = new_meta.get("pinned", [])
+    if old_path in pinned:
+        pinned[pinned.index(old_path)] = new_path
+    folder_pinned = new_meta.get("folder_pinned", [])
+    if old_path in folder_pinned:
+        folder_pinned[folder_pinned.index(old_path)] = new_path
+    with _ws_lock:
+        old_workspaces = load_workspaces()
+    new_workspaces = copy.deepcopy(old_workspaces)
+    for workspace in new_workspaces.values():
+        accounts = workspace.get("accounts", [])
+        workspace["accounts"] = [new_path if path == old_path else path for path in accounts]
+
+    # Phase 2: rename folder on disk
+    try:
+        os.rename(old_path, new_path)
+    except Exception as e:
+        _log.warning("account relocation failed: %s", e)
+        return False, str(e)
+
+    # Phase 3: persist metadata and workspace references (atomic .tmp → replace)
+    try:
+        save_metadata(new_meta)
+        save_workspaces(new_workspaces)
+    except Exception as e:
+        # Undo the folder rename so disk and metadata stay consistent
+        try:
+            os.rename(new_path, old_path)
+            _log.warning("account relocation: metadata save failed (%s); folder move undone", e)
+        except Exception as undo_e:
+            _log.error(
+                "account relocation: CRITICAL — folder is at %s but metadata save failed (%s) "
+                "and undo also failed (%s). Manual fix required.", new_path, e, undo_e
+            )
+        try:
+            save_metadata(metadata)
+            save_workspaces(old_workspaces)
+        except Exception as rollback_error:
+            _log.error("account relocation: state rollback failed: %s", rollback_error)
+        return False, f"Could not save metadata: {e}"
+
+    # Commit: update in-memory global only after both disk operations succeeded
+    with _meta_lock:
+        metadata.clear()
+        metadata.update(new_meta)
+
+    set_telegram_display_name(new_path, os.path.basename(new_path))
+    invalidate_scan_cache()
+    return True, new_path
+
+
 @serialize_account_op(lambda old_path, new_name: old_path, (False, _BUSY_MSG))
 def rename_account(old_path, new_name):
     """Rename an account folder and update all metadata keys.
@@ -1348,66 +1492,26 @@ def rename_account(old_path, new_name):
         return False, "Close Telegram first"
     parent   = os.path.dirname(old_path)
     new_path = os.path.join(parent, new_name)
-    if os.path.exists(new_path):
-        _log.warning("rename_account: target already exists: %s", new_path)
-        return False, f'A folder named "{new_name}" already exists'
+    ok, result = _relocate_account(old_path, new_path)
+    if ok:
+        _log.info("Account renamed to %s", new_path)
+    return ok, result
 
-    # Phase 1: build updated metadata without touching the global dict yet
-    with _meta_lock:
-        new_meta = copy.deepcopy(metadata)
-    for section in ("notes", "usernames", "order", "colors",
-                    "last_opened", "proxies", "dock_names", "avatars", "account_ids"):
-        d = new_meta.get(section, {})
-        if old_path in d:
-            d[new_path] = d.pop(old_path)
-    pinned = new_meta.get("pinned", [])
-    if old_path in pinned:
-        pinned[pinned.index(old_path)] = new_path
-    with _ws_lock:
-        old_workspaces = load_workspaces()
-    new_workspaces = copy.deepcopy(old_workspaces)
-    for workspace in new_workspaces.values():
-        accounts = workspace.get("accounts", [])
-        workspace["accounts"] = [new_path if path == old_path else path for path in accounts]
 
-    # Phase 2: rename folder on disk
-    try:
-        os.rename(old_path, new_path)
-    except Exception as e:
-        _log.warning("rename_account: os.rename failed: %s", e)
-        return False, str(e)
-
-    # Phase 3: persist metadata and workspace references (atomic .tmp → replace)
-    try:
-        save_metadata(new_meta)
-        save_workspaces(new_workspaces)
-    except Exception as e:
-        # Undo the folder rename so disk and metadata stay consistent
-        try:
-            os.rename(new_path, old_path)
-            _log.warning("rename_account: metadata save failed (%s); folder rename undone", e)
-        except Exception as undo_e:
-            _log.error(
-                "rename_account: CRITICAL — folder is at %s but metadata save failed (%s) "
-                "and undo also failed (%s). Manual fix required.", new_path, e, undo_e
-            )
-        try:
-            save_metadata(metadata)
-            save_workspaces(old_workspaces)
-        except Exception as rollback_error:
-            _log.error("rename_account: state rollback failed: %s", rollback_error)
-        return False, f"Could not save metadata: {e}"
-
-    # Commit: update in-memory global only after both disk operations succeeded
-    with _meta_lock:
-        metadata.clear()
-        metadata.update(new_meta)
-
-    # Update the Dock name to match the new folder name
-    set_telegram_display_name(new_path, new_name)
-
-    _log.info("Account renamed to %s", new_path)
-    return True, new_path
+@serialize_account_op(lambda old_path, parent_path: old_path, (False, _BUSY_MSG))
+def move_account(old_path, parent_path):
+    """Move a closed account to one of the existing account folders."""
+    if not is_managed_account_path(old_path):
+        return False, "Path is not a valid account folder"
+    if is_running(old_path):
+        return False, "Close Telegram first"
+    valid_parents = {group["path"] for group in list_groups()}
+    if parent_path not in valid_parents or not os.path.isdir(parent_path):
+        return False, "Choose an existing Telegram folder"
+    new_path = os.path.join(parent_path, os.path.basename(old_path))
+    if os.path.realpath(new_path) == os.path.realpath(old_path):
+        return False, "Account is already in that folder"
+    return _relocate_account(old_path, new_path)
 
 def list_groups():
     """
@@ -1518,6 +1622,30 @@ def create_account(name, parent_path, open_after=True):
     return True, folder_path
 
 
+def duplicate_account(source_path, name):
+    """Create a fresh portable-login folder beside an existing account."""
+    valid, name = validate_account_name(name)
+    if not valid:
+        return False, name
+    if not is_managed_account_path(source_path):
+        return False, "Path is not a valid account folder"
+    if is_running(source_path):
+        return False, "Close Telegram first"
+
+    target_path = os.path.join(os.path.dirname(source_path), name)
+    if os.path.exists(target_path):
+        return False, f'A folder named "{name}" already exists in that location'
+    try:
+        # A duplicate is intentionally a new Telegram device: do not copy
+        # tdata, account metadata, or a temporary Telegram.app clone.
+        os.makedirs(os.path.join(target_path, "TelegramForcePortable"))
+    except Exception as e:
+        return False, f"Could not create folder: {e}"
+    invalidate_scan_cache()
+    _log.info("Created fresh portable-login folder %s from %s", target_path, source_path)
+    return True, target_path
+
+
 def close_all():
     running = [acc for acc in scan_accounts() if acc["running"]]
     for acc in running:
@@ -1529,10 +1657,7 @@ def close_all():
             p = acc["path"]
             # Same grace the watcher honours — an account reopened during the
             # 14s wait must not have its bundle deleted out from under it.
-            with _watcher_grace_lock:
-                exempt = _watcher_grace.get(p, 0) > time.time()
-            if not exempt and not is_running(p):
-                remove_cloned_app(p)
+            _remove_clone_if_idle(p)
         invalidate_scan_cache()
     threading.Thread(target=_cleanup_all, daemon=True).start()
 
@@ -1614,6 +1739,9 @@ def delete_account(account_path):
             pinned = metadata.get("pinned", [])
             if account_path in pinned:
                 pinned.remove(account_path)
+            folder_pinned = metadata.get("folder_pinned", [])
+            if account_path in folder_pinned:
+                folder_pinned.remove(account_path)
             save_metadata(metadata)
         msg = "Moved to Trash"
         if backup_path:
@@ -1766,8 +1894,8 @@ def update_all_apps(app_source=""):
             if find_telegram_pid(acc["path"]):
                 running_skipped += 1
                 continue
-            _remove_account_clone(acc["path"], app)
-            removed += 1
+            if _remove_account_clone(acc["path"], app):
+                removed += 1
     archived, skipped = _archive_stale_updates(accounts, result)
     invalidate_scan_cache()
     message = f"Shared Telegram.app {result} verified; {removed} local clone(s) will be recreated on next open"
@@ -2320,7 +2448,7 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def _post_api_open(self, data):
         acc_path = data.get("path", "")
-        if not is_safe_path(acc_path):
+        if not (is_managed_account_path(acc_path) or _is_fresh_portable_account_path(acc_path)):
             self.send_json({"success": False, "message": "Invalid path"})
             return
         ok, msg = open_account(acc_path)
@@ -2355,14 +2483,12 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def _post_api_close_account(self, data):
         acc_path = data.get("path", "")
-        if not is_safe_path(acc_path):
+        if not is_managed_account_path(acc_path):
             self.send_json({"success": False, "message": "Invalid path"})
             return
         ok = kill_account(acc_path)
-        if ok:
-            self.send_json({"success": True})
-        else:
-            self.send_json({"success": False, "message": "Account is not running"})
+        invalidate_scan_cache()
+        self.send_json({"success": True, "already_stopped": not ok})
 
     def _post_api_clear_cache(self, data):
         acc_path = data.get("path", "")
@@ -2528,6 +2654,18 @@ class RequestHandler(BaseHTTPRequestHandler):
             else:
                 self.send_json({"success": False, "message": result})
 
+    def _post_api_move_account(self, data):
+        old_path = data.get("path", "")
+        parent_path = data.get("parent_path", "")
+        if not is_managed_account_path(old_path) or not isinstance(parent_path, str):
+            self.send_json({"success": False, "message": "Invalid path"})
+            return
+        ok, result = move_account(old_path, parent_path)
+        if ok:
+            self.send_json({"success": True, "new_path": result})
+        else:
+            self.send_json({"success": False, "message": result})
+
     def _post_api_pin(self, data):
         acc_path = data.get("path", "")
         if not is_safe_path(acc_path):
@@ -2542,6 +2680,21 @@ class RequestHandler(BaseHTTPRequestHandler):
                 is_pinned = True
             save_metadata(metadata)
         self.send_json({"success": True, "pinned": is_pinned})
+
+    def _post_api_folder_pin(self, data):
+        acc_path = data.get("path", "")
+        if not is_safe_path(acc_path):
+            self.send_json({"success": False, "message": "Invalid path"}); return
+        with _meta_lock:
+            pinned_list = metadata.setdefault("folder_pinned", [])
+            if acc_path in pinned_list:
+                pinned_list.remove(acc_path)
+                is_pinned = False
+            else:
+                pinned_list.append(acc_path)
+                is_pinned = True
+            save_metadata(metadata)
+        self.send_json({"success": True, "folder_pinned": is_pinned})
 
     def _post_api_proxy(self, data):
         acc_path = data.get("path", "")
@@ -2732,6 +2885,16 @@ class RequestHandler(BaseHTTPRequestHandler):
         if parent_path and not is_safe_path(parent_path):
             self.send_json({"success": False, "message": "Invalid path"}); return
         ok, result  = create_account(name, parent_path, open_after)
+        if ok:
+            self.send_json({"success": True, "path": result})
+        else:
+            self.send_json({"success": False, "message": result})
+
+    def _post_api_duplicate_account(self, data):
+        source_path = data.get("path", "")
+        name = data.get("name", "")
+        name = name.strip() if isinstance(name, str) else ""
+        ok, result = duplicate_account(source_path, name)
         if ok:
             self.send_json({"success": True, "path": result})
         else:
@@ -2947,7 +3110,7 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def _post_api_shared_app_remove_account_app(self, data):
         acc_path = data.get("path", "")
-        if not acc_path or not is_safe_path(acc_path):
+        if not is_managed_account_path(acc_path):
             self.send_json({"success": False, "message": "Invalid path"})
             return
         if not get_shared_app():
@@ -2962,7 +3125,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.send_json({"success": False, "message": "Telegram is running for this account — quit it first"})
             return
         sz = get_folder_size(app_path)
-        subprocess.run(["rm", "-rf", app_path], capture_output=True, timeout=300)
+        if not _remove_account_clone(acc_path, app_path):
+            self.send_json({"success": False, "message": "Could not remove the Telegram app bundle"})
+            return
         invalidate_scan_cache()
         self.send_json({"success": True, "freed": sz, "freed_human": human_size(sz)})
 
@@ -2983,9 +3148,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                     _log.warning("remove-all-account-apps: %s is running — skipping", acc["path"])
                     skipped += 1
                     continue
-                freed += get_folder_size(app_path)
-                subprocess.run(["rm", "-rf", app_path], capture_output=True, timeout=300)
-                removed += 1
+                size = get_folder_size(app_path)
+                if _remove_account_clone(acc["path"], app_path):
+                    freed += size
+                    removed += 1
         invalidate_scan_cache()
         self.send_json({"success": True, "removed": removed, "skipped": skipped,
                         "freed": freed, "freed_human": human_size(freed)})
@@ -3083,7 +3249,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         '/api/color': '_post_api_color',
         '/api/username': '_post_api_username',
         '/api/rename': '_post_api_rename',
+        '/api/move-account': '_post_api_move_account',
         '/api/pin': '_post_api_pin',
+        '/api/folder-pin': '_post_api_folder_pin',
         '/api/proxy': '_post_api_proxy',
         '/api/dock-name': '_post_api_dock_name',
         '/api/set-avatar': '_post_api_set_avatar',
@@ -3096,6 +3264,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         '/api/reveal': '_post_api_reveal',
         '/api/delete': '_post_api_delete',
         '/api/create-account': '_post_api_create_account',
+        '/api/duplicate-account': '_post_api_duplicate_account',
         '/api/diagnose': '_post_api_diagnose',
         '/api/repair': '_post_api_repair',
         '/api/unlock': '_post_api_unlock',

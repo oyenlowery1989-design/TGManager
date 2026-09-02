@@ -3,6 +3,7 @@ import hashlib
 import importlib
 import json
 import os
+import subprocess
 import sys
 import time
 import unittest
@@ -68,15 +69,47 @@ class MetadataRefreshTests(unittest.TestCase):
         merge = source[start:end]
         self.assertIn("document.activeElement", merge)
         self.assertIn("pendingNoteEdits[fa.path]", merge)
-        self.assertIn("pendingUsernameEdits[fa.path]", merge)
-        self.assertNotIn("fa.note = old.note; fa.username = old.username", merge)
+        self.assertNotIn("pendingUsernameEdits", merge)
+        self.assertNotIn("fa.note = old.note", merge)
 
     def test_pending_edits_clear_only_after_the_matching_save_finishes(self):
         source = (RESOURCES_DIR / "index.html").read_text()
         self.assertIn("pendingNoteEdits[acc.path] = ta.value", source)
         self.assertIn("if (pendingNoteEdits[path] === note) delete pendingNoteEdits[path]", source)
-        self.assertIn("pendingUsernameEdits[path] = username", source)
-        self.assertIn("if (pendingUsernameEdits[path] === username) delete pendingUsernameEdits[path]", source)
+        self.assertNotIn("pendingUsernameEdits", source)
+
+
+class FrontendDragTests(unittest.TestCase):
+    def test_account_ordering_has_no_native_reorder_drag_handlers(self):
+        source = (RESOURCES_DIR / "index.html").read_text()
+        self.assertNotIn('draggable="true"', source)
+        self.assertNotIn('ondragstart="onDragStart(event)"', source)
+        self.assertNotIn('ondragstart="onGroupDragStart(event)"', source)
+
+    def test_card_drag_is_not_cancelled_by_the_group_drag_handler(self):
+        """A card drag bubbles to its group; the group must leave it alone."""
+        script = r'''
+const fs = require("fs");
+const source = fs.readFileSync(process.argv[1], "utf8");
+const start = source.indexOf("function onGroupDragStart(e)");
+const end = source.indexOf("\nfunction onGroupDragEnd", start);
+let dragGroupSrc = null;
+eval(source.slice(start, end));
+let prevented = 0;
+onGroupDragStart({
+  target: {
+    classList: { contains: () => false },
+    closest: selector => selector === ".card" ? {} : null,
+  },
+  preventDefault: () => { prevented += 1; },
+  currentTarget: { classList: { add: () => {} } },
+  dataTransfer: { setData: () => {} },
+});
+if (prevented || dragGroupSrc !== null) process.exit(1);
+'''
+        result = subprocess.run(["node", "-e", script, str(RESOURCES_DIR / "index.html")],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 class BrowserFallbackLauncherTests(unittest.TestCase):
@@ -159,14 +192,17 @@ class ManagedAccountPathTests(unittest.TestCase):
         import tempfile
         self.tmp = tempfile.mkdtemp(prefix="tm_account_path_")
         self.original_root = state.ROOT_DIR
+        self.original_server_root = server.ROOT_DIR
         self.original_metadata_file = state.METADATA_FILE
         self.original_metadata = copy.deepcopy(state.metadata)
         state.ROOT_DIR = self.tmp
+        server.ROOT_DIR = self.tmp
         state.METADATA_FILE = os.path.join(self.tmp, "manager_data.json")
 
     def tearDown(self):
         import shutil
         state.ROOT_DIR = self.original_root
+        server.ROOT_DIR = self.original_server_root
         state.METADATA_FILE = self.original_metadata_file
         state.metadata.clear()
         state.metadata.update(self.original_metadata)
@@ -247,6 +283,32 @@ class ManagedAccountPathTests(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertEqual(saved[-1]["Ops"]["accounts"], [new_path])
+
+    def test_move_relocates_account_and_rewrites_saved_paths(self):
+        old_path = self._account("move-me")
+        destination = os.path.join(self.tmp, "Archived")
+        self._account(os.path.join("Archived", "existing-account"))
+        server.invalidate_scan_cache()
+        state.metadata["notes"] = {old_path: "keep this"}
+        state.metadata["folder_pinned"] = [old_path]
+        workspaces = {"Ops": {"accounts": [old_path], "icon": "📁", "created": ""}}
+        saved = []
+
+        with mock.patch("server.load_workspaces", return_value=copy.deepcopy(workspaces)), \
+             mock.patch("server.save_workspaces", side_effect=lambda ws: saved.append(copy.deepcopy(ws))), \
+             mock.patch("server.set_telegram_display_name"), \
+             mock.patch("server.invalidate_scan_cache") as invalidate:
+            ok, new_path = server.move_account(old_path, destination)
+
+        expected = os.path.join(destination, "move-me")
+        self.assertTrue(ok)
+        self.assertEqual(new_path, expected)
+        self.assertFalse(os.path.exists(old_path))
+        self.assertTrue(state.is_managed_account_path(expected))
+        self.assertEqual(state.metadata["notes"], {expected: "keep this"})
+        self.assertEqual(state.metadata["folder_pinned"], [expected])
+        self.assertEqual(saved[-1]["Ops"]["accounts"], [expected])
+        invalidate.assert_called_once()
 
     def test_delete_removes_account_id(self):
         account = self._account("delete-me")
@@ -661,6 +723,7 @@ class TelegramUpdateLifecycleTests(unittest.TestCase):
 
         with mock.patch("server.get_shared_app", return_value=master), \
              mock.patch("server.is_running", return_value=False), \
+             mock.patch("server.find_telegram_pid", side_effect=(None, 1)), \
              mock.patch("server.subprocess.run", side_effect=run), \
              mock.patch("server.save_metadata"), \
              mock.patch("server._watcher_exempt"), \
@@ -672,6 +735,196 @@ class TelegramUpdateLifecycleTests(unittest.TestCase):
             self.assertEqual(f.read(), b"keep this session")
         self.assertEqual(server._bundle_version(server.find_account_app(account)), "7.2.0")
         self.assertEqual(server._read_clone_stamp(account), server._bundle_fingerprint(master))
+
+    def test_open_refuses_to_launch_a_stale_clone_that_cannot_be_removed(self):
+        with mock.patch("server.find_telegram_pid", return_value=None), \
+             mock.patch("server.find_account_app", return_value="/account/Telegram.app"), \
+             mock.patch("server.get_shared_app", return_value="/master/Telegram.app"), \
+             mock.patch("server._bundle_fingerprint", return_value="master"), \
+             mock.patch("server._read_clone_stamp", return_value="stale"), \
+             mock.patch("server._remove_account_clone", return_value=False), \
+             mock.patch("server.clone_app_to_folder") as clone, \
+             mock.patch("server.subprocess.run") as run:
+            ok, message = server.open_account("/account")
+
+        self.assertFalse(ok)
+        self.assertIn("remove outdated", message)
+        clone.assert_not_called()
+        run.assert_not_called()
+
+    def test_open_arms_watcher_before_launching_the_bundle(self):
+        events = []
+
+        def run(command, *args, **kwargs):
+            if command[0] == "open":
+                events.append("open")
+            return mock.Mock(returncode=0, stderr=b"")
+
+        with mock.patch("server.is_running", return_value=False), \
+             mock.patch("server.find_account_app", return_value="/account/Telegram.app"), \
+             mock.patch("server.get_shared_app", return_value=None), \
+             mock.patch("server.subprocess.run", side_effect=run), \
+             mock.patch("server.find_telegram_pid", side_effect=(None, 1)), \
+             mock.patch("server._watcher_exempt", side_effect=lambda _: events.append("grace")), \
+             mock.patch("server.save_metadata"), \
+             mock.patch("server.invalidate_tdata_size"):
+            ok, _ = server.open_account("/account")
+
+        self.assertTrue(ok)
+        self.assertLess(events.index("grace"), events.index("open"))
+
+    def test_process_lookup_requires_the_exact_account_executable(self):
+        account = os.path.join(self.tmp, "account")
+        app = self._make_bundle(account)
+        executable = os.path.join(app, "Contents", "MacOS", "Telegram")
+        helper = f"912 /bin/zsh -c 'echo {executable}'"
+        telegram = f"913 {executable} -workdir {account}/TelegramForcePortable"
+
+        with mock.patch("server._get_ps_output", return_value=helper + "\n" + telegram):
+            self.assertEqual(server.find_telegram_pid(account), 913)
+
+    def test_open_waits_for_the_account_process_before_reporting_success(self):
+        pids = iter((None, 321))
+        with mock.patch("server.is_running", return_value=False), \
+             mock.patch("server.find_account_app", return_value="/account/Telegram.app"), \
+             mock.patch("server.get_shared_app", return_value=None), \
+             mock.patch("server.subprocess.run", return_value=mock.Mock(returncode=0, stderr=b"")), \
+             mock.patch("server.find_telegram_pid", side_effect=lambda *args, **kwargs: next(pids)) as find_pid, \
+             mock.patch("server.time.sleep"), \
+             mock.patch("server.save_metadata"), \
+             mock.patch("server.invalidate_tdata_size"):
+            ok, _ = server.open_account("/account")
+
+        self.assertTrue(ok)
+        self.assertTrue(any(call.kwargs.get("fresh") for call in find_pid.call_args_list))
+
+    def test_open_does_not_report_success_when_telegram_never_starts(self):
+        with mock.patch("server.find_account_app", return_value="/account/Telegram.app"), \
+             mock.patch("server.get_shared_app", return_value=None), \
+             mock.patch("server.find_telegram_pid", return_value=None), \
+             mock.patch("server.subprocess.run", return_value=mock.Mock(returncode=0, stderr=b"")), \
+             mock.patch("server.time.sleep"), \
+             mock.patch("server.save_metadata") as save_metadata, \
+             mock.patch("server.invalidate_tdata_size"):
+            ok, message = server.open_account("/account")
+
+        self.assertFalse(ok)
+        self.assertIn("did not start", message)
+        save_metadata.assert_not_called()
+
+    def test_close_never_escalates_after_the_pid_loses_account_identity(self):
+        commands = []
+
+        class InlineThread:
+            def __init__(self, target, args, daemon):
+                self.target, self.args = target, args
+
+            def start(self):
+                self.target(*self.args)
+
+        def run(command, *args, **kwargs):
+            commands.append(command)
+            return mock.Mock(returncode=0, stderr=b"")
+
+        with mock.patch("server.find_telegram_pid", return_value=77), \
+             mock.patch("server._pid_matches_account", side_effect=(True, False)), \
+             mock.patch("server.subprocess.run", side_effect=run), \
+             mock.patch("server.threading.Thread", InlineThread):
+            self.assertTrue(server.kill_account("/account"))
+
+        self.assertEqual(commands, [["kill", "77"]])
+
+    def test_close_cleanup_preserves_a_clone_reopened_during_shutdown(self):
+        account = "/account"
+
+        class InlineThread:
+            def __init__(self, target, args, daemon):
+                self.target, self.args = target, args
+
+            def start(self):
+                self.target(*self.args)
+
+        def run(command, *args, **kwargs):
+            server._watcher_exempt(account)
+            return mock.Mock(returncode=0, stderr=b"")
+
+        with mock.patch("server.find_telegram_pid", side_effect=(77, None)), \
+             mock.patch("server._pid_matches_account", side_effect=(True, False)), \
+             mock.patch("server.subprocess.run", side_effect=run), \
+             mock.patch("server.threading.Thread", InlineThread), \
+             mock.patch("server._remove_clone_if_idle") as remove_clone:
+            self.assertTrue(server.kill_account(account))
+
+        remove_clone.assert_not_called()
+
+    def test_idle_cleanup_preserves_tdata_when_removing_a_clone(self):
+        master_parent = os.path.join(self.tmp, "master")
+        account = os.path.join(self.tmp, "account")
+        os.makedirs(master_parent)
+        master = self._make_bundle(master_parent)
+        clone = self._make_bundle(account)
+        session = os.path.join(account, "TelegramForcePortable", "tdata", "session")
+        os.makedirs(os.path.dirname(session))
+        with open(session, "wb") as f:
+            f.write(b"session must survive")
+
+        with mock.patch("server.get_shared_app", return_value=master), \
+             mock.patch("server._get_ps_output", return_value="999 /bin/sleep 1"):
+            self.assertTrue(server._remove_clone_if_idle(account))
+
+        self.assertFalse(os.path.exists(clone))
+        with open(session, "rb") as f:
+            self.assertEqual(f.read(), b"session must survive")
+
+    def test_idle_cleanup_skips_a_live_account_and_an_unknown_process_list(self):
+        master_parent = os.path.join(self.tmp, "master")
+        account = os.path.join(self.tmp, "account")
+        os.makedirs(master_parent)
+        master = self._make_bundle(master_parent)
+        clone = self._make_bundle(account)
+        executable = os.path.join(clone, "Contents", "MacOS", "Telegram")
+
+        with mock.patch("server.get_shared_app", return_value=master), \
+             mock.patch("server._get_ps_output", return_value=f"88 {executable}"):
+            self.assertFalse(server._remove_clone_if_idle(account))
+        self.assertTrue(os.path.isdir(clone))
+
+        with mock.patch("server.get_shared_app", return_value=master), \
+             mock.patch("server._get_ps_output", return_value=None):
+            self.assertFalse(server._remove_clone_if_idle(account))
+        self.assertTrue(os.path.isdir(clone))
+
+    def test_idle_cleanup_skips_an_account_being_opened(self):
+        account = os.path.join(self.tmp, "account")
+        lock = state._account_path_lock(account)
+        lock.acquire()
+        try:
+            with mock.patch("server._remove_account_clone") as remove_clone:
+                self.assertFalse(server._remove_clone_if_idle(account))
+            remove_clone.assert_not_called()
+        finally:
+            lock.release()
+
+    def test_failed_clone_deletion_keeps_its_stamp_for_a_later_retry(self):
+        account = os.path.join(self.tmp, "account")
+        clone = self._make_bundle(account)
+        server._write_clone_stamp(account, "master")
+        stamp = server._clone_stamp_path(account)
+
+        with mock.patch("server.subprocess.run", return_value=mock.Mock(returncode=1)):
+            self.assertFalse(server._remove_account_clone(account, clone))
+
+        self.assertTrue(os.path.isdir(clone))
+        self.assertTrue(os.path.exists(stamp))
+
+    def test_clone_stamp_removal_failure_is_reported(self):
+        account = os.path.join(self.tmp, "account")
+        os.makedirs(account)
+        server._write_clone_stamp(account, "master")
+
+        with mock.patch("server.find_account_app", return_value=None), \
+             mock.patch("server.os.remove", side_effect=OSError("disk failure")):
+            self.assertFalse(server._remove_account_clone(account))
 
     def test_stale_updater_state_is_archived_not_deleted(self):
         account = os.path.join(self.tmp, "account")
@@ -1210,6 +1463,70 @@ class CreateAccountValidationTests(unittest.TestCase):
         ok, msg = server.create_account("Existing", self.tmp, open_after=False)
         self.assertFalse(ok)
         self.assertEqual(msg, 'A folder named "Existing" already exists in that location')
+
+
+class DuplicateAccountTests(unittest.TestCase):
+    """Duplicating creates a fresh portable-login folder, not a session copy."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp(prefix="tm_duplicate_")
+        self.source = os.path.join(self.tmp, "Source")
+        os.makedirs(os.path.join(self.source, "TelegramForcePortable", "tdata"))
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_duplicate_creates_an_empty_portable_folder_without_session_or_app(self):
+        with mock.patch("server.is_managed_account_path", return_value=True), \
+             mock.patch("server.is_running", return_value=False):
+            ok, result = server.duplicate_account(self.source, "Source v2")
+
+        target = os.path.join(self.tmp, "Source v2")
+        self.assertTrue(ok, result)
+        self.assertEqual(result, target)
+        self.assertTrue(os.path.isdir(os.path.join(target, "TelegramForcePortable")))
+        self.assertFalse(os.path.exists(os.path.join(target, "TelegramForcePortable", "tdata")))
+        self.assertFalse(any(name.endswith(".app") for name in os.listdir(target)))
+
+    def test_duplicate_refuses_a_running_source_account(self):
+        with mock.patch("server.is_managed_account_path", return_value=True), \
+             mock.patch("server.is_running", return_value=True):
+            ok, message = server.duplicate_account(self.source, "Source v2")
+
+        self.assertFalse(ok)
+        self.assertEqual(message, "Close Telegram first")
+
+
+class NaturalAccountSortTests(unittest.TestCase):
+    def test_scan_orders_numeric_account_names_naturally(self):
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix="tm_natural_sort_") as root:
+            for name in ("1", "10", "19", "2", "3", "33", "4"):
+                os.makedirs(os.path.join(root, name, "TelegramForcePortable", "tdata"))
+            health = {"status": "ok", "issues": [], "expiry": "fresh"}
+            with mock.patch.object(server, "ROOT_DIR", root), \
+                 mock.patch("server.get_shared_app", return_value=None), \
+                 mock.patch("server._get_ps_output", return_value=""), \
+                 mock.patch("server.check_health", return_value=health):
+                names = [account["name"] for account in server.scan_accounts()]
+
+        self.assertEqual(names, ["1", "2", "3", "4", "10", "19", "33"])
+
+    def test_name_sort_uses_numeric_order_in_the_frontend(self):
+        script = r'''
+const fs = require("fs");
+const source = fs.readFileSync(process.argv[1], "utf8");
+const start = source.indexOf("function sortList(list)");
+const end = source.indexOf("\nfunction renderAccounts", start);
+let sortMode = "name";
+eval(source.slice(start, end));
+const names = sortList(["1", "10", "19", "2", "3", "33", "4"].map(name => ({ name }))).map(x => x.name);
+if (JSON.stringify(names) !== JSON.stringify(["1", "2", "3", "4", "10", "19", "33"])) process.exit(1);
+'''
+        result = subprocess.run(["node", "-e", script, str(RESOURCES_DIR / "index.html")], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":

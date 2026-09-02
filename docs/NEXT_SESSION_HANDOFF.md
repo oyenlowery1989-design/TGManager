@@ -1,12 +1,13 @@
 # TelegramManager — Next Coding Session Handoff
 
-Updated: 2026-08-31
+Updated: 2026-09-02
 
 ## Current state
 
-All work in this run is committed, pushed, and merged to `origin/main`.
-Local `main` is current through PR #18. Generated logs and old merged
-worktrees can be cleaned later; no source change is pending.
+The current working tree contains uncommitted lifecycle fixes, deterministic
+folder ordering, folder-only pinning, and account move support.
+Restart TelegramManager before manually testing them; the Python server is not
+hot-reloaded.
 
 - PR #7 (`a2825cc`) — config-import rollback, JSON recovery, workspace rename,
   proxy recovery records, WebView boundary, and response headers.
@@ -21,11 +22,12 @@ worktrees can be cleaned later; no source change is pending.
 - PR #18 — multi-window note/username refresh preserves only active or
   pending local saves.
 
-Last verification: 105 tests passed; Python, shell, and Swift checks passed.
+Latest verification: 130 tests passed; Python syntax, JavaScript syntax, and
+diff checks passed.
 
 ## Resume
 
-1. Run `git status --short --branch`, then `git pull --ff-only`.
+1. Run `git status --short --branch`; preserve the current uncommitted fixes.
 2. Preserve `AGENTS.md` and `VersionBackups/` if they remain untracked.
 3. This handoff and `docs/TODO_TEAM_AUDIT.md` are now tracked.
 
