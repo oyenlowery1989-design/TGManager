@@ -56,6 +56,12 @@ AyuGram.dmg. Homebrew's ayugram cask was at v7.0.9 and disabled with
 `fails_gatekeeper_check`. That is evidence about the older listed package;
 it does not establish the newer release's signing state or maliciousness.
 
+The newer package has since been downloaded, checksum-verified and statically
+inspected. Its Intel executable is unsigned and its Apple Silicon executable
+is ad-hoc signed without a developer team. See
+[the exact release assessment](AYUGRAM_RELEASE_ASSESSMENT.md) before choosing a
+build or changing the client trust policy.
+
 Use an official current release, then verify on the target Mac:
 
 ```sh
