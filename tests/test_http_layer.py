@@ -174,6 +174,31 @@ class HTTPLayerTests(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_ayugram_launch_uses_its_own_route_without_replacing_telegram(self):
+        with mock.patch("server.is_managed_account_path", return_value=True), \
+             mock.patch("server.ayugram.open_account", return_value=(True, "opened")) as optional, \
+             mock.patch("server.open_account") as normal:
+            status, body = self._post(server.ROUTE_PREFIX + "/api/open-ayugram", {"path": "/account"})
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(body)["success"])
+        optional.assert_called_once_with("/account")
+        normal.assert_not_called()
+
+    def test_ayugram_launch_is_blocked_by_the_password_lock(self):
+        state.config["lock_password_salt"] = "s"
+        state.config["lock_password_hash"] = "h"
+        with mock.patch("server.ayugram.open_account") as optional:
+            status, _ = self._post(server.ROUTE_PREFIX + "/api/open-ayugram", {"path": "/account"})
+        self.assertEqual(status, 423)
+        optional.assert_not_called()
+
+    def test_ayugram_launch_rejects_wrong_typed_account_path(self):
+        with mock.patch("server.ayugram.open_account") as optional:
+            status, body = self._post(server.ROUTE_PREFIX + "/api/open-ayugram", {"path": []})
+        self.assertEqual(status, 200)
+        self.assertFalse(json.loads(body)["success"])
+        optional.assert_not_called()
+
     def test_post_allows_localhost_origin(self):
         status, _ = self._post(server.ROUTE_PREFIX + "/api/does-not-exist", {},
                                 headers={"Origin": "http://127.0.0.1:8477"})

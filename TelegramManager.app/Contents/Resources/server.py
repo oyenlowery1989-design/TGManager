@@ -32,6 +32,7 @@ import sys
 sys.modules.setdefault("server", sys.modules[__name__])
 
 import state
+import ayugram
 from state import (
     ROOT_DIR, DATA_DIR, PATH_WARNINGS,
     METADATA_FILE, WORKSPACES_FILE,
@@ -659,6 +660,7 @@ def scan_accounts():
                     "group":            group,
                     "status":           status,
                     "running":          _is_running(full_path, app_path),
+                    "running_client":   "AyuGram" if ayugram.pid_from_ps(full_path, _ps_out) else "Telegram",
                     "has_app":          has_app,
                     "has_tdata":        has_tdata or has_raw_tdata,
                     "can_backup":       has_tdata,
@@ -850,12 +852,17 @@ def _remove_clone_if_idle(path):
         ps_output = _get_ps_output(force=True, allow_stale=False)
         if ps_output is None or _telegram_pid_from_ps_output(path, ps_output):
             return False
-        if not get_shared_app():
+        telegram_master = get_shared_app()
+        if not telegram_master and not os.path.isdir(ayugram.master_path()):
             return False
         app = find_account_app(path)
-        if app:
-            return _remove_account_clone(path, app)
-        return False
+        removed = _remove_account_clone(path, app) if app and telegram_master else False
+        optional = ayugram.clone_path(path)
+        if (state.is_managed_account_path(path) and os.path.isdir(ayugram.master_path())
+                and os.path.isdir(optional) and not os.path.islink(optional)):
+            result = subprocess.run(["rm", "-rf", optional], capture_output=True, timeout=300)
+            removed = (result.returncode == 0 and not os.path.lexists(optional)) or removed
+        return removed
     finally:
         lock.release()
 
@@ -961,10 +968,12 @@ def _get_ps_output(force=False, allow_stale=True):
     return output
 
 def _telegram_pid_from_ps_output(account_path, ps_output, app_path=None):
-    """Return a Telegram PID only when argv starts with this account's binary."""
+    """Return a client PID only for this account's exact executable path."""
     app_path = app_path or find_account_app(account_path)
-    if not app_path or not ps_output:
+    if not ps_output:
         return None
+    if not app_path:
+        return ayugram.pid_from_ps(account_path, ps_output)
     executable = os.path.join(app_path, "Contents", "MacOS", "Telegram")
     for line in ps_output.splitlines():
         try:
@@ -973,11 +982,15 @@ def _telegram_pid_from_ps_output(account_path, ps_output, app_path=None):
                 return int(pid_text)
         except (ValueError, IndexError):
             continue
-    return None
+    return ayugram.pid_from_ps(account_path, ps_output)
 
 
 def find_telegram_pid(account_path, fresh=False):
-    """Return the PID for this account's exact Telegram executable, if running."""
+    """Return this account's Telegram or optional AyuGram PID, if running.
+
+    Keep the historical name so all backup/restore/delete/cache guards and
+    Close actions protect the account's session while either client writes it.
+    """
     return _telegram_pid_from_ps_output(
         account_path, _get_ps_output(force=fresh, allow_stale=not fresh))
 
@@ -1024,6 +1037,12 @@ def invalidate_scan_cache():
 def open_account(path):
     """Open the Telegram account at path. Returns (ok, message)."""
     _log.info("Opening account: %s", path)
+    if os.path.lexists(ayugram.clone_path(path)):
+        output = _get_ps_output(force=True, allow_stale=False)
+        if output is None:
+            return False, "Could not check running clients; try again"
+        if ayugram.pid_from_ps(path, output):
+            return False, "Close AyuGram for this account before opening Telegram"
     if find_telegram_pid(path, fresh=True):
         _log.info("open_account: already running for %s", path)
         return True, "already running"
@@ -2467,6 +2486,37 @@ class RequestHandler(BaseHTTPRequestHandler):
         else:
             self.send_json({"success": False, "message": msg or "Failed to open account"})
 
+    def _post_api_open_ayugram(self, data):
+        path = data.get("path", "")
+        if not isinstance(path, str) or not is_managed_account_path(path):
+            self.send_json({"success": False, "message": "Invalid account path"})
+            return
+        ok, message = ayugram.open_account(path)
+        invalidate_scan_cache()
+        self.send_json({"success": ok, "message": message})
+
+    def _get_api_ayugram_status(self):
+        release = ayugram.release_manifest()
+        self.send_json({"installed": os.path.isdir(ayugram.master_path()),
+                        "version": release["version"], "download_url": release["source"]})
+
+    def _get_api_pick_ayugram(self):
+        picked, error = choose_app_dialog("Select the official AyuGram.app")
+        if picked:
+            with _approved_sources_lock:
+                _approved_app_sources.add(os.path.realpath(picked))
+            self.send_json({"success": True, "path": picked})
+        else:
+            self.send_json({"success": False, "message": error})
+
+    def _post_api_ayugram_setup(self, data):
+        source = data.get("source", "")
+        if not isinstance(source, str) or not is_allowed_app_source(source):
+            self.send_json({"success": False, "message": "Use Choose AyuGram App… to select the official app"})
+            return
+        ok, message = ayugram.install(source)
+        self.send_json({"success": ok, "message": message})
+
     def _post_api_open_all(self, data):
         to_open = [acc for acc in scan_accounts()
                    if acc["status"] == "ready" and not acc["running"]]
@@ -3221,6 +3271,8 @@ class RequestHandler(BaseHTTPRequestHandler):
 
 
     GET_ROUTES = {
+        '/api/ayugram/status': '_get_api_ayugram_status',
+        '/api/pick-ayugram': '_get_api_pick_ayugram',
         '/api/accounts': '_get_api_accounts',
         '/api/config': '_get_api_config',
         '/api/lock-status': '_get_api_lock_status',
@@ -3238,6 +3290,8 @@ class RequestHandler(BaseHTTPRequestHandler):
     }
 
     POST_ROUTES = {
+        '/api/open-ayugram': '_post_api_open_ayugram',
+        '/api/ayugram/setup': '_post_api_ayugram_setup',
         '/api/open': '_post_api_open',
         '/api/open-all': '_post_api_open_all',
         '/api/open-group': '_post_api_open_group',

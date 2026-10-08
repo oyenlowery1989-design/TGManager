@@ -70,6 +70,13 @@ integration still needs client-specific process identity, separate shared
 masters, per-account selection, backup coverage for Ayu settings and actual
 macOS session-isolation tests.
 
+The subsequent optional-button implementation now uses an independent exact
+release payload manifest while retaining Telegram's original signature policy.
+See [Open with AyuGram](OPEN_WITH_AYUGRAM.md) for this implementation's behavior
+and its remaining native validation requirements. The assessment above records
+the signing properties of the release, not a restriction on every future
+verification policy.
+
 ## Sources
 
 - https://github.com/AyuGram/AyuGramDesktop/releases/tag/v7.2.9

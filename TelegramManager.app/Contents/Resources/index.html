@@ -1480,6 +1480,11 @@
         <button class="btn danger" style="font-size:11px;padding:5px 12px" onclick="removeAllAccountApps()">🗑 Remove All Account Apps</button>
       </div>
 
+      <p class="settings-section-title" style="margin-top:20px">Optional AyuGram</p>
+      <div id="ayugram-status" style="font-size:12px;color:var(--text-dim);margin-bottom:8px">Not installed</div>
+      <button class="btn" onclick="setupAyuGramPick()">Choose AyuGram App…</button>
+      <p style="font-size:11px;color:var(--text-dim);margin-top:8px;line-height:1.5">Telegram stays the default. Choose the official AyuGram 7.2.9 app to add a separate “Open with AyuGram” action. Only one client can use an account at a time.</p>
+
       <p class="settings-section-title" style="margin-top:20px">Cache</p>
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
         <input type="checkbox" id="cfg-cache-auto" style="width:14px;height:14px;cursor:pointer">
@@ -1872,10 +1877,10 @@ function buildCard(acc, pinnedCopy = false) {
                       health.expiry === "stale"   ? "💤 Inactive 30d+"   : "";
 
   const actions = [];
-  if (acc.status === "ready") {
+  if (acc.status === "ready" || acc.running) {
     if (acc.running) {
-      actions.push(`<button class="btn success" disabled data-tip="Telegram is running for this account">▶ Running</button>`);
-      actions.push(`<button class="btn danger" onclick="event.stopPropagation(); closeAccount(${esc(JSON.stringify(acc.path))})" data-tip="Kill this Telegram instance">■ Close</button>`);
+      actions.push(`<button class="btn success" disabled>▶ ${esc(acc.running_client || "Telegram")} running</button>`);
+      actions.push(`<button class="btn danger" onclick="event.stopPropagation(); closeAccount(${esc(JSON.stringify(acc.path))})" data-tip="Close the running client for this account">■ Close</button>`);
     } else {
       actions.push(`<button class="btn primary" onclick="event.stopPropagation(); openAccount(${esc(JSON.stringify(acc.path))})" data-tip="Launch Telegram for this account">▶ Open</button>`);
     }
@@ -1887,6 +1892,9 @@ function buildCard(acc, pinnedCopy = false) {
     }
   } else if (acc.status === "no_data") {
     actions.push(`<button class="btn primary" onclick="event.stopPropagation(); openAccount(${esc(JSON.stringify(acc.path))})" data-tip="Open this empty portable folder and sign in as a new Telegram device">▶ Open & Log In</button>`);
+  }
+  if (!acc.running && acc.can_backup) {
+    actions.push(`<button class="btn" onclick="event.stopPropagation(); openWithAyuGram(${esc(JSON.stringify(acc.path))})" data-tip="Open this session with AyuGram; a backup is saved before launch">Open with AyuGram</button>`);
   }
   if (!acc.running) {
     actions.push(`<button class="btn" onclick="event.stopPropagation(); showDuplicateAccountModal(${esc(JSON.stringify(acc.path))},${esc(JSON.stringify(acc.name))})" data-tip="Create an empty portable folder for a separate Telegram login">Duplicate</button>`);
@@ -2309,6 +2317,23 @@ async function openAccount(path) {
   }, 3000);
 }
 
+async function openWithAyuGram(path) {
+  if (_openingPaths.has(path)) return;
+  _openingPaths.add(path);
+  toast("Preparing AyuGram and saving a session backup…", "info", 8000);
+  try {
+    const r = await api("/api/open-ayugram", "POST", { path });
+    if (!r || !r.success) {
+      toast(r?.message || "Could not open AyuGram", "error", 8000);
+      return;
+    }
+    toast(r.message || "Opening AyuGram…", "success", 6000);
+    await refresh();
+  } finally {
+    _openingPaths.delete(path);
+  }
+}
+
 async function openAll() {
   const btn = document.getElementById("btn-open-all");
   btn.disabled = true;
@@ -2392,6 +2417,7 @@ async function updateAll() {
   toastResult(r, "Done", "Failed");
   if (r.success) {
     loadSharedAppStatus();
+    loadAyuGramStatus();
     await refresh();
   }
 }
@@ -3158,6 +3184,7 @@ function showSettings() {
     document.getElementById("settings-modal").classList.add("active");
     loadKeeperStatus();
     loadSharedAppStatus();
+    loadAyuGramStatus();
   });
 }
 
@@ -3245,6 +3272,25 @@ async function importConfig(input) {
 }
 
 // ── Shared App Management ──────────────────────────────────────────────────
+
+async function loadAyuGramStatus() {
+  const el = document.getElementById("ayugram-status");
+  if (!el) return;
+  const r = await api("/api/ayugram/status");
+  el.textContent = r && r.installed ? `AyuGram ${r.version} installed` : "Choose AyuGram.app once to enable the account button.";
+}
+
+async function setupAyuGramPick() {
+  const p = await api("/api/pick-ayugram");
+  if (!p || !p.success) {
+    if (p?.message !== "canceled") toast(p?.message || "Could not choose AyuGram", "error");
+    return;
+  }
+  toast("Verifying and installing AyuGram…", "info", 8000);
+  const r = await api("/api/ayugram/setup", "POST", { source: p.path });
+  toast(r?.message || "Could not install AyuGram", r?.success ? "success" : "error", 8000);
+  if (r?.success) await loadAyuGramStatus();
+}
 
 async function loadSharedAppStatus() {
   const el = document.getElementById("shared-app-status");
