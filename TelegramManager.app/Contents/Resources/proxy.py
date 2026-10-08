@@ -63,11 +63,12 @@ def get_active_network_service():
     return ""
 
 
-def _channel_epoch_path(channel):
-    return os.path.join(state.DATA_DIR, f"proxy_epoch_{channel}")
+def _channel_epoch_path(channel, service=None):
+    key = hashlib.sha256(f"{service}\0{channel}".encode()).hexdigest() if service else channel
+    return os.path.join(state.DATA_DIR, f"proxy_epoch_{key}")
 
 
-def _bump_channel_epoch(channel):
+def _bump_channel_epoch(channel, service=None):
     """Atomically increment and return the epoch counter for this proxy
     channel ("socks" or "http").
 
@@ -78,7 +79,7 @@ def _bump_channel_epoch(channel):
     it can tell it's been superseded and skip restoring, instead of blindly
     cutting the second apply's still-active window short.
     """
-    path = _channel_epoch_path(channel)
+    path = _channel_epoch_path(channel, service)
     with state._proxy_state_lock:
         try:
             with open(path) as f:
@@ -93,7 +94,36 @@ def _bump_channel_epoch(channel):
     return epoch
 
 
+def _restore_proxy_commands(record):
+    """Restore each protocol independently; read legacy recovery records too."""
+    q = shlex.quote
+    service = q(record["service"])
+    protocols = record.get("protocols")
+    if protocols is None:
+        names = ("socks",) if str(record.get("proxy_type", "socks5")).startswith("socks") else ("http", "https")
+        protocols = {name: record for name in names}
+    lines = []
+    flags = {"socks": ("socksfirewallproxy", "socksfirewallproxystate"),
+             "http": ("webproxy", "webproxystate"),
+             "https": ("securewebproxy", "securewebproxystate")}
+    for name, baseline in protocols.items():
+        setting, switch = flags[name]
+        host = str(baseline.get("host", "") or "")
+        port = str(baseline.get("port", "0") or "0")
+        if host and port != "0":
+            lines.append(f"networksetup -set{setting} {service} {q(host)} {q(port)} off")
+        enabled = "on" if baseline.get("enabled") and host else "off"
+        lines.append(f"networksetup -set{switch} {service} {enabled}")
+    return lines
+
+
 def apply_proxy(proxy_config):
+    # Recovery must not run between baseline capture and the system mutation.
+    with state._proxy_state_lock:
+        return _apply_proxy_locked(proxy_config)
+
+
+def _apply_proxy_locked(proxy_config):
     """
     Temporarily set the macOS system SOCKS proxy so Telegram routes through it.
     Restores original proxy state after 35 seconds (enough for Telegram to connect).
@@ -111,22 +141,26 @@ def apply_proxy(proxy_config):
         state._log.warning("apply_proxy: could not determine the active network service — skipping")
         return
 
-    def scutil_get_proxy():
-        cmd = "-getsocksfirewallproxy" if proxy_type.startswith("socks") else "-getwebproxy"
+    names = ("socks",) if proxy_type.startswith("socks") else ("http", "https")
+    query_flags = {"socks": "-getsocksfirewallproxy", "http": "-getwebproxy", "https": "-getsecurewebproxy"}
+    protocols = {}
+    for name in names:
         try:
-            r = subprocess.run(["networksetup", cmd, service],
+            r = subprocess.run(["networksetup", query_flags[name], service],
                                capture_output=True, text=True, timeout=15)
-        except subprocess.TimeoutExpired:
-            state._log.warning("scutil_get_proxy: networksetup query timed out")
-            return False, "", "0"
-        enabled = "Enabled: Yes" in r.stdout
-        cur_host, cur_port = "", "0"
-        for ln in r.stdout.split("\n"):
-            if ln.startswith("Server:"): cur_host = ln.split(":", 1)[1].strip()
-            if ln.startswith("Port:"):   cur_port = ln.split(":", 1)[1].strip()
-        return enabled, cur_host, cur_port
-
-    orig_enabled, orig_host, orig_port = scutil_get_proxy()
+        except (subprocess.TimeoutExpired, OSError):
+            state._log.warning("apply_proxy: could not read %s baseline; leaving settings unchanged", name)
+            return
+        if r.returncode != 0 or "Enabled:" not in r.stdout:
+            state._log.warning("apply_proxy: baseline query failed; leaving settings unchanged")
+            return
+        fields = dict(line.split(":", 1) for line in r.stdout.splitlines() if ":" in line)
+        if fields.get("Authenticated Proxy Enabled", "").strip() in ("1", "Yes"):
+            state._log.warning("apply_proxy: authenticated system proxy cannot be safely restored; leaving settings unchanged")
+            return
+        protocols[name] = {"enabled": fields["Enabled"].strip() == "Yes",
+                           "host": fields.get("Server", "").strip(),
+                           "port": fields.get("Port", "0").strip()}
 
     # Persist the pre-change state so a failed restore can be recovered at
     # next startup. First writer wins: if a restore is already pending, the
@@ -140,47 +174,30 @@ def apply_proxy(proxy_config):
     # makes every concurrent restore converge on the same true original.
     channel = "socks" if proxy_type.startswith("socks") else "http"
     recovery_path = _proxy_recovery_path(service, channel)
-    r_enabled, r_host, r_port = orig_enabled, orig_host, orig_port
-    our_saved_at = datetime.now().isoformat()
-    wrote_baseline = False
     with state._proxy_state_lock:
         if not os.path.exists(recovery_path):
             state._save_json_atomic(recovery_path, {
                 "service": service, "proxy_type": proxy_type,
-                "enabled": orig_enabled, "host": orig_host, "port": orig_port,
-                "saved_at": our_saved_at,
+                "protocols": protocols, "saved_at": datetime.now().isoformat(),
             })
-            wrote_baseline = True
         try:
-            with open(recovery_path) as _pf:
-                _base = json.load(_pf)
-            _base_channel = "socks" if str(_base.get("proxy_type", "")).startswith("socks") else "http"
-            # Only trust the file when it describes THIS proxy channel; a
-            # different channel is independent and its live query is correct.
-            if _base_channel == channel:
-                r_enabled = bool(_base.get("enabled"))
-                r_host    = str(_base.get("host", "") or "")
-                r_port    = str(_base.get("port", "0") or "0")
-        except Exception as _e:
-            state._log.warning("apply_proxy: baseline read-back failed (%s); using live query", _e)
+            with open(recovery_path) as f:
+                baseline = json.load(f)
+            restore_lines = _restore_proxy_commands(baseline)
+        except (OSError, ValueError, KeyError, TypeError):
+            state._log.warning("apply_proxy: invalid recovery baseline; leaving settings unchanged")
+            return
 
     # Build per-type command strings using shlex.quote() for all user-controlled values.
-    # The initial set+enable pair runs via state._run_as_admin() (temp-file approach — no AppleScript
-    # string embedding).  Restore uses sudo -n with cached credentials via bash -c directly.
+    # Both apply and restore use the administrator helper / private scripts.
     if proxy_type.startswith("socks"):
         set_cmd     = f"networksetup -setsocksfirewallproxy {shlex.quote(service)} {shlex.quote(host)} {shlex.quote(port)} off"
         on_cmd      = f"networksetup -setsocksfirewallproxystate {shlex.quote(service)} on"
-        off_cmd     = f"networksetup -setsocksfirewallproxystate {shlex.quote(service)} off"
-        restore_set = f"networksetup -setsocksfirewallproxy {shlex.quote(service)} {shlex.quote(r_host)} {shlex.quote(r_port)} off"
     else:
         set_cmd     = (f"networksetup -setwebproxy {shlex.quote(service)} {shlex.quote(host)} {shlex.quote(port)}\n"
                         f"networksetup -setsecurewebproxy {shlex.quote(service)} {shlex.quote(host)} {shlex.quote(port)}")
         on_cmd      = (f"networksetup -setwebproxystate {shlex.quote(service)} on\n"
                         f"networksetup -setsecurewebproxystate {shlex.quote(service)} on")
-        off_cmd     = (f"networksetup -setwebproxystate {shlex.quote(service)} off\n"
-                        f"networksetup -setsecurewebproxystate {shlex.quote(service)} off")
-        restore_set = (f"networksetup -setwebproxy {shlex.quote(service)} {shlex.quote(r_host)} {shlex.quote(r_port)}\n"
-                        f"networksetup -setsecurewebproxy {shlex.quote(service)} {shlex.quote(r_host)} {shlex.quote(r_port)}")
 
     result = state._run_as_admin(
         f"set -e\n{set_cmd}\n{on_cmd}\n",
@@ -188,22 +205,9 @@ def apply_proxy(proxy_config):
     )
     if result.returncode != 0:
         state._log.warning("apply_proxy: admin prompt rejected or failed (rc=%d)", result.returncode)
-        if wrote_baseline:
-            # We just created this baseline for a change that was never
-            # actually applied (prompt denied/timed out) — remove it so
-            # _recover_stale_proxy() doesn't "restore" a change that never
-            # happened on next launch, which could clobber a proxy the user
-            # configures manually in the meantime. Only remove it if it's
-            # still OUR record — re-check under the lock in case another
-            # apply_proxy() call has since taken it over as its own baseline.
-            with state._proxy_state_lock:
-                try:
-                    with open(recovery_path) as _pf:
-                        _cur = json.load(_pf)
-                    if _cur.get("saved_at") == our_saved_at:
-                        os.unlink(recovery_path)
-                except (OSError, ValueError):
-                    pass
+        # A nonzero result can occur after the first command changed settings.
+        # Keep the recovery record until restoration has actually succeeded.
+
         return
 
     state._log.info("Proxy %s:%s active on service %r; will restore in 35 s", host, port, service)
@@ -211,17 +215,13 @@ def apply_proxy(proxy_config):
     # Bump AFTER the change is confirmed applied, so this call's restore can
     # tell whether a later same-channel apply has taken over by the time its
     # 35s window elapses — see _bump_channel_epoch's docstring.
-    my_epoch = _bump_channel_epoch(channel)
+    my_epoch = _bump_channel_epoch(channel, service)
 
     def schedule_restore():
         import tempfile, stat
-        if r_enabled and r_host:
-            restore_lines = [restore_set, on_cmd]
-        else:
-            restore_lines = [off_cmd]
         # Runs under `set -e`: only reached when the restore succeeded, so a
         # leftover file always means "system proxy may still be modified".
-        restore_lines.append(f"rm -f {shlex.quote(recovery_path)}")
+        commands = restore_lines + [f"rm -f {shlex.quote(recovery_path)}"]
 
         fd_restore, restore_path = tempfile.mkstemp(suffix=".sh", prefix="tm_proxy_restore_cmd_")
         fd_wrapper, wrapper_path = tempfile.mkstemp(suffix=".sh", prefix="tm_proxy_restore_job_")
@@ -229,7 +229,7 @@ def apply_proxy(proxy_config):
             with os.fdopen(fd_restore, "w") as f:
                 f.write("#!/bin/bash\n")
                 f.write("set -e\n")
-                f.write("\n".join(restore_lines) + "\n")
+                f.write("\n".join(commands) + "\n")
             os.chmod(restore_path, stat.S_IRWXU)
 
             prompt = state._as_str("TelegramManager is restoring the proxy settings after Telegram connected.")
@@ -238,7 +238,7 @@ def apply_proxy(proxy_config):
                 f'with administrator privileges with prompt {prompt}'
             )
 
-            epoch_path = _channel_epoch_path(channel)
+            epoch_path = _channel_epoch_path(channel, service)
             with os.fdopen(fd_wrapper, "w") as f:
                 f.write("#!/bin/bash\n")
                 f.write("sleep 35\n")
@@ -314,31 +314,14 @@ def _recover_stale_proxy(record_path=None):
 
         state._log.warning("Previous proxy restore did not complete — restoring original "
                      "settings for service %r", service)
-        q = shlex.quote
-        if ptype.startswith("socks"):
-            if rec.get("enabled") and rec.get("host"):
-                lines = [
-                    f"networksetup -setsocksfirewallproxy {q(service)} {q(str(rec.get('host')))} {q(str(rec.get('port', '0')))} off",
-                    f"networksetup -setsocksfirewallproxystate {q(service)} on",
-                ]
-            else:
-                lines = [f"networksetup -setsocksfirewallproxystate {q(service)} off"]
-        else:
-            if rec.get("enabled") and rec.get("host"):
-                lines = [
-                    f"networksetup -setwebproxy {q(service)} {q(str(rec.get('host')))} {q(str(rec.get('port', '0')))}",
-                    f"networksetup -setsecurewebproxy {q(service)} {q(str(rec.get('host')))} {q(str(rec.get('port', '0')))}",
-                    f"networksetup -setwebproxystate {q(service)} on",
-                    f"networksetup -setsecurewebproxystate {q(service)} on",
-                ]
-            else:
-                lines = [
-                    f"networksetup -setwebproxystate {q(service)} off",
-                    f"networksetup -setsecurewebproxystate {q(service)} off",
-                ]
+        try:
+            lines = _restore_proxy_commands(rec)
+        except (KeyError, TypeError, ValueError):
+            state._log.error("Invalid proxy recovery record — retaining %s", record_path)
+            return
 
         r = state._run_as_admin(
-            "\n".join(lines) + "\n",
+            "set -e\n" + "\n".join(lines) + "\n",
             "TelegramManager needs to restore proxy settings left over from a previous run.",
         )
         if r.returncode == 0:

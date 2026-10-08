@@ -378,7 +378,7 @@ metadata = load_metadata()
 # Original system proxy state, persisted before apply_proxy() changes it.
 # Present on disk = a restore is pending (or failed); recovered at startup.
 PROXY_ORIGINAL_FILE = os.path.join(DATA_DIR, "proxy_original.json")
-_proxy_state_lock = threading.Lock()  # serializes check+write of the file above
+_proxy_state_lock = threading.RLock()  # baseline capture, apply and recovery transaction
 
 # Regenerable cache directory names found INSIDE tdata/user_data* (media/file
 # caches plus the Chromium caches of Telegram's embedded bot/mini-app WebView).

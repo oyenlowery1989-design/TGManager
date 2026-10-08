@@ -14,6 +14,7 @@ import shlex
 import shutil
 import subprocess
 import threading
+import tempfile
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
@@ -1367,14 +1368,18 @@ def _patch_app_display_name(app_path: str, display_name: str) -> bool:
         r = subprocess.run([pb, "-c", f"Set :{key} {safe_dn}", plist],
                            capture_output=True, text=True, timeout=60)
         if r.returncode != 0:
-            subprocess.run([pb, "-c", f"Add :{key} string {safe_dn}", plist],
-                           capture_output=True, timeout=60)
+            added = subprocess.run([pb, "-c", f"Add :{key} string {safe_dn}", plist],
+                                   capture_output=True, timeout=60)
+            if added.returncode != 0:
+                _log.warning("_patch_app_display_name: could not update %s", key)
+                return False
     # Re-sign with ad-hoc signature (required after modifying Info.plist)
     r = subprocess.run(["codesign", "--force", "--deep", "--sign", "-", app_path],
                        capture_output=True, timeout=600)
     if r.returncode != 0:
         _log.warning("_patch_app_display_name: codesign failed for %s: %s",
                      app_path, r.stderr.decode(errors="replace").strip())
+        return False
     return True
 
 
@@ -1390,7 +1395,7 @@ def set_telegram_display_name(folder_path, display_name):
     ok = _patch_app_display_name(app_path, display_name)
     if ok:
         return True, f'Dock name set to "{display_name}"'
-    return False, "Info.plist not found"
+    return False, "Could not update the app name or sign the bundle; see the log for details"
 
 
 def fix_all_dock_names():
@@ -1410,57 +1415,57 @@ def _relocate_account(old_path, new_path):
     if os.path.exists(new_path):
         return False, f'A folder named "{os.path.basename(new_path)}" already exists'
 
-    # Phase 1: build updated metadata without touching the global dict yet
-    with _meta_lock:
+    # Hold shared locks through snapshot, persistence, commit and rollback.
+    # Account locks alone cannot protect edits to other accounts.
+    with _meta_lock, _ws_lock:
+        # Phase 1: build updated metadata without touching the global dict yet
         new_meta = copy.deepcopy(metadata)
-    for section in ("notes", "usernames", "order", "colors",
-                    "last_opened", "proxies", "dock_names", "avatars", "account_ids"):
-        d = new_meta.get(section, {})
-        if old_path in d:
-            d[new_path] = d.pop(old_path)
-    pinned = new_meta.get("pinned", [])
-    if old_path in pinned:
-        pinned[pinned.index(old_path)] = new_path
-    folder_pinned = new_meta.get("folder_pinned", [])
-    if old_path in folder_pinned:
-        folder_pinned[folder_pinned.index(old_path)] = new_path
-    with _ws_lock:
+        for section in ("notes", "usernames", "order", "colors",
+                        "last_opened", "proxies", "dock_names", "avatars", "account_ids"):
+            d = new_meta.get(section, {})
+            if old_path in d:
+                d[new_path] = d.pop(old_path)
+        pinned = new_meta.get("pinned", [])
+        if old_path in pinned:
+            pinned[pinned.index(old_path)] = new_path
+        folder_pinned = new_meta.get("folder_pinned", [])
+        if old_path in folder_pinned:
+            folder_pinned[folder_pinned.index(old_path)] = new_path
         old_workspaces = load_workspaces()
-    new_workspaces = copy.deepcopy(old_workspaces)
-    for workspace in new_workspaces.values():
-        accounts = workspace.get("accounts", [])
-        workspace["accounts"] = [new_path if path == old_path else path for path in accounts]
+        new_workspaces = copy.deepcopy(old_workspaces)
+        for workspace in new_workspaces.values():
+            accounts = workspace.get("accounts", [])
+            workspace["accounts"] = [new_path if path == old_path else path for path in accounts]
 
-    # Phase 2: rename folder on disk
-    try:
-        os.rename(old_path, new_path)
-    except Exception as e:
-        _log.warning("account relocation failed: %s", e)
-        return False, str(e)
-
-    # Phase 3: persist metadata and workspace references (atomic .tmp → replace)
-    try:
-        save_metadata(new_meta)
-        save_workspaces(new_workspaces)
-    except Exception as e:
-        # Undo the folder rename so disk and metadata stay consistent
+        # Phase 2: rename folder on disk
         try:
-            os.rename(new_path, old_path)
-            _log.warning("account relocation: metadata save failed (%s); folder move undone", e)
-        except Exception as undo_e:
-            _log.error(
-                "account relocation: CRITICAL — folder is at %s but metadata save failed (%s) "
-                "and undo also failed (%s). Manual fix required.", new_path, e, undo_e
-            )
-        try:
-            save_metadata(metadata)
-            save_workspaces(old_workspaces)
-        except Exception as rollback_error:
-            _log.error("account relocation: state rollback failed: %s", rollback_error)
-        return False, f"Could not save metadata: {e}"
+            os.rename(old_path, new_path)
+        except Exception as e:
+            _log.warning("account relocation failed: %s", e)
+            return False, str(e)
 
-    # Commit: update in-memory global only after both disk operations succeeded
-    with _meta_lock:
+        # Phase 3: persist metadata and workspace references (atomic .tmp → replace)
+        try:
+            save_metadata(new_meta)
+            save_workspaces(new_workspaces)
+        except Exception as e:
+            # Undo the folder rename so disk and metadata stay consistent
+            try:
+                os.rename(new_path, old_path)
+                _log.warning("account relocation: metadata save failed (%s); folder move undone", e)
+            except Exception as undo_e:
+                _log.error(
+                    "account relocation: CRITICAL — folder is at %s but metadata save failed (%s) "
+                    "and undo also failed (%s). Manual fix required.", new_path, e, undo_e
+                )
+            try:
+                save_metadata(metadata)
+                save_workspaces(old_workspaces)
+            except Exception as rollback_error:
+                _log.error("account relocation: state rollback failed: %s", rollback_error)
+            return False, f"Could not save metadata: {e}"
+
+        # Commit: update in-memory global only after both disk operations succeeded
         metadata.clear()
         metadata.update(new_meta)
 
@@ -2218,7 +2223,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         try:
             self._do_GET()
         except Exception as e:
-            _log.error("do_GET %s: unhandled error: %s", self.path, e, exc_info=True)
+            _log.error("do_GET: unhandled %s", type(e).__name__)
             try:
                 self.send_json({"success": False, "message": f"Server error: {e}"}, 500)
             except Exception:
@@ -2228,7 +2233,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         try:
             self._do_POST()
         except Exception as e:
-            _log.error("do_POST %s: unhandled error: %s", self.path, e, exc_info=True)
+            _log.error("do_POST: unhandled %s", type(e).__name__)
             try:
                 self.send_json({"success": False, "message": f"Server error: {e}"}, 500)
             except Exception:
@@ -2437,9 +2442,13 @@ class RequestHandler(BaseHTTPRequestHandler):
             body = "{}"
         try:
             data = json.loads(body)
-        except Exception:
-            data = {}
+        except (ValueError, TypeError):
+            self.send_json({"success": False, "message": "Invalid JSON request body"}, 400)
+            return
 
+        if not isinstance(data, dict):
+            self.send_json({"success": False, "message": "Request body must be a JSON object"}, 400)
+            return
         handler = self.POST_ROUTES.get(path)
         if handler:
             getattr(self, handler)(data)
@@ -3179,15 +3188,15 @@ class RequestHandler(BaseHTTPRequestHandler):
         # via /api/lock-config (which requires proving the current one).
         # Keep the two keys accepted by _validate_import_payload (so old
         # export files still validate) but overwrite with live values.
-        imported_cfg["lock_password_hash"] = config.get("lock_password_hash")
-        imported_cfg["lock_password_salt"] = config.get("lock_password_salt")
+        # Keep the rollback snapshot and writes in one shared transaction.
         with _meta_lock, _config_lock, _ws_lock:
+            imported_cfg["lock_password_hash"] = config.get("lock_password_hash")
+            imported_cfg["lock_password_salt"] = config.get("lock_password_salt")
             old_metadata = copy.deepcopy(metadata)
             old_config = copy.deepcopy(config)
             snapshots = _snapshot_files((state.METADATA_FILE, state.CONFIG_FILE,
                                          state.WORKSPACES_FILE))
-        try:
-            with _meta_lock, _config_lock, _ws_lock:
+            try:
                 save_metadata(normalized["metadata"])
                 save_config(imported_cfg)
                 save_workspaces(normalized["workspaces"])
@@ -3195,21 +3204,20 @@ class RequestHandler(BaseHTTPRequestHandler):
                 metadata.update(normalized["metadata"])
                 config.clear()
                 config.update(imported_cfg)
-            invalidate_scan_cache()
-            _log.info("Config imported from client")
-            self.send_json({"success": True, "message": "Config imported successfully"})
-        except Exception as e:
-            try:
-                _restore_files(snapshots)
-            except OSError as rollback_error:
-                _log.error("import-config rollback failed: %s", rollback_error)
-            with _meta_lock, _config_lock:
+                invalidate_scan_cache()
+                _log.info("Config imported from client")
+                self.send_json({"success": True, "message": "Config imported successfully"})
+            except Exception as e:
+                try:
+                    _restore_files(snapshots)
+                except OSError as rollback_error:
+                    _log.error("import-config rollback failed: %s", rollback_error)
                 metadata.clear()
                 metadata.update(old_metadata)
                 config.clear()
                 config.update(old_config)
-            _log.warning("import-config failed: %s", e)
-            self.send_json({"success": False, "message": str(e)})
+                _log.warning("import-config failed: %s", e)
+                self.send_json({"success": False, "message": str(e)})
 
 
     GET_ROUTES = {
@@ -3323,16 +3331,19 @@ def _write_ready_file(path, port, session_token):
     """Atomically publish a bound server endpoint for the native launcher."""
     if not path:
         return
-    temporary = path + ".tmp"
+    temporary = None
     try:
-        with open(temporary, "w", encoding="utf-8") as f:
+        fd, temporary = tempfile.mkstemp(prefix=".telegram-manager-ready-",
+                                        dir=os.path.dirname(os.path.abspath(path)))
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump({"pid": os.getpid(), "port": port,
                        "session_token": session_token}, f)
         os.replace(temporary, path)
     except OSError as e:
         _log.warning("Could not write launcher ready file: %s", e)
         try:
-            os.remove(temporary)
+            if temporary is not None:
+                os.remove(temporary)
         except OSError:
             pass
 

@@ -152,6 +152,28 @@ class HTTPLayerTests(unittest.TestCase):
         status, _ = self._post(server.ROUTE_PREFIX + "/api/does-not-exist", {})
         self.assertEqual(status, 404)  # past the Origin check, into routing
 
+    def test_post_rejects_non_object_json_before_dispatch(self):
+        conn = self._conn()
+        try:
+            conn.request("POST", server.ROUTE_PREFIX + "/api/note", body="[]",
+                         headers={"Content-Type": "application/json"})
+            response = conn.getresponse()
+            self.assertEqual(response.status, 400)
+            self.assertIn("JSON object", json.loads(response.read())["message"])
+        finally:
+            conn.close()
+
+    def test_post_rejects_malformed_json_before_dispatch(self):
+        conn = self._conn()
+        try:
+            conn.request("POST", server.ROUTE_PREFIX + "/api/close-all", body="{",
+                         headers={"Content-Type": "application/json"})
+            response = conn.getresponse()
+            self.assertEqual(response.status, 400)
+            self.assertIn("Invalid JSON", json.loads(response.read())["message"])
+        finally:
+            conn.close()
+
     def test_post_allows_localhost_origin(self):
         status, _ = self._post(server.ROUTE_PREFIX + "/api/does-not-exist", {},
                                 headers={"Origin": "http://127.0.0.1:8477"})

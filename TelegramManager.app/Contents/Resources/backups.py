@@ -221,7 +221,8 @@ def restore_backup(backup_path, account_path):
     # Re-validate the FINAL destination right before writing: the account path
     # was checked by the route, but a symlink planted at TelegramForcePortable/
     # or tdata could still redirect the copy outside the managed tree.
-    if os.path.islink(portable) or os.path.islink(tdata_dst) or not state.is_safe_path(portable):
+    if (os.path.islink(portable) or os.path.islink(tdata_dst)
+            or not state.is_managed_account_path(account_path)):
         state._log.warning("restore_backup: destination failed re-validation: %s", portable)
         return False, "Restore destination is not a valid account folder"
 
