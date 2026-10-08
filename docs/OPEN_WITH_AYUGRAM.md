@@ -7,6 +7,11 @@ client permanently.
 
 ## Set up once on your Mac
 
+For an installation that keeps the old app's local data separate, use the
+[Telegram Manager Ayu package](SEPARATE_MAC_APP.md). That edition starts empty
+and uses its own support folder. The instructions below also describe the
+original portable layout when running the source app directly.
+
 1. Preserve the working version and account data before testing. The code
    checkpoint is `stable-before-ayugram`; it does not include your sessions.
 2. Use a separate test installation with a disposable account first. Remember

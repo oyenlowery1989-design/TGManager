@@ -12,6 +12,11 @@ func readSessionToken() -> String {
 // ── App Delegate ─────────────────────────────────────────────────────────────
 class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, NSWindowDelegate {
 
+    var isolated: Bool {
+        guard let res = Bundle.main.resourcePath else { return false }
+        return FileManager.default.fileExists(atPath: res + "/installation.json")
+    }
+    var appName: String { isolated ? "Telegram Manager Ayu" : "Telegram Manager" }
     var window: NSWindow!
     var webView: WKWebView!
     var serverProcess: Process?
@@ -52,8 +57,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
     func startPythonServer() {
         guard let res = Bundle.main.resourcePath, let readyFileURL else { return }
         let script = "\(res)/server.py"
-        let dataURL = Bundle.main.bundleURL.deletingLastPathComponent()
-            .appendingPathComponent("data/manager.log")
+        let dataURL = isolated
+            ? FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Application Support/TelegramManagerAyu/data/launcher.log")
+            : Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("data/manager.log")
+        try? FileManager.default.createDirectory(at: dataURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         FileManager.default.createFile(atPath: dataURL.path, contents: nil)
         if let log = try? FileHandle(forWritingTo: dataURL) {
             log.seekToEndOfFile()
@@ -98,7 +107,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
             backing: .buffered,
             defer: false
         )
-        window.title           = "Telegram Manager"
+        window.title           = appName
         window.minSize         = NSSize(width: 820, height: 600)
         window.backgroundColor = NSColor(red: 0.059, green: 0.059, blue: 0.059, alpha: 1)
         window.delegate        = self
@@ -106,6 +115,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         NSApp.activate(ignoringOtherApps: true)
 
         let config = WKWebViewConfiguration()
+        if isolated { config.websiteDataStore = .nonPersistent() }
         let prefs  = WKWebpagePreferences()
         prefs.allowsContentJavaScript = true
         config.defaultWebpagePreferences = prefs
@@ -128,7 +138,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
         }
 
         let menu = NSMenu()
-        let showItem = NSMenuItem(title: "Show Telegram Manager",
+        let showItem = NSMenuItem(title: "Show \(appName)",
                                    action: #selector(showWindow), keyEquivalent: "")
         showItem.target = self
         menu.addItem(showItem)

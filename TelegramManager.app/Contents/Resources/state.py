@@ -28,18 +28,34 @@ from logging.handlers import RotatingFileHandler
 # Falls back to PARENT for both ROOT_DIR and DATA_DIR if the subfolders don't exist.
 APP_BUNDLE       = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _PARENT_DIR      = os.path.dirname(APP_BUNDLE)  # true parent (Swift launcher reads config here)
-_tg_sub          = os.path.join(_PARENT_DIR, "TG")
-ROOT_DIR         = _tg_sub if os.path.isdir(_tg_sub) else _PARENT_DIR
-_data_sub        = os.path.join(_PARENT_DIR, "data")
-DATA_DIR         = _data_sub if os.path.isdir(_data_sub) else _PARENT_DIR
-# A missing TG/ or data/ silently rescans the wrong tree and resets config
-# (including the lock password) — collect warnings to log and show in the UI.
-PATH_WARNINGS = []
-if ROOT_DIR == _PARENT_DIR:
-    PATH_WARNINGS.append(f"TG/ folder not found — scanning the whole parent dir instead: {_PARENT_DIR}")
-if DATA_DIR == _PARENT_DIR:
-    PATH_WARNINGS.append(f"data/ folder not found — config/backups fall back to: {_PARENT_DIR}")
-PRIVATE_STATE_DIR = os.path.expanduser("~/Library/Application Support/TelegramManager")
+# A packaged side-by-side edition opts into its own storage namespace.
+_PROFILE_FILE = os.path.join(APP_BUNDLE, "Contents", "Resources", "installation.json")
+ISOLATED_INSTALL = os.path.isfile(_PROFILE_FILE)
+if ISOLATED_INSTALL:
+    with open(_PROFILE_FILE, encoding="utf-8") as stream:
+        profile = json.load(stream)
+    if profile != {"edition": "ayugram-isolated", "schema": 1}:
+        raise ValueError("Unsupported installation profile")
+    PRIVATE_STATE_DIR = os.path.expanduser("~/Library/Application Support/TelegramManagerAyu")
+    ROOT_DIR = os.path.join(PRIVATE_STATE_DIR, "TG")
+    DATA_DIR = os.path.join(PRIVATE_STATE_DIR, "data")
+    for directory in (PRIVATE_STATE_DIR, ROOT_DIR, DATA_DIR):
+        if os.path.islink(directory):
+            raise ValueError("Isolated storage must not be a symbolic link")
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        os.chmod(directory, 0o700)
+    PATH_WARNINGS = []
+else:
+    _tg_sub = os.path.join(_PARENT_DIR, "TG")
+    ROOT_DIR = _tg_sub if os.path.isdir(_tg_sub) else _PARENT_DIR
+    _data_sub = os.path.join(_PARENT_DIR, "data")
+    DATA_DIR = _data_sub if os.path.isdir(_data_sub) else _PARENT_DIR
+    PATH_WARNINGS = []
+    if ROOT_DIR == _PARENT_DIR:
+        PATH_WARNINGS.append(f"TG/ folder not found — scanning the whole parent dir instead: {_PARENT_DIR}")
+    if DATA_DIR == _PARENT_DIR:
+        PATH_WARNINGS.append(f"data/ folder not found — config/backups fall back to: {_PARENT_DIR}")
+    PRIVATE_STATE_DIR = os.path.expanduser("~/Library/Application Support/TelegramManager")
 METADATA_FILE    = os.path.join(PRIVATE_STATE_DIR, "manager_data.json")
 CONFIG_FILE      = os.path.join(DATA_DIR, "manager_config.json")
 WORKSPACES_FILE  = os.path.join(PRIVATE_STATE_DIR, "manager_workspaces.json")
@@ -85,7 +101,7 @@ except OSError:
 
 DEFAULT_CONFIG = {
     "app_source":            "",
-    "port":                  8477,
+    "port":                  8478 if ISOLATED_INSTALL else 8477,
     "extra_scan_dirs":       [],
     # Session Keeper
     "keeper_enabled":        False,
@@ -266,7 +282,7 @@ def save_config(cfg):
     with _config_lock:
         _save_json_atomic(CONFIG_FILE, cfg)
     # Mirror port to true parent dir so the Swift launcher always finds it (atomic write)
-    if DATA_DIR != _PARENT_DIR:
+    if not ISOLATED_INSTALL and DATA_DIR != _PARENT_DIR:
         try:
             mirror = os.path.join(_PARENT_DIR, "manager_config.json")
             mirror_tmp = mirror + ".tmp"
