@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import threading
 import time
+import tempfile
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 from datetime import datetime
@@ -31,6 +32,8 @@ import sys
 sys.modules.setdefault("server", sys.modules[__name__])
 
 import state
+import ayugram
+import updates
 from state import (
     ROOT_DIR, DATA_DIR, PATH_WARNINGS,
     METADATA_FILE, WORKSPACES_FILE,
@@ -45,7 +48,7 @@ from state import (
 )
 from proxy import apply_proxy, _recover_stale_proxy
 from backups import (list_backups, _last_backup_map, _resolve_backup_dir,
-                     delete_backup, restore_backup, backup_account)
+                     delete_backup, restore_backup, backup_account, recover_interrupted_restore)
 from keeper import _keeper_status, run_keeper_loop, trigger_keeper_now
 
 def choose_app_dialog(prompt_text, default_dir="/Applications", timeout=600):
@@ -336,28 +339,13 @@ def _verify_tdesktop_bundle(app_path):
 
 
 def _bundle_fingerprint(app_path):
-    """Small identity fingerprint for comparing a clone with its master.
-
-    It covers the executable, plist, and sealed-resource manifest, rather than
-    trusting the human-readable version alone.  The files are read only; no
-    app bundle is patched or re-signed by Telegram Manager.
-    """
-    files = (
-        "Contents/Info.plist",
-        "Contents/MacOS/Telegram",
-        "Contents/_CodeSignature/CodeResources",
-    )
-    digest = hashlib.sha256()
+    """Fingerprint all bundle content, including libraries and signing metadata."""
     try:
-        for relative in files:
-            path = os.path.join(app_path, relative)
-            digest.update(relative.encode() + b"\0")
-            with open(path, "rb") as f:
-                for block in iter(lambda: f.read(1024 * 1024), b""):
-                    digest.update(block)
-    except OSError:
+        if not os.path.isfile(os.path.join(app_path, 'Contents', 'MacOS', 'Telegram')):
+            return None
+        return ayugram.bundle_fingerprint(app_path)
+    except (OSError, ValueError):
         return None
-    return digest.hexdigest()
 
 
 def _clone_stamp_path(account_path):
@@ -374,6 +362,15 @@ def _read_clone_stamp(account_path):
         return None
 
 
+def _read_clone_fingerprint(account_path):
+    try:
+        with open(_clone_stamp_path(account_path), encoding='utf-8') as f:
+            value = json.load(f).get('clone_fingerprint')
+        return value if isinstance(value, str) else None
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
 def _write_clone_stamp(account_path, fingerprint):
     """Record which verified master created a disposable account clone."""
     if not fingerprint:
@@ -382,7 +379,9 @@ def _write_clone_stamp(account_path, fingerprint):
     temporary = destination + ".tmp"
     try:
         with open(temporary, "w", encoding="utf-8") as f:
-            json.dump({"master_fingerprint": fingerprint}, f)
+            app = find_account_app(account_path)
+            json.dump({"master_fingerprint": fingerprint,
+                       "clone_fingerprint": _bundle_fingerprint(app) if app else None}, f)
         os.replace(temporary, destination)
     except OSError as e:
         _log.warning("Could not write clone stamp for %s: %s", account_path, e)
@@ -471,13 +470,24 @@ def clone_app_to_folder(account_path, shared_app_path=None, app_name=None):
         return False
     # Strip Gatekeeper quarantine so macOS doesn't silently block launch
     subprocess.run(["xattr", "-dr", "com.apple.quarantine", app_dest], capture_output=True, timeout=120)
-    # NOTE: We deliberately do NOT patch Info.plist or re-sign here. Modifying the
-    # bundle in the per-open clone path triggers an APFS copy-on-write split and an
-    # ad-hoc re-sign that changes the app's code identity — which has corrupted tdata
-    # sessions in the past. The Dock display name is applied only via the explicit
-    # dock-name action (set_telegram_display_name), never on every open.
+    # Apply custom names once per fresh clone, then record its signed baseline.
+    with _meta_lock:
+        custom_name = metadata.get('dock_names', {}).get(account_path)
+    if custom_name and not _patch_app_display_name(app_dest, custom_name):
+        return False
     _write_clone_stamp(account_path, _bundle_fingerprint(shared_app_path))
-    return True
+    ok, _ = _disable_telegram_auto_updates(account_path, app_dest)
+    return ok
+
+def _account_app_paths(account_path):
+    """List every Telegram bundle so an alternate clone cannot hide a live client."""
+    try:
+        return [os.path.join(account_path, name) for name in sorted(os.listdir(account_path))
+                if name.endswith('.app') and os.path.isfile(os.path.join(
+                    account_path, name, 'Contents', 'MacOS', 'Telegram'))]
+    except OSError:
+        return []
+
 
 def find_account_app(account_path: str):
     """Return the path to the Telegram app bundle inside account_path, or None.
@@ -489,16 +499,8 @@ def find_account_app(account_path: str):
     std = os.path.join(account_path, "Telegram.app")
     if os.path.isdir(std):
         return std
-    try:
-        for entry in sorted(os.listdir(account_path)):
-            if not entry.endswith(".app"):
-                continue
-            candidate = os.path.join(account_path, entry)
-            if os.path.isfile(os.path.join(candidate, "Contents", "MacOS", "Telegram")):
-                return candidate
-    except OSError:
-        pass
-    return None
+    apps = _account_app_paths(account_path)
+    return apps[0] if apps else None
 
 
 def _find_fallback_app_source(accs):
@@ -525,33 +527,90 @@ def remove_cloned_app(account_path):
     return _remove_account_clone(account_path)
 
 
+def _clear_tdata_caches(tdata):
+    """Remove only known Telegram cache dirs; preserve any AyuGram history tree."""
+    if os.path.lexists(os.path.join(tdata, "ayudata.db")):
+        return True, 0
+    targets = _find_cache_dirs(tdata)
+    freed = 0
+    ok = True
+    for target in targets:
+        before = get_folder_size(target)
+        try:
+            result = subprocess.run(["rm", "-rf", target], capture_output=True, timeout=120)
+            remaining = get_folder_size(target)
+            freed += max(0, before - remaining)
+            if result.returncode or os.path.lexists(target):
+                ok = False
+                _log.warning("Could not completely remove cache directory: %s", target)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            ok = False
+            freed += max(0, before - get_folder_size(target))
+            _log.warning("Cache cleanup failed for %s: %s", target, error)
+    return ok, freed
+
+
 @serialize_account_op(lambda account_path, threshold_mb=0: account_path, (False, 0))
 def clear_account_caches(account_path, threshold_mb=0):
-    """Delete all regenerable caches inside the account's tdata (media, file,
-    emoji and the bot-WebView Chromium caches) — never session/login data.
-    Refuses while Telegram is running. threshold_mb>0 clears only when the
-    total exceeds it; 0 = always. Returns (cleared, freed_bytes)."""
+    """Clear Telegram caches only after a fresh closed-client check."""
     if not is_managed_account_path(account_path):
         return False, 0
+    output = _get_ps_output(force=True, allow_stale=False)
+    if output is None or _telegram_pid_from_ps_output(account_path, output):
+        return False, 0
     tdata = os.path.join(account_path, "TelegramForcePortable", "tdata")
-    if not os.path.isdir(tdata):
+    total = sum(get_folder_size(t) for t in _find_cache_dirs(tdata))
+    if threshold_mb > 0 and total < threshold_mb * 1_000_000:
         return False, 0
-    if find_telegram_pid(account_path):
-        _log.info("clear_account_caches: skipped — Telegram running for %s", account_path)
-        return False, 0
-    real_tdata = os.path.realpath(tdata)
-    targets = [target for target in _find_cache_dirs(tdata)
-               if not os.path.islink(target)
-               and os.path.realpath(target).startswith(real_tdata + os.sep)]
-    total = sum(get_folder_size(t) for t in targets)
-    if threshold_mb > 0 and total < threshold_mb * 1024 * 1024:
-        return False, 0
-    for t in targets:
-        subprocess.run(["rm", "-rf", t], capture_output=True, timeout=120)
+    ok, freed = _clear_tdata_caches(tdata)
     invalidate_tdata_size(account_path)
-    _log.info("Cleared %d cache dir(s) for %s (freed %s)",
-              len(targets), os.path.basename(account_path), human_size(total))
-    return True, total
+    with _disk_stats_lock:
+        _disk_stats["ts"] = 0.0
+    _log.info("Cache cleanup for %s: freed %s; complete=%s", os.path.basename(account_path), human_size(freed), ok)
+    return ok, freed
+
+
+def _account_backup_tdata(account_path):
+    """Known recovery copies only; never descend into isolated AyuGram profiles."""
+    portable = os.path.join(account_path, "TelegramForcePortable")
+    for parent, names in ((account_path, ("backup", "backup v2")),
+                          (portable, tuple(os.listdir(portable)))):
+        for name in names:
+            if parent == portable and not name.startswith("tdata.bak."):
+                continue
+            directory = os.path.join(parent, name)
+            tdata = os.path.join(directory, "tdata") if parent == account_path else directory
+            if (os.path.isdir(tdata) and not os.path.islink(directory)
+                    and not os.path.islink(tdata)):
+                yield tdata
+
+
+@serialize_account_op(lambda account_path: account_path, (False, 0))
+def clear_account_backup_caches(account_path):
+    if not is_managed_account_path(account_path):
+        return False, 0
+    output = _get_ps_output(force=True, allow_stale=False)
+    if output is None or _telegram_pid_from_ps_output(account_path, output):
+        return False, 0
+    ok, freed = True, 0
+    for tdata in _account_backup_tdata(account_path):
+        done, reclaimed = _clear_tdata_caches(tdata)
+        ok = ok and done
+        freed += reclaimed
+    return ok, freed
+
+
+def clear_managed_backup_caches(backup_path):
+    real = _resolve_backup_dir(backup_path)
+    if real is None:
+        return False, 0
+    lock = state._account_path_lock(real)
+    if not lock.acquire(blocking=False):
+        return False, 0
+    try:
+        return _clear_tdata_caches(os.path.join(real, "tdata"))
+    finally:
+        lock.release()
 
 
 def _natural_name_key(name):
@@ -621,6 +680,12 @@ def scan_accounts():
             if full_path in seen_paths:
                 continue
 
+            restore_marker = os.path.join(full_path, "TelegramForcePortable", ".tdata-restore.json")
+            if os.path.lexists(restore_marker) and not recover_interrupted_restore(full_path):
+                continue
+            ayu_restore_marker = os.path.join(full_path, ".ayugram", "TelegramForcePortable", ".tdata-restore.json")
+            if os.path.lexists(ayu_restore_marker) and not recover_interrupted_restore(full_path, client="AyuGram"):
+                continue
             tdata_path    = os.path.join(full_path, "TelegramForcePortable", "tdata")
             raw_tdata     = os.path.join(full_path, "tdata")
             app_path      = find_account_app(full_path)
@@ -658,6 +723,10 @@ def scan_accounts():
                     "group":            group,
                     "status":           status,
                     "running":          _is_running(full_path, app_path),
+                    "running_client":   "AyuGram" if _pid_for_executable(ayugram.executable(full_path), _ps_out) else "Telegram",
+                    "telegram_running": bool(_client_pid_from_ps_output(full_path, _ps_out, "Telegram")),
+                    "ayugram_running": bool(_client_pid_from_ps_output(full_path, _ps_out, "AyuGram")),
+                    "ayugram_has_profile": os.path.isdir(os.path.join(ayugram.runtime_dir(full_path), "TelegramForcePortable", "tdata")),
                     "has_app":          has_app,
                     "has_tdata":        has_tdata or has_raw_tdata,
                     "can_backup":       has_tdata,
@@ -733,16 +802,30 @@ def _compute_disk_stats():
     tg_size     = get_folder_size(ROOT_DIR)
     backup_root = os.path.join(DATA_DIR, "Backups")
     backup_size = get_folder_size(backup_root) if os.path.isdir(backup_root) else 0
+    master_size = get_folder_size(SHARED_APPS_DIR)
     accs        = scan_accounts_cached()
-    # Full reclaimable cache (media + file + emoji + WebView), not just
-    # media_cache — this is the number the "Clear Caches" button would free.
+    # Logical size of eligible cache files; APFS may share their disk blocks.
     # Fine to walk here: disk stats are background-refreshed on a 60s cache.
     cache_total = 0
-    for a in accs:
-        tdata = os.path.join(a["path"], "TelegramForcePortable", "tdata")
-        if os.path.isdir(tdata):
-            cache_total += sum(get_folder_size(t) for t in _find_cache_dirs(tdata))
-    result = {"tg_size": tg_size, "backup_size": backup_size, "cache_total": cache_total}
+    backup_cache = 0
+    for account in accs:
+        current = os.path.join(account["path"], "TelegramForcePortable", "tdata")
+        if os.path.isdir(current):
+            for tdata in (current, *_account_backup_tdata(account["path"])):
+                if os.path.lexists(os.path.join(tdata, "ayudata.db")):
+                    continue
+                size = sum(get_folder_size(target) for target in _find_cache_dirs(tdata))
+                cache_total += size
+                if tdata != current:
+                    backup_cache += size
+    for backup in list_backups():
+        tdata = os.path.join(backup["backup_path"], "tdata")
+        if not os.path.lexists(os.path.join(tdata, "ayudata.db")):
+            size = sum(get_folder_size(target) for target in _find_cache_dirs(tdata))
+            cache_total += size
+            backup_cache += size
+    result = {"tg_size": tg_size, "backup_size": backup_size, "master_size": master_size,
+              "cache_total": cache_total, "backup_cache": backup_cache}
     with _disk_stats_lock:
         _disk_stats["data"] = result
         _disk_stats["ts"]   = time.time()
@@ -847,12 +930,14 @@ def _remove_clone_if_idle(path):
             if _watcher_grace.get(path, 0) > time.time():
                 return False
         ps_output = _get_ps_output(force=True, allow_stale=False)
-        if ps_output is None or _telegram_pid_from_ps_output(path, ps_output):
+        if ps_output is None or _client_pid_from_ps_output(path, ps_output, "Telegram"):
             return False
         if not get_shared_app():
             return False
         app = find_account_app(path)
         if app:
+            if _newer_account_version(path, get_shared_app(), app):
+                return False
             return _remove_account_clone(path, app)
         return False
     finally:
@@ -893,6 +978,18 @@ def _app_watcher_loop():
                 p = acc["path"]
                 live_paths.add(p)
 
+                ayu_key = (p, 'AyuGram')
+                if _client_pid_from_ps_output(p, ps_output, 'AyuGram'):
+                    any_running = True
+                    idle_counts[ayu_key] = 0
+                else:
+                    idle_counts[ayu_key] = idle_counts.get(ayu_key, 0) + 1
+                    if idle_counts[ayu_key] >= _IDLE_CYCLES_REQUIRED:
+                        if ayugram.remove_clone_if_idle(p):
+                            _log.info('Watcher: removed idle AyuGram clone for %s', acc['name'])
+                            invalidate_scan_cache()
+                        idle_counts[ayu_key] = 0
+
                 # Re-check grace freshly under the lock right before deciding —
                 # open_account may have armed the exemption after our snapshot.
                 with _watcher_grace_lock:
@@ -903,7 +1000,7 @@ def _app_watcher_loop():
                     continue
 
                 # Re-check the live process state immediately before deleting.
-                if _telegram_pid_from_ps_output(p, ps_output):
+                if _client_pid_from_ps_output(p, ps_output, "Telegram"):
                     any_running = True
                     idle_counts[p] = 0
                     continue
@@ -922,7 +1019,7 @@ def _app_watcher_loop():
                 idle_counts[p] = 0
 
             # Drop idle counters for accounts that no longer exist
-            for gone in [p for p in idle_counts if p not in live_paths]:
+            for gone in [p for p in idle_counts if (p[0] if isinstance(p, tuple) else p) not in live_paths]:
                 del idle_counts[gone]
         except Exception as e:
             _log.warning("_app_watcher_loop: unhandled error: %s", e, exc_info=True)
@@ -941,9 +1038,10 @@ def _get_ps_output(force=False, allow_stale=True):
         if not force and time.time() - _ps_cache["ts"] < _PS_TTL:
             return _ps_cache["output"]
     try:
-        output = subprocess.run(
+        result = subprocess.run(
             ["ps", "-e", "-o", "pid=,args="], capture_output=True, text=True, timeout=15
-        ).stdout
+        )
+        output = result.stdout if result.returncode == 0 and isinstance(result.stdout, str) else ""
     except Exception as e:
         # Do NOT advance the timestamp so the next call retries immediately.
         _log.warning("_get_ps_output: ps failed (%s); returning last cached output", e)
@@ -960,11 +1058,20 @@ def _get_ps_output(force=False, allow_stale=True):
     return output
 
 def _telegram_pid_from_ps_output(account_path, ps_output, app_path=None):
-    """Return a Telegram PID only when argv starts with this account's binary."""
-    app_path = app_path or find_account_app(account_path)
-    if not app_path or not ps_output:
+    """Return a PID only for this account's exact Telegram or AyuGram binary."""
+    pid = _client_pid_from_ps_output(account_path, ps_output, 'Telegram')
+    if pid:
+        return pid
+    if app_path:
+        pid = _pid_for_executable(os.path.join(app_path, 'Contents', 'MacOS', 'Telegram'), ps_output)
+        if pid:
+            return pid
+    return _client_pid_from_ps_output(account_path, ps_output, 'AyuGram')
+
+
+def _pid_for_executable(executable, ps_output):
+    if not ps_output:
         return None
-    executable = os.path.join(app_path, "Contents", "MacOS", "Telegram")
     for line in ps_output.splitlines():
         try:
             pid_text, args = line.strip().split(None, 1)
@@ -973,6 +1080,42 @@ def _telegram_pid_from_ps_output(account_path, ps_output, app_path=None):
         except (ValueError, IndexError):
             continue
     return None
+
+
+def _client_pid_from_ps_output(account_path, ps_output, client):
+    if client == "AyuGram":
+        executables = ayugram.executables(account_path)
+        root = os.path.join(account_path, '.ayugram')
+    elif client == "Telegram":
+        apps = _account_app_paths(account_path)
+        selected = find_account_app(account_path)
+        if selected and selected not in apps:
+            apps.append(selected)
+        executables = [os.path.join(app, 'Contents', 'MacOS', 'Telegram') for app in apps]
+        root = account_path
+    else:
+        return None
+    for executable in executables:
+        pid = _pid_for_executable(executable, ps_output)
+        if pid:
+            return pid
+    # A running executable can survive its bundle being moved or removed.
+    names = (ayugram.INLINE_EXECUTABLE, 'AyuGram') if client == 'AyuGram' else ('Telegram',)
+    pattern = re.compile(r'^' + re.escape(os.path.join(root, ''))
+                         + r'[^/]+\.app/Contents/MacOS/(?:'
+                         + '|'.join(re.escape(name) for name in names) + r')(?: |$)')
+    for line in (ps_output or '').splitlines():
+        try:
+            pid_text, args = line.strip().split(None, 1)
+            if pattern.match(args):
+                return int(pid_text)
+        except (ValueError, IndexError):
+            continue
+    return None
+
+
+def find_client_pid(account_path, client, fresh=False):
+    return _client_pid_from_ps_output(account_path, _get_ps_output(force=fresh, allow_stale=not fresh), client)
 
 
 def find_telegram_pid(account_path, fresh=False):
@@ -1019,30 +1162,85 @@ def invalidate_scan_cache():
     with _scan_cache_lock:
         _scan_cache["data"] = None
 
-@serialize_account_op(lambda path: path, (False, _BUSY_MSG))
-def open_account(path):
+def _disable_telegram_auto_updates(account_path, app, client="Telegram"):
+    """Shared official external-updater marker, outside either client's tdata."""
+    directory = os.path.join(account_path, 'externalupdater.d')
+    marker = os.path.join(directory, 'telegram-manager')
+    if not os.path.realpath(app).startswith(os.path.realpath(account_path) + os.sep):
+        return False, f'{client} app is outside its account folder'
+    for path in (directory, marker):
+        if os.path.islink(path) or not os.path.realpath(path).startswith(os.path.realpath(account_path) + os.sep):
+            return False, f'Unsafe {client} updater control path'
+    temporary = None
+    try:
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        content = '\n'.join(dict.fromkeys((os.path.abspath(app), os.path.realpath(app)))) + '\n'
+        if os.path.isfile(marker):
+            with open(marker, encoding='utf-8') as f:
+                if f.read() == content:
+                    return True, ''
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=directory, delete=False) as f:
+            temporary = f.name
+            f.write(content)
+        os.replace(temporary, marker)
+        return True, ''
+    except OSError as e:
+        return False, f'Could not disable {client} automatic updates: {e}'
+    finally:
+        if temporary and os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+@updates.guard_client_launch
+@serialize_account_op(lambda path, launched_process=None: path, (False, _BUSY_MSG))
+def open_account(path, launched_process=None):
     """Open the Telegram account at path. Returns (ok, message)."""
     _log.info("Opening account: %s", path)
-    if find_telegram_pid(path, fresh=True):
+    if not recover_interrupted_restore(path):
+        return False, "Could not recover interrupted restore — refusing to start a fresh session"
+    if len(_account_app_paths(path)) > 1:
+        return False, 'Multiple Telegram app clones found; cannot launch this account safely'
+    process_output = _get_ps_output(force=True, allow_stale=False)
+    if process_output is None:
+        return False, 'Could not check running apps — try again'
+    if _client_pid_from_ps_output(path, process_output, 'Telegram'):
         _log.info("open_account: already running for %s", path)
         return True, "already running"
     # Cover cloning and `open -n`, not merely the period after launch returns:
     # the watcher otherwise can remove a new clone before its process appears.
     _watcher_exempt(path)
     app = find_account_app(path)
+    if app:
+        executable = os.path.join(app, 'Contents', 'MacOS', 'Telegram')
+        for component in (app, os.path.join(app, 'Contents'), os.path.dirname(executable), executable):
+            if os.path.islink(component) or not os.path.realpath(component).startswith(os.path.realpath(path) + os.sep):
+                return False, 'Telegram app contains an unsafe path'
     # A leftover clone must come from this exact shared master.  Version text
     # alone is not enough: a failed updater can leave a modified bundle with
     # the same version number and an invalid signature.
     shared = get_shared_app()
+    newer_version = _newer_account_version(path, shared or app, app)
+    if newer_version:
+        msg = (f"This account requires Telegram {newer_version} or newer. "
+               f"The available app is {_bundle_version(shared or app)}. Update the shared app in Settings first "
+               "to avoid downgrading this session.")
+        _log.warning("open_account: %s (%s)", msg, path)
+        return False, msg
     if app and shared:
         master_fingerprint = _bundle_fingerprint(shared)
-        if master_fingerprint and _read_clone_stamp(path) != master_fingerprint:
+        if not master_fingerprint:
+            return False, 'Could not verify the shared Telegram app'
+        if (_read_clone_stamp(path) != master_fingerprint
+                or not _read_clone_fingerprint(path)
+                or _bundle_fingerprint(app) != _read_clone_fingerprint(path)):
             _log.info("open_account: replacing clone that does not match shared master for %s", path)
             if not _remove_account_clone(path, app):
                 msg = "Could not remove outdated Telegram clone"
                 _log.warning("open_account: %s (%s)", msg, path)
                 return False, msg
             app = None
+    elif app and _read_clone_fingerprint(path) and _bundle_fingerprint(app) != _read_clone_fingerprint(path):
+        return False, 'Telegram clone changed; set up a verified shared app before opening this account'
     if not app:
         with _meta_lock:
             dock_name = metadata.get("dock_names", {}).get(path) or os.path.basename(path)
@@ -1067,8 +1265,11 @@ def open_account(path):
                       "set the proxy inside Telegram, or enable it in Settings", path)
 
     try:
+        ok, error = _disable_telegram_auto_updates(path, app)
+        if not ok:
+            return False, error
         # -n launches a new instance of this specific bundle (not by app name).
-        r = subprocess.run(["open", "-n", app], capture_output=True, timeout=10)
+        r = subprocess.run(["open", "-n", app, "--args", "-noupdate"], capture_output=True, timeout=10)
         if r.returncode != 0:
             err = r.stderr.decode(errors="replace").strip() or "unknown error"
             _log.error("open_account: 'open' command failed for %s: %s", path, err)
@@ -1080,7 +1281,8 @@ def open_account(path):
     # makes Open/Close linear: a Close received after Open succeeds has a PID
     # to terminate instead of silently missing a still-starting app.
     for _ in range(20):
-        if find_telegram_pid(path, fresh=True):
+        pid = find_client_pid(path, "Telegram", fresh=True)
+        if pid:
             break
         time.sleep(0.5)
     else:
@@ -1092,6 +1294,8 @@ def open_account(path):
         save_metadata(metadata)
 
     invalidate_tdata_size(path)   # a running account writes tdata; drop stale size
+    if launched_process is not None:
+        launched_process.update(pid=pid, executable=os.path.join(app, 'Contents', 'MacOS', 'Telegram'))
     return True, ""
 
 
@@ -1302,45 +1506,96 @@ def _restore_files(snapshots):
 
 # ── Per-process Telegram control ───────────────────────────────────────────
 
-def _pid_matches_account(pid, account_path):
+def _pid_matches_account(pid, account_path, client=None):
     """Return True/False, or None when a fresh process check is unavailable."""
     output = _get_ps_output(force=True, allow_stale=False)
     if output is None:
         return None
-    return _telegram_pid_from_ps_output(account_path, output) == pid
+    selected = '\n'.join(line for line in output.splitlines()
+                         if line.strip().split(None, 1)[:1] == [str(pid)])
+    return (_client_pid_from_ps_output(account_path, selected, client) if client
+            else _telegram_pid_from_ps_output(account_path, selected)) == pid
 
 
-def kill_account(account_path):
-    """Kill only the Telegram process for this account."""
-    _clear_watcher_exempt(account_path)
-    pid = find_telegram_pid(account_path, fresh=True)
-    if not pid or _pid_matches_account(pid, account_path) is not True:
+def _request_client_quit(pid, account_path, client):
+    output = _get_ps_output(force=True, allow_stale=False)
+    if output is None:
+        return
+    selected_client = client
+    if not selected_client:
+        selected_client = "AyuGram" if _client_pid_from_ps_output(account_path, output, "AyuGram") == pid else "Telegram"
+    if selected_client == "AyuGram":
+        candidates = ayugram.executables(account_path)
+    else:
+        candidates = [os.path.join(app, 'Contents', 'MacOS', 'Telegram')
+                      for app in _account_app_paths(account_path)]
+    executable = next((path for path in candidates if _pid_for_executable(path, output) == pid), None)
+    if not executable:
+        return
+    helper = os.path.join(os.path.dirname(__file__), '..', 'MacOS', 'launcher_swift')
+    source = os.path.join(os.path.dirname(__file__), 'launcher.swift')
+    _log.info("Requesting Quit for %s PID %d (%s)", selected_client, pid, account_path)
+    try:
+        if os.path.isfile(helper) and os.path.getmtime(helper) >= os.path.getmtime(source):
+            subprocess.run([helper, '--quit-pid', str(pid), executable], capture_output=True, timeout=5)
+        else:
+            _log.warning('Native Quit helper unavailable; waiting before forced termination')
+    except (OSError, subprocess.TimeoutExpired) as e:
+        _log.warning('Native Quit request failed for PID %d: %s', pid, e)
+
+
+
+def kill_account(account_path, client=None, expected_pid=None, expected_executable=None):
+    """Request normal Quit for the exact client, escalating only after a timeout."""
+    def matches(pid, path):
+        return _pid_matches_account(pid, path, client) if client else _pid_matches_account(pid, path)
+    if client not in (None, "Telegram", "AyuGram"):
         return False
-    _log.info("Killing Telegram PID %d for account %s", pid, account_path)
-    subprocess.run(["kill", str(pid)], capture_output=True, timeout=10)
+    if expected_pid is not None:
+        output = _get_ps_output(force=True, allow_stale=False)
+        if (output is None or not expected_executable
+                or _pid_for_executable(expected_executable, output) != expected_pid):
+            return False
+    if client != "AyuGram":
+        _clear_watcher_exempt(account_path)
+    pid = find_client_pid(account_path, client, fresh=True) if client else find_telegram_pid(account_path, fresh=True)
+    if expected_pid is not None and pid != expected_pid:
+        return False
+    if not pid or matches(pid, account_path) is not True:
+        return False
+    _request_client_quit(pid, account_path, client)
 
     def _cleanup(p, pid):
         # Verify the executable identity before every signal: a recycled PID
         # must never receive SIGKILL meant for Telegram.
         deadline = time.time() + 8
-        state = _pid_matches_account(pid, p)
+        state = matches(pid, p)
         while state is True and time.time() < deadline:
             time.sleep(0.5)
-            state = _pid_matches_account(pid, p)
+            state = matches(pid, p)
         if state is True:
-            _log.warning("kill_account: PID %d ignored SIGTERM — sending SIGKILL", pid)
-            if _pid_matches_account(pid, p) is True:
-                subprocess.run(["kill", "-9", str(pid)], capture_output=True, timeout=10)
+            _log.warning("kill_account: PID %d did not respond to Quit — sending SIGTERM", pid)
+            if matches(pid, p) is True:
+                subprocess.run(["kill", str(pid)], capture_output=True, timeout=10)
             deadline = time.time() + 4
-            state = _pid_matches_account(pid, p)
+            state = matches(pid, p)
             while state is True and time.time() < deadline:
                 time.sleep(0.5)
-                state = _pid_matches_account(pid, p)
+                state = matches(pid, p)
+            if state is True and matches(pid, p) is True:
+                subprocess.run(["kill", "-9", str(pid)], capture_output=True, timeout=10)
+                state = matches(pid, p)
         # Do not delete the clone if the process list is unavailable, Telegram
         # is still alive, or this account was reopened under another PID.
+        if state is None or state is True:
+            return
+        if client == "AyuGram":
+            ayugram.remove_clone_if_idle(p)
+            invalidate_scan_cache()
+            return
         with _watcher_grace_lock:
             reopened = _watcher_grace.get(p, 0) > time.time()
-        if reopened or state is None or state is True or find_telegram_pid(p, fresh=True):
+        if reopened or find_client_pid(p, 'Telegram', fresh=True):
             return
         _remove_clone_if_idle(p)
         invalidate_tdata_size(p)   # tdata settled (and cache may auto-clear on close)
@@ -1375,20 +1630,33 @@ def _patch_app_display_name(app_path: str, display_name: str) -> bool:
     if r.returncode != 0:
         _log.warning("_patch_app_display_name: codesign failed for %s: %s",
                      app_path, r.stderr.decode(errors="replace").strip())
+        return False
     return True
 
 
+@serialize_account_op(lambda folder_path, display_name: folder_path, (False, _BUSY_MSG))
 def set_telegram_display_name(folder_path, display_name):
     """Set the Dock / Finder name for the app bundle inside folder_path.
 
     Locates the bundle via find_account_app() (handles renamed bundles),
     patches Info.plist, and re-signs with an ad-hoc signature.
     """
+    output = _get_ps_output(force=True, allow_stale=False)
+    if output is None or _client_pid_from_ps_output(folder_path, output, 'Telegram'):
+        return False, 'Close Telegram before changing its Dock name; process status must be available'
+    if len(_account_app_paths(folder_path)) > 1:
+        return False, 'Multiple Telegram app clones found; cannot change its Dock name safely'
     app_path = find_account_app(folder_path)
     if not app_path:
         return False, "No Telegram app bundle found in this account folder"
+    fingerprint = _read_clone_stamp(folder_path)
+    if fingerprint and (not _read_clone_fingerprint(folder_path)
+                        or _read_clone_fingerprint(folder_path) != _bundle_fingerprint(app_path)):
+        return False, 'Open this account to refresh its app before changing its Dock name'
     ok = _patch_app_display_name(app_path, display_name)
     if ok:
+        if fingerprint:
+            _write_clone_stamp(folder_path, fingerprint)
         return True, f'Dock name set to "{display_name}"'
     return False, "Info.plist not found"
 
@@ -1410,57 +1678,56 @@ def _relocate_account(old_path, new_path):
     if os.path.exists(new_path):
         return False, f'A folder named "{os.path.basename(new_path)}" already exists'
 
-    # Phase 1: build updated metadata without touching the global dict yet
-    with _meta_lock:
+    # Keep snapshots, persistence and rollback under the same locks.
+    with _meta_lock, _ws_lock:
+        # Phase 1: build updated metadata without touching the global dict yet
         new_meta = copy.deepcopy(metadata)
-    for section in ("notes", "usernames", "order", "colors",
-                    "last_opened", "proxies", "dock_names", "avatars", "account_ids"):
-        d = new_meta.get(section, {})
-        if old_path in d:
-            d[new_path] = d.pop(old_path)
-    pinned = new_meta.get("pinned", [])
-    if old_path in pinned:
-        pinned[pinned.index(old_path)] = new_path
-    folder_pinned = new_meta.get("folder_pinned", [])
-    if old_path in folder_pinned:
-        folder_pinned[folder_pinned.index(old_path)] = new_path
-    with _ws_lock:
+        for section in ("notes", "usernames", "order", "colors",
+                        "last_opened", "proxies", "dock_names", "avatars", "account_ids"):
+            d = new_meta.get(section, {})
+            if old_path in d:
+                d[new_path] = d.pop(old_path)
+        pinned = new_meta.get("pinned", [])
+        if old_path in pinned:
+            pinned[pinned.index(old_path)] = new_path
+        folder_pinned = new_meta.get("folder_pinned", [])
+        if old_path in folder_pinned:
+            folder_pinned[folder_pinned.index(old_path)] = new_path
         old_workspaces = load_workspaces()
-    new_workspaces = copy.deepcopy(old_workspaces)
-    for workspace in new_workspaces.values():
-        accounts = workspace.get("accounts", [])
-        workspace["accounts"] = [new_path if path == old_path else path for path in accounts]
+        new_workspaces = copy.deepcopy(old_workspaces)
+        for workspace in new_workspaces.values():
+            accounts = workspace.get("accounts", [])
+            workspace["accounts"] = [new_path if path == old_path else path for path in accounts]
 
-    # Phase 2: rename folder on disk
-    try:
-        os.rename(old_path, new_path)
-    except Exception as e:
-        _log.warning("account relocation failed: %s", e)
-        return False, str(e)
-
-    # Phase 3: persist metadata and workspace references (atomic .tmp → replace)
-    try:
-        save_metadata(new_meta)
-        save_workspaces(new_workspaces)
-    except Exception as e:
-        # Undo the folder rename so disk and metadata stay consistent
+        # Phase 2: rename folder on disk
         try:
-            os.rename(new_path, old_path)
-            _log.warning("account relocation: metadata save failed (%s); folder move undone", e)
-        except Exception as undo_e:
-            _log.error(
-                "account relocation: CRITICAL — folder is at %s but metadata save failed (%s) "
-                "and undo also failed (%s). Manual fix required.", new_path, e, undo_e
-            )
-        try:
-            save_metadata(metadata)
-            save_workspaces(old_workspaces)
-        except Exception as rollback_error:
-            _log.error("account relocation: state rollback failed: %s", rollback_error)
-        return False, f"Could not save metadata: {e}"
+            os.rename(old_path, new_path)
+        except Exception as e:
+            _log.warning("account relocation failed: %s", e)
+            return False, str(e)
 
-    # Commit: update in-memory global only after both disk operations succeeded
-    with _meta_lock:
+        # Phase 3: persist metadata and workspace references (atomic .tmp → replace)
+        try:
+            save_metadata(new_meta)
+            save_workspaces(new_workspaces)
+        except Exception as e:
+            # Undo the folder rename so disk and metadata stay consistent
+            try:
+                os.rename(new_path, old_path)
+                _log.warning("account relocation: metadata save failed (%s); folder move undone", e)
+            except Exception as undo_e:
+                _log.error(
+                    "account relocation: CRITICAL — folder is at %s but metadata save failed (%s) "
+                    "and undo also failed (%s). Manual fix required.", new_path, e, undo_e
+                )
+            try:
+                save_metadata(metadata)
+                save_workspaces(old_workspaces)
+            except Exception as rollback_error:
+                _log.error("account relocation: state rollback failed: %s", rollback_error)
+            return False, f"Could not save metadata: {e}"
+
+        # Commit: update in-memory global only after both disk operations succeeded
         metadata.clear()
         metadata.update(new_meta)
 
@@ -1569,13 +1836,6 @@ def create_account(name, parent_path, open_after=True):
     if os.path.exists(folder_path):
         return False, f'A folder named "{name}" already exists in that location'
 
-    # Create account folder + TelegramForcePortable marker
-    try:
-        os.makedirs(folder_path, exist_ok=True)
-        os.makedirs(os.path.join(folder_path, "TelegramForcePortable"), exist_ok=True)
-    except Exception as e:
-        return False, f"Could not create folder: {e}"
-
     # Copy Telegram.app from source, naming the bundle after the account.
     # Priority: explicit config → shared master (incl. sibling auto-detect) → existing account copy
     app_source = config.get("app_source", "")
@@ -1596,8 +1856,14 @@ def create_account(name, parent_path, open_after=True):
 
     type_err = _wrong_app_type_error(app_source)
     if type_err:
-        subprocess.run(["rm", "-rf", folder_path], capture_output=True, timeout=300)
         return False, type_err
+
+    # Create account folder + TelegramForcePortable marker
+    try:
+        os.makedirs(folder_path)
+        os.makedirs(os.path.join(folder_path, "TelegramForcePortable"), exist_ok=True)
+    except Exception as e:
+        return False, f"Could not create folder: {e}"
 
     safe_bundle = _safe_bundle_name(name, os.path.basename(folder_path))
     app_dest = os.path.join(folder_path, safe_bundle + ".app")
@@ -1608,6 +1874,9 @@ def create_account(name, parent_path, open_after=True):
 
     # Patch Info.plist so the Dock shows the account name
     _patch_app_display_name(app_dest, name)
+    ok, err = _disable_telegram_auto_updates(folder_path, app_dest)
+    if not ok:
+        return False, err
 
     # Bust the scan cache so the new account appears immediately
     invalidate_scan_cache()
@@ -1649,10 +1918,11 @@ def duplicate_account(source_path, name):
 def close_all():
     running = [acc for acc in scan_accounts() if acc["running"]]
     for acc in running:
-        kill_account(acc["path"])
+        kill_account(acc["path"], client="Telegram")
+        kill_account(acc["path"], client="AyuGram")
 
     def _cleanup_all():
-        time.sleep(14)  # kill escalation (SIGTERM 8s + SIGKILL 4s) can take up to 12s
+        time.sleep(14)  # Quit grace 8s, then SIGTERM grace 4s before SIGKILL.
         for acc in scan_accounts():
             p = acc["path"]
             # Same grace the watcher honours — an account reopened during the
@@ -1694,6 +1964,9 @@ def setup_account(folder_path):
         if not ok:
             return False, f"Failed to copy Telegram.app: {err}"
 
+    ok, err = _disable_telegram_auto_updates(folder_path, app_dest)
+    if not ok:
+        return False, err
     os.makedirs(portable, exist_ok=True)
 
     if os.path.isdir(tdata_src) and not os.path.isdir(tdata_dest):
@@ -1758,6 +2031,26 @@ def _version_tuple(value):
     if not parts or any(not part.isdigit() for part in parts):
         return None
     return tuple(int(part) for part in (parts + ["0"] * 4)[:4])
+
+
+def _newer_account_version(account_path, shared_app, app=None):
+    """Never replace a self-updated account with an older shared master."""
+    master = _version_tuple(_bundle_version(shared_app)) if shared_app else None
+    if master is None:
+        return None
+    versions = [_bundle_version(app) if app else None, _staged_update_version(account_path),
+                ayugram.session_version(os.path.join(account_path, 'TelegramForcePortable', 'tdata'))]
+    log = os.path.join(account_path, "TelegramForcePortable", "log.txt")
+    try:
+        with open(log, encoding="utf-8", errors="replace") as f:
+            match = re.search(r"Launched version: (\d+)", f.read(65536))
+        if match:
+            number = int(match.group(1))
+            versions.append(f"{number // 1000000}.{number // 1000 % 1000}.{number % 1000}")
+    except OSError:
+        pass
+    newer = [v for v in versions if _version_tuple(v) is not None and _version_tuple(v) > master]
+    return max(newer, key=_version_tuple) if newer else None
 
 
 def _staged_update_version(account_path):
@@ -1835,6 +2128,11 @@ def _replace_shared_app(app_source):
     if not ok:
         subprocess.run(["rm", "-rf", temporary], capture_output=True, timeout=300)
         return False, "Copied Telegram.app did not pass verification: " + message
+    installed_version = _version_tuple(_bundle_version(shared))
+    copied_version = _version_tuple(_bundle_version(temporary))
+    if not copied_version or (installed_version and copied_version < installed_version):
+        subprocess.run(["rm", "-rf", temporary], capture_output=True, timeout=300)
+        return False, "Telegram downgrade or unreadable version refused; current app was preserved"
     # Quarantine metadata is not part of the code signature. Remove it only
     # after verification so every fresh clone launches without Gatekeeper noise.
     subprocess.run(["xattr", "-dr", "com.apple.quarantine", temporary],
@@ -1856,6 +2154,30 @@ def _replace_shared_app(app_source):
                 _log.critical("Could not restore previous shared Telegram.app: %s", restore_error)
         return False, f"Could not activate verified Telegram.app: {e}"
     return True, _bundle_version(shared) or "unknown"
+
+
+def check_telegram_update(app_source):
+    """Read-only version check; a version match is not proof of session compatibility."""
+    if not isinstance(app_source, str) or not is_allowed_app_source(app_source):
+        return {"success": False, "message": "Choose an approved Telegram Desktop app first"}
+    ok, message = _verify_tdesktop_bundle(app_source)
+    if not ok:
+        return {"success": False, "message": message}
+    candidate = _bundle_version(app_source)
+    candidate_key = _version_tuple(candidate)
+    shared = get_shared_app()
+    current = _bundle_version(shared) if shared else None
+    if not candidate_key:
+        return {"success": False, "message": "Could not read the new Telegram version"}
+    if current and _version_tuple(current) and candidate_key < _version_tuple(current):
+        return {"success": False, "message": f"Downgrade from Telegram {current} to {candidate} is not allowed"}
+    ayu_app = os.path.join(state.DATA_DIR, '_apps', 'macOS', 'AyuGram.app')
+    ayu_version = _bundle_version(ayu_app) if _bundle_identifier(ayu_app) == ayugram.BUNDLE_ID else None
+    ayu_key = _version_tuple(ayu_version)
+    warning = updates.compatibility(candidate, ayu_version)
+    return {"success": True, "telegram_version": candidate, "ayugram_version": ayu_version,
+            "warning": warning,
+            "acknowledgement": {"telegram_version": candidate, "ayugram_version": ayu_version}}
 
 
 def update_all_apps(app_source=""):
@@ -2298,6 +2620,13 @@ class RequestHandler(BaseHTTPRequestHandler):
                         "interval_days": config.get("keeper_interval_days", 30),
                         "open_seconds":  config.get("keeper_open_seconds", 120)})
 
+    def _get_api_client_update_status(self):
+        self.send_json(updates.monitor_status())
+
+    def _post_api_client_update_dismiss(self, data):
+        ok = updates.dismiss_monitor_notice(data.get("fingerprint", ""))
+        self.send_json({"success": ok, "message": "Notification dismissed" if ok else "The notification changed; refresh and try again"})
+
     def _get_api_alerts(self):
         accs   = scan_accounts_cached()
         alerts = [
@@ -2316,7 +2645,8 @@ class RequestHandler(BaseHTTPRequestHandler):
         tg_size     = disk.get("tg_size", 0)
         backup_size = disk.get("backup_size", 0)
         cache_total = disk.get("cache_total", 0)
-        grand_total = tg_size + backup_size
+        master_size = disk.get("master_size", 0)
+        grand_total = tg_size + backup_size + master_size
         total_tdata = sum(a.get("tdata_size", 0) for a in accs)
         self.send_json({
             "total":              len(accs),
@@ -2324,6 +2654,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             "running":            sum(1 for a in accs if a["running"]),
             "grand_total":        grand_total,
             "grand_total_human":  human_size(grand_total),
+            "size_kind":          "logical",
+            "volume_free_human":  human_size(shutil.disk_usage(DATA_DIR).free),
+            "master_size_human":  human_size(master_size) if master_size else "",
             "total_disk":         tg_size,
             "total_disk_human":   human_size(tg_size),
             "tdata_total":        total_tdata,
@@ -2354,6 +2687,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         accs   = scan_accounts_cached()
         own_apps = []
         total_bytes = 0
+        ayu_count = ayu_bytes = 0
         for acc in accs:
             app_path = find_account_app(acc["path"])
             if app_path:
@@ -2361,6 +2695,13 @@ class RequestHandler(BaseHTTPRequestHandler):
                 total_bytes += sz
                 own_apps.append({"path": acc["path"], "name": acc["name"],
                                  "size": sz, "size_human": human_size(sz)})
+            try:
+                ayu_app = ayugram.find_app(acc["path"])
+                if ayu_app:
+                    ayu_count += 1
+                    ayu_bytes += get_folder_size(ayu_app)
+            except (OSError, ValueError):
+                pass
         # Determine what source setup would use (same priority as setup endpoint)
         cfg_source = config.get("app_source", "")
         if os.path.isdir(cfg_source):
@@ -2380,6 +2721,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             "own_count":          len(own_apps),
             "total_size":         total_bytes,
             "total_size_human":   human_size(total_bytes),
+            "size_kind":          "logical",
+            "ayugram_own_count":  ayu_count,
+            "ayugram_size_human": human_size(ayu_bytes),
             "setup_source":       setup_source,
             "setup_source_type":  setup_source_type,
             "sibling_path":       SIBLING_APP,
@@ -2458,6 +2802,14 @@ class RequestHandler(BaseHTTPRequestHandler):
         else:
             self.send_json({"success": False, "message": msg or "Failed to open account"})
 
+    def _post_api_open_ayugram(self, data):
+        ok, message = ayugram.open_account(data.get("path", ""))
+        self.send_json({"success": ok, "message": message})
+
+    def _post_api_new_ayugram_login(self, data):
+        ok, message = ayugram.open_account(data.get("path", ""), new_login=True)
+        self.send_json({"success": ok, "message": message})
+
     def _post_api_open_all(self, data):
         to_open = [acc for acc in scan_accounts()
                    if acc["status"] == "ready" and not acc["running"]]
@@ -2486,7 +2838,11 @@ class RequestHandler(BaseHTTPRequestHandler):
         if not is_managed_account_path(acc_path):
             self.send_json({"success": False, "message": "Invalid path"})
             return
-        ok = kill_account(acc_path)
+        client = data.get("client", "Telegram")
+        if client not in ("Telegram", "AyuGram"):
+            self.send_json({"success": False, "message": "Invalid client"})
+            return
+        ok = kill_account(acc_path, client=client)
         invalidate_scan_cache()
         self.send_json({"success": True, "already_stopped": not ok})
 
@@ -2496,37 +2852,40 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.send_json({"success": False, "message": "Invalid path"})
             return
         cleared, freed = clear_account_caches(acc_path)
-        if cleared:
-            invalidate_scan_cache()
-            self.send_json({"success": True, "freed": freed,
-                            "freed_human": human_size(freed),
-                            "message": f"Cleared {human_size(freed)} of cache"})
-        elif find_telegram_pid(acc_path):
-            self.send_json({"success": False,
-                            "message": "Close Telegram for this account before clearing its cache"})
-        else:
-            self.send_json({"success": True, "freed": 0,
-                            "freed_human": "0 B", "message": "No cache to clear"})
+        invalidate_scan_cache()
+        self.send_json({"success": cleared, "freed": freed, "freed_human": human_size(freed),
+                        "message": (f"Cleared {human_size(freed)} of Telegram cache; AyuGram history preserved"
+                                    if cleared else f"Cache cleanup incomplete or blocked; freed {human_size(freed)}. Close both clients and try again.")})
 
     def _post_api_clear_all_cache(self, data):
-        total_freed = cleared = skipped = 0
-        for a in scan_accounts():
-            if a.get("running"):
+        total_freed = backup_freed = cleared = skipped = failed = 0
+        for account in scan_accounts():
+            if account.get("running"):
                 skipped += 1
                 continue
-            ok, freed = clear_account_caches(a["path"])
-            if ok and freed > 0:
-                cleared += 1
-                total_freed += freed
+            ok, freed = clear_account_caches(account["path"])
+            total_freed += freed
+            if ok:
+                cleared += int(freed > 0)
+                done, reclaimed = clear_account_backup_caches(account["path"])
+                backup_freed += reclaimed
+                failed += int(not done)
+            else:
+                failed += 1
+        for backup in list_backups():
+            done, reclaimed = clear_managed_backup_caches(backup["backup_path"])
+            backup_freed += reclaimed
+            failed += int(not done)
         invalidate_scan_cache()
         with _disk_stats_lock:
-            _disk_stats["ts"] = 0.0   # force a fresh reclaimable-cache number
-        msg = f"Cleared {human_size(total_freed)} across {cleared} account(s)"
-        if skipped:
-            msg += f"; skipped {skipped} running"
-        self.send_json({"success": True, "freed": total_freed,
-                        "freed_human": human_size(total_freed),
-                        "cleared": cleared, "skipped": skipped, "message": msg})
+            _disk_stats["ts"] = 0.0
+        total_freed += backup_freed
+        msg = (f"Cleared {human_size(total_freed)} ({human_size(backup_freed)} from backup caches); "
+               f"skipped {skipped} running account(s), {failed} incomplete operation(s). "
+               "Sessions, backup versions and AyuGram history were preserved.")
+        self.send_json({"success": failed == 0, "freed": total_freed,
+                        "freed_human": human_size(total_freed), "backup_freed": backup_freed,
+                        "cleared": cleared, "skipped": skipped, "failed": failed, "message": msg})
 
     def _post_api_setup(self, data):
         acc_path = data.get("path", "")
@@ -2550,7 +2909,10 @@ class RequestHandler(BaseHTTPRequestHandler):
         if not is_safe_path(acc_path):
             self.send_json({"success": False, "message": "Invalid path"})
             return
-        ok, msg, backup_path = backup_account(acc_path, data.get("name", "account"))
+        if data.get("preserve_existing") is True:
+            ok, msg, backup_path = backup_account(acc_path, data.get("name", "account"), prune=False)
+        else:
+            ok, msg, backup_path = backup_account(acc_path, data.get("name", "account"))
         self.send_json({"success": ok, "message": msg, "backup_path": backup_path})
 
     def _post_api_backup_delete(self, data):
@@ -2578,8 +2940,26 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.send_json(response)
 
     def _post_api_update_all(self, data):
-        ok, msg = update_all_apps(data.get("source", ""))
+        check = check_telegram_update(data.get("source", ""))
+        if not check["success"]:
+            self.send_json(check)
+            return
+        if check["warning"] and data.get("acknowledgement") != check["acknowledgement"]:
+            self.send_json({**check, "success": False, "confirmation_required": True,
+                            "message": check["warning"]})
+            return
+        with updates.INSTALL_LOCK:
+            ok, msg = update_all_apps(data.get("source", ""))
         self.send_json({"success": ok, "message": msg})
+
+    def _post_api_check_client_updates(self, data):
+        self.send_json(updates.check_releases())
+
+    def _post_api_install_client_update(self, data):
+        self.send_json(updates.install_release(data.get("client"), data.get("version"), data.get("acknowledgement")))
+
+    def _post_api_check_telegram_update(self, data):
+        self.send_json(check_telegram_update(data.get("source", "")))
 
     def _post_api_note(self, data):
         acc_path = data.get("path", "")
@@ -2753,6 +3133,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                     self.send_json({"success": False, "message": f"Could not rename app bundle: {e}"})
                     return
             _patch_app_display_name(new_app_path, effective_name)
+            ok, msg = _disable_telegram_auto_updates(acc_path, new_app_path)
+            if not ok:
+                self.send_json({"success": False, "message": msg})
+                return
         invalidate_scan_cache()
         self.send_json({"success": True})
 
@@ -2789,7 +3173,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         if not is_safe_path(backup_path) or not is_managed_account_path(account_path):
             self.send_json({"success": False, "message": "Invalid path"})
             return
-        ok, msg = restore_backup(backup_path, account_path)
+        ok, msg = restore_backup(backup_path, account_path, client=data.get("client", "Telegram"))
         self.send_json({"success": ok, "message": msg})
 
     def _post_api_workspace_save(self, data):
@@ -3121,40 +3505,52 @@ class RequestHandler(BaseHTTPRequestHandler):
         if not app_path:
             self.send_json({"success": False, "message": "No Telegram app bundle found in this folder"})
             return
-        if find_telegram_pid(acc_path):
-            self.send_json({"success": False, "message": "Telegram is running for this account — quit it first"})
-            return
         sz = get_folder_size(app_path)
-        if not _remove_account_clone(acc_path, app_path):
-            self.send_json({"success": False, "message": "Could not remove the Telegram app bundle"})
+        free_before = shutil.disk_usage(DATA_DIR).free
+        if not _remove_clone_if_idle(acc_path):
+            self.send_json({"success": False, "message": "App kept: it is active, busy, or its safe replacement could not be verified"})
             return
+        free_change = shutil.disk_usage(DATA_DIR).free - free_before
         invalidate_scan_cache()
-        self.send_json({"success": True, "freed": sz, "freed_human": human_size(sz)})
+        self.send_json({"success": True, "removed_logical_bytes": sz,
+                        "removed_logical_human": human_size(sz),
+                        "disk_free_change_bytes": free_change,
+                        "disk_free_change_human": human_size(free_change)})
 
     def _post_api_shared_app_remove_all_account_apps(self, data):
-        if not get_shared_app():
+        if not get_shared_app() and not os.path.isdir(os.path.join(DATA_DIR, '_apps', 'macOS', 'AyuGram.app')):
             self.send_json({"success": False,
-                            "message": "Set up the shared Telegram.app first before removing per-account copies."})
+                            "message": "Set up a shared client app before removing per-account copies."})
             return
         removed = 0
-        freed   = 0
+        logical = 0
         skipped = 0
+        free_before = shutil.disk_usage(DATA_DIR).free
         for acc in scan_accounts():
             app_path = find_account_app(acc["path"])
             if app_path:
-                # Removing the bundle out from under a running Telegram
-                # corrupts the session — skip those accounts.
-                if find_telegram_pid(acc["path"]):
-                    _log.warning("remove-all-account-apps: %s is running — skipping", acc["path"])
-                    skipped += 1
-                    continue
                 size = get_folder_size(app_path)
-                if _remove_account_clone(acc["path"], app_path):
-                    freed += size
+                if _remove_clone_if_idle(acc["path"]):
+                    logical += size
                     removed += 1
+                else:
+                    skipped += 1
+            try:
+                ayu_app = ayugram.find_app(acc["path"])
+                size = get_folder_size(ayu_app) if ayu_app else 0
+                if ayu_app and ayugram.remove_clone_if_idle(acc["path"]):
+                    logical += size
+                    removed += 1
+                elif ayu_app:
+                    skipped += 1
+            except (OSError, ValueError):
+                skipped += 1
+        free_change = shutil.disk_usage(DATA_DIR).free - free_before
         invalidate_scan_cache()
         self.send_json({"success": True, "removed": removed, "skipped": skipped,
-                        "freed": freed, "freed_human": human_size(freed)})
+                        "removed_logical_bytes": logical, "removed_logical_human": human_size(logical),
+                        "disk_free_change_bytes": free_change,
+                        "disk_free_change_human": human_size(free_change)})
 
     def _post_api_export_config(self, data):
         # Strip the lock secrets from the export — otherwise export
@@ -3220,6 +3616,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         '/api/workspaces': '_get_api_workspaces',
         '/api/keeper/status': '_get_api_keeper_status',
         '/api/alerts': '_get_api_alerts',
+        '/api/client-update-status': '_get_api_client_update_status',
         '/api/stats': '_get_api_stats',
         '/api/groups': '_get_api_groups',
         '/api/pick-app': '_get_api_pick_app',
@@ -3230,7 +3627,13 @@ class RequestHandler(BaseHTTPRequestHandler):
     }
 
     POST_ROUTES = {
+        '/api/check-client-updates': '_post_api_check_client_updates',
+        '/api/client-update-dismiss': '_post_api_client_update_dismiss',
+        '/api/install-client-update': '_post_api_install_client_update',
+        '/api/check-telegram-update': '_post_api_check_telegram_update',
         '/api/open': '_post_api_open',
+        '/api/open-ayugram': '_post_api_open_ayugram',
+        '/api/new-ayugram-login': '_post_api_new_ayugram_login',
         '/api/open-all': '_post_api_open_all',
         '/api/open-group': '_post_api_open_group',
         '/api/open-pinned': '_post_api_open_pinned',
@@ -3368,6 +3771,7 @@ if __name__ == "__main__":
     _remove_ready_file(ready_file)
     server = ThreadedHTTPServer(("127.0.0.1", port), RequestHandler)
     _write_ready_file(ready_file, port, SESSION_TOKEN)
+    threading.Thread(target=updates.run_weekly_monitor, daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

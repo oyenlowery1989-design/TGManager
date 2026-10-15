@@ -1,0 +1,1765 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 506baab..6b642d8 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -6,6 +6,10 @@
+ 
+ cmake_minimum_required(VERSION 3.25...3.31)
+ 
++# Keep the isolated experimental build out of official update and crash channels.
++set(DESKTOP_APP_DISABLE_AUTOUPDATE ON CACHE BOOL "Disable automatic updates" FORCE)
++set(DESKTOP_APP_DISABLE_CRASH_REPORTS ON CACHE BOOL "Disable crash uploads" FORCE)
++
+ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
+ 
+ include(cmake/validate_special_target.cmake)
+@@ -63,4 +67,8 @@ set(desktop_app_skip_libs
+ )
+ 
+ add_subdirectory(cmake)
++if (APPLE)
++    # New libc++ no longer exposes range-v3's private forward-declaration macros.
++    target_compile_definitions(external_ranges INTERFACE META_NO_STD_FORWARD_DECLARATIONS)
++endif()
+ add_subdirectory(Telegram)
+diff --git a/Telegram/CMakeLists.txt b/Telegram/CMakeLists.txt
+index a957cfd..5a418dc 100644
+--- a/Telegram/CMakeLists.txt
++++ b/Telegram/CMakeLists.txt
+@@ -249,6 +249,8 @@ set(ayugram_files
+         ayu/features/filters/filters_utils.h
+         ayu/data/messages_storage.cpp
+         ayu/data/messages_storage.h
++        ayu/data/deleted_message_restore.h
++        ayu/data/local_read_state.h
+         ayu/data/entities.h
+         ayu/data/ayu_database.cpp
+         ayu/data/ayu_database.h
+@@ -2574,6 +2576,9 @@ else()
+     set(output_name "AyuGram")
+ endif()
+ 
++set(bundle_identifier "one.telegrammanager.AyuGramInlineTest")
++set(output_name "AyuGram Inline Test")
++
+ if (CMAKE_GENERATOR STREQUAL Xcode)
+     set(bundle_identifier_plist "$(PRODUCT_BUNDLE_IDENTIFIER)")
+ else()
+diff --git a/Telegram/SourceFiles/api/api_polls.cpp b/Telegram/SourceFiles/api/api_polls.cpp
+index 5d7baec..4074d0a 100644
+--- a/Telegram/SourceFiles/api/api_polls.cpp
++++ b/Telegram/SourceFiles/api/api_polls.cpp
+@@ -391,7 +391,9 @@ void Polls::sendVotes(
+ 		if (!ghost.sendReadMessages()
+ 			&& ghost.markReadAfterAction()
+ 			&& item) {
+-			readHistory(item);
++			if (const auto current = _session->data().message(itemId)) {
++				current->history()->readLocally(current->id);
++			}
+ 		}
+ 	}).fail([=](const MTP::Error &error) {
+ 		_pollVotesRequestIds.erase(itemId);
+diff --git a/Telegram/SourceFiles/apiwrap.cpp b/Telegram/SourceFiles/apiwrap.cpp
+index 8bf7053..d8e477c 100644
+--- a/Telegram/SourceFiles/apiwrap.cpp
++++ b/Telegram/SourceFiles/apiwrap.cpp
+@@ -1463,7 +1463,6 @@ void ApiWrap::markContentsRead(
+ 		QVector<MTPint>>();
+ 	markedIds.reserve(items.size());
+ 	for (const auto &item : items) {
+-		const auto passthrough = (item->isUnreadMention() || item->hasUnreadReaction()) && !item->isUnreadMedia();
+ 		const auto keepUnread = settings.saveDeletedMessages()
+ 			&& item->isIncomingUnreadMedia()
+ 			&& item->media()->ttlSeconds();
+@@ -1473,7 +1472,7 @@ void ApiWrap::markContentsRead(
+ 			continue;
+ 		}
+ 
+-		if (!ghost.sendReadMessages() && !passthrough) {
++		if (!ghost.sendReadMessages()) {
+ 			continue;
+ 		}
+ 
+@@ -1499,7 +1498,6 @@ void ApiWrap::markContentsRead(
+ }
+ 
+ void ApiWrap::markContentsRead(not_null<HistoryItem*> item) {
+-	const auto passthrough = (item->isUnreadMention() || item->hasUnreadReaction()) && !item->isUnreadMedia();
+ 	const auto keepUnread = AyuSettings::getInstance().saveDeletedMessages()
+ 		&& item->isIncomingUnreadMedia()
+ 		&& item->media()->ttlSeconds();
+@@ -1510,7 +1508,7 @@ void ApiWrap::markContentsRead(not_null<HistoryItem*> item) {
+ 	}
+ 
+ 	const auto &ghost = AyuSettings::ghost(&session());
+-	if (!ghost.sendReadMessages() && !passthrough) {
++	if (!ghost.sendReadMessages()) {
+ 		return;
+ 	}
+ 
+diff --git a/Telegram/SourceFiles/ayu/data/messages_storage.cpp b/Telegram/SourceFiles/ayu/data/messages_storage.cpp
+index 8a658cd..8b772a8 100644
+--- a/Telegram/SourceFiles/ayu/data/messages_storage.cpp
++++ b/Telegram/SourceFiles/ayu/data/messages_storage.cpp
+@@ -135,12 +135,16 @@ bool hasDeletedMessages(not_null<PeerData*> peer, ID topicId) {
+ }
+ 
+ void removeDeletedMessage(not_null<HistoryItem*> item) {
++	item->history()->cancelDeletedMessageRestore();
+ 	const auto peer = item->history()->peer;
+ 	const ID userId = peer->session().userId().bare & PeerId::kChatTypeMask;
+ 	AyuDatabase::removeDeletedMessage(userId, getDialogIdFromPeer(peer), item->id.bare);
+ }
+ 
+ void clearDeletedMessages(not_null<PeerData*> peer, ID topicId) {
++	if (const auto history = peer->owner().historyLoaded(peer)) {
++		history->cancelDeletedMessageRestore();
++	}
+ 	const ID userId = peer->session().userId().bare & PeerId::kChatTypeMask;
+ 	AyuDatabase::clearDeletedMessages(userId, getDialogIdFromPeer(peer), topicId);
+ }
+diff --git a/Telegram/SourceFiles/ayu/utils/telegram_helpers.cpp b/Telegram/SourceFiles/ayu/utils/telegram_helpers.cpp
+index 5d80efc..bf87b0f 100644
+--- a/Telegram/SourceFiles/ayu/utils/telegram_helpers.cpp
++++ b/Telegram/SourceFiles/ayu/utils/telegram_helpers.cpp
+@@ -367,9 +367,20 @@ void readReactions(base::weak_ptr<Data::Thread> weakThread) {
+ }
+ 
+ void MarkAsReadThread(not_null<Data::Thread*> thread) {
++	const auto readOnServer = AyuSettings::ghost(
++		&thread->session()).sendReadMessages();
+ 	const auto readHistoryNative = [&](const not_null<History*> history)
+ 	{
+-		history->owner().histories().readInbox(history);
++		if (readOnServer) {
++			history->owner().histories().changeDialogUnreadMark(history, false);
++			history->owner().histories().requestDialogEntry(history, [=] {
++				if (const auto last = history->lastServerMessage()) {
++					readHistory(last);
++				}
++			});
++		} else {
++			history->owner().histories().readInbox(history);
++		}
+ 	};
+ 	const auto sendReadMentions = [=](
+ 		const not_null<Data::Thread*> threadInner)
+@@ -382,7 +393,7 @@ void MarkAsReadThread(not_null<Data::Thread*> thread) {
+ 		readReactions(base::make_weak(threadInner));
+ 	};
+ 
+-	if (thread->chatListBadgesState().unread) {
++	if (thread->chatListBadgesState().unread || readOnServer) {
+ 		if (const auto forum = thread->asForum()) {
+ 			forum->enumerateTopics([](
+ 				not_null<Data::ForumTopic*> topic)
+@@ -399,6 +410,10 @@ void MarkAsReadThread(not_null<Data::Thread*> thread) {
+ 		}
+ 	}
+ 
++	if (!AyuSettings::ghost(&thread->session()).sendReadMessages()) {
++		return;
++	}
++
+ 	if (thread->unreadMentions().has()) {
+ 		sendReadMentions(thread);
+ 	}
+@@ -462,7 +477,7 @@ void markReadAfterAction(not_null<History*> history) {
+ 		return;
+ 	}
+ 	if (const auto last = history->lastServerMessage()) {
+-		readHistory(last);
++		history->readLocally(last->id);
+ 	}
+ }
+ 
+diff --git a/Telegram/SourceFiles/core/launcher.cpp b/Telegram/SourceFiles/core/launcher.cpp
+index adfcd1e..00b2d74 100644
+--- a/Telegram/SourceFiles/core/launcher.cpp
++++ b/Telegram/SourceFiles/core/launcher.cpp
+@@ -20,6 +20,9 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ #include "base/concurrent_timer.h"
+ #include "base/options.h"
+ 
++#include <QtCore/QDirIterator>
++#include <cstdio>
++
+ #include <QtCore/QLoggingCategory>
+ #include <QtCore/QStandardPaths>
+ #include <QtCore/QLibraryInfo>
+@@ -340,7 +343,7 @@ void Launcher::init() {
+ 	prepareSettings();
+ 	initQtMessageLogging();
+ 
+-	QApplication::setApplicationName(u"AyuGramDesktop"_q);
++	QApplication::setApplicationName(u"AyuGramInlineTest"_q);
+ 
+ #if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
+ 	// fallback session management is useless for tdesktop since it doesn't have
+@@ -383,6 +386,30 @@ void Launcher::initHighDpi() {
+ int Launcher::exec() {
+ 	init();
+ 
++	// This experimental build must never discover an existing portable profile.
++	const auto directory = QDir::cleanPath(_customWorkingDir);
++	const auto info = QFileInfo(directory);
++	QFile marker(directory + u"/.ayugram-inline-test"_q);
++	if (!customWorkingDir()
++		|| !info.isDir()
++		|| info.canonicalFilePath() != info.absoluteFilePath()
++		|| QFileInfo(marker).isSymLink()
++		|| !marker.open(QIODevice::ReadOnly)
++		|| marker.readAll() != QByteArray("ayugram-inline-isolated-profile-v1\n")) {
++		std::fputs("AyuGram Inline Test requires an isolated, marked -workdir.\n", stderr);
++		return 1;
++	}
++	QDirIterator files(directory, QDir::AllEntries | QDir::Hidden
++		| QDir::System | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
++	while (files.hasNext()) {
++		files.next();
++		if (files.fileInfo().isSymLink()) {
++			std::fputs("AyuGram Inline Test refuses linked profile files.\n", stderr);
++			return 1;
++		}
++	}
++	cForceWorkingDir(directory);
++
+ 	if (cLaunchMode() == LaunchModeFixPrevious) {
+ 		return psFixPrevious();
+ 	}
+@@ -446,7 +473,6 @@ int Launcher::exec() {
+ bool Launcher::validateCustomWorkingDir() {
+ 	if (customWorkingDir()) {
+ 		if (_customWorkingDir == cWorkingDir()) {
+-			_customWorkingDir = QString();
+ 			return false;
+ 		}
+ 		cForceWorkingDir(_customWorkingDir);
+@@ -473,7 +499,8 @@ void Launcher::writeInstallBetaVersionsSetting() {
+ }
+ 
+ bool Launcher::checkPortableVersionFolder() {
+-	return CheckPortableVersionFolder();
++	// Explicit test profiles take precedence over automatic portable discovery.
++	return customWorkingDir() || CheckPortableVersionFolder();
+ }
+ 
+ QStringList Launcher::readArguments(int argc, char *argv[]) const {
+diff --git a/Telegram/SourceFiles/data/data_channel.cpp b/Telegram/SourceFiles/data/data_channel.cpp
+index fedca49..c9764bd 100644
+--- a/Telegram/SourceFiles/data/data_channel.cpp
++++ b/Telegram/SourceFiles/data/data_channel.cpp
+@@ -1472,7 +1472,8 @@ void ApplyChannelUpdate(
+ 				history->folder(),
+ 				update.vunread_count().v,
+ 				update.vread_inbox_max_id().v,
+-				update.vread_outbox_max_id().v);
++				update.vread_outbox_max_id().v,
++				MsgId(-1));
+ 		}
+ 	}
+ 	if (const auto pinned = update.vpinned_msg_id()) {
+diff --git a/Telegram/SourceFiles/data/data_histories.cpp b/Telegram/SourceFiles/data/data_histories.cpp
+index c254e17..95a600e 100644
+--- a/Telegram/SourceFiles/data/data_histories.cpp
++++ b/Telegram/SourceFiles/data/data_histories.cpp
+@@ -274,7 +274,7 @@ void Histories::readInboxTill(
+ 					).arg(tillId.bare));
+ 				if (last->id == tillId) {
+ 					DEBUG_LOG(("Reading: locally marked as read."));
+-					history->setUnreadCount(0);
++					history->setUnreadCount(0, false);
+ 					history->updateChatListEntry();
+ 				}
+ 			}
+@@ -282,6 +282,9 @@ void Histories::readInboxTill(
+ 	});
+ 
+ 	Core::App().notifications().clearIncomingFromHistory(history);
++	if (history->readLocally(tillId)) {
++		return;
++	}
+ 
+ 	const auto needsRequest = history->readInboxTillNeedsRequest(tillId);
+ 	if (!needsRequest && !force) {
+@@ -525,6 +528,9 @@ void Histories::applyPeerDialogs(const MTPmessages_PeerDialogs &dialogs) {
+ void Histories::changeDialogUnreadMark(
+ 		not_null<History*> history,
+ 		bool unread) {
++	if (history->changeLocalUnreadMark(unread)) {
++		return;
++	}
+ 	history->setUnreadMark(unread);
+ 
+ 	using Flag = MTPmessages_MarkDialogUnread::Flag;
+diff --git a/Telegram/SourceFiles/data/data_message_reactions.cpp b/Telegram/SourceFiles/data/data_message_reactions.cpp
+index 922cfcc..2a95b87 100644
+--- a/Telegram/SourceFiles/data/data_message_reactions.cpp
++++ b/Telegram/SourceFiles/data/data_message_reactions.cpp
+@@ -1529,7 +1529,9 @@ void Reactions::send(not_null<HistoryItem*> item, bool addToRecent) {
+ 
+ 		const auto &ghost = AyuSettings::ghost(&_owner->session());
+ 		if (!ghost.sendReadMessages() && ghost.markReadAfterAction() && item) {
+-			readHistory(item);
++			if (const auto current = _owner->message(id)) {
++				current->history()->readLocally(current->id);
++			}
+ 		}
+ 	}).fail([=](const MTP::Error &error) {
+ 		_sentRequests.remove(id);
+diff --git a/Telegram/SourceFiles/history/history.cpp b/Telegram/SourceFiles/history/history.cpp
+index 257bf79..6e9b01f 100644
+--- a/Telegram/SourceFiles/history/history.cpp
++++ b/Telegram/SourceFiles/history/history.cpp
+@@ -85,6 +85,13 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ 
+ // AyuGram includes
+ #include "ayu/ayu_settings.h"
++#include "ayu/data/ayu_database.h"
++#include "crl/crl_async.h"
++#include "crl/crl_on_main.h"
++#include "ayu/data/deleted_message_restore.h"
++#include "ayu/data/local_read_state.h"
++#include "ayu/utils/ayu_mapper.h"
++#include "ayu/utils/telegram_helpers.h"
+ #include "ayu/ayu_state.h"
+ 
+ 
+@@ -180,10 +187,13 @@ History::History(not_null<Data::Session*> owner, PeerId peerId)
+ 			_outboxReadBefore = std::numeric_limits<MsgId>::max();
+ 		}
+ 	}
++	loadLocalRead();
+ 	updateCommunityRegistration();
+ }
+ 
+-History::~History() = default;
++History::~History() {
++	cancelLocalReadCount();
++}
+ 
+ void History::clearLastKeyboard() {
+ 	if (lastKeyboardId) {
+@@ -269,6 +279,10 @@ void History::checkChatListMessageRemoved(not_null<HistoryItem*> item) {
+ }
+ 
+ void History::itemVanished(not_null<HistoryItem*> item) {
++	if (_localReadRequest) {
++		cancelLocalReadCount();
++		owner().histories().requestDialogEntry(this);
++	}
+ 	if (const auto thread = item->maybeNotificationThread()) {
+ 		thread->removeNotification(item);
+ 	}
+@@ -1662,6 +1676,10 @@ void History::mainViewRemoved(
+ }
+ 
+ void History::newItemAdded(not_null<HistoryItem*> item, NewAddType type) {
++	if (_localReadRequest) {
++		cancelLocalReadCount();
++		owner().histories().requestDialogEntry(this);
++	}
+ 	item->indexAsNewItem();
+ 	item->addToMessagesIndex();
+ 	if (const auto from = item->from() ? item->from()->asUser() : nullptr) {
+@@ -1853,6 +1871,7 @@ void History::addOlderSlice(const QVector<MTPMessage> &slice) {
+ 	if (slice.isEmpty()) {
+ 		_loadedAtTop = true;
+ 		checkLocalMessages();
++		restoreDeletedMessages();
+ 		return;
+ 	}
+ 
+@@ -1865,6 +1884,154 @@ void History::addOlderSlice(const QVector<MTPMessage> &slice) {
+ 	}
+ 	checkLocalMessages();
+ 	checkLastMessage();
++	restoreDeletedMessages();
++}
++
++void History::cancelDeletedMessageRestore() {
++	++_deletedRestoreGeneration;
++}
++
++void History::restoreDeletedMessages() {
++	cancelDeletedMessageRestore();
++	if (!AyuSettings::getInstance().saveDeletedMessages()
++		|| peer->isSelf()
++		|| peer->isForum()
++		|| peer->isMonoforum()) {
++		return;
++	}
++
++	const auto range = AyuMessages::DeletedRange(
++		minMsgId().bare,
++		maxMsgId().bare,
++		loadedAtTop(),
++		loadedAtBottom(),
++		ServerMaxMsgId.bare);
++	if (range.before <= range.after) {
++		return;
++	}
++	_deletedRestoreAfter = range.after;
++	_deletedRestoreBefore = _deletedRestoreCursor = range.before;
++	queueDeletedMessagesPage();
++}
++
++void History::queueDeletedMessagesPage() {
++	const auto weak = base::make_weak(this);
++	const auto generation = _deletedRestoreGeneration;
++	const auto range = AyuMessages::DeletedHistoryRange{
++		.after = _deletedRestoreAfter,
++		.before = _deletedRestoreBefore,
++	};
++	const auto before = _deletedRestoreCursor;
++	const auto user = session().userId().bare & PeerId::kChatTypeMask;
++	const auto dialog = getDialogIdFromPeer(peer);
++	constexpr auto kPageSize = 32;
++	crl::async([=] {
++		auto rows = AyuDatabase::getDeletedMessages(
++			user, dialog, 0, range.after, before, kPageSize);
++		crl::on_main([=, rows = std::move(rows)] {
++			if (!weak || generation != _deletedRestoreGeneration) {
++				return;
++			}
++			const auto current = AyuMessages::DeletedRange(
++				minMsgId().bare,
++				maxMsgId().bare,
++				loadedAtTop(),
++				loadedAtBottom(),
++				ServerMaxMsgId.bare);
++			if (!AyuSettings::getInstance().saveDeletedMessages()
++				|| peer->isSelf()
++				|| peer->isForum()
++				|| peer->isMonoforum()
++				|| current.after != range.after
++				|| current.before != range.before) {
++				restoreDeletedMessages();
++				return;
++			}
++			if (rows.empty()) {
++				return;
++			}
++			for (const auto &row : rows) {
++				if (!AyuMessages::CanRestoreDeleted(row, user, dialog, range)) {
++					continue;
++				}
++				auto item = owner().message(peer->id, MsgId(row.messageId));
++				if (item && (!item->isDeleted() || item->mainView())) {
++					continue;
++				}
++				if (!item) {
++					const auto outgoing = (row.flags & 0x00000002) != 0;
++					const auto post = (row.flags & 0x00004000) != 0;
++					const auto identity = AyuMessages::DeletedSender(
++						row.fromId,
++						user,
++						peer->id.value & PeerId::kChatTypeMask,
++						row.flags,
++						peer->isUser(),
++						peer->isChannel());
++					if (identity == AyuMessages::DeletedSenderIdentity::Invalid) {
++						continue;
++					}
++					PeerData *sender = nullptr;
++					if (identity == AyuMessages::DeletedSenderIdentity::Self) {
++						sender = owner().peerLoaded(peerFromUser(session().userId()));
++					} else if (identity == AyuMessages::DeletedSenderIdentity::Peer) {
++						sender = peer;
++					}
++					// Old rows lack sender type; render others with a neutral identity.
++					auto flags = sender
++						? MessageFlags(MessageFlag::HasFromId)
++						: MessageFlags();
++					if (outgoing) {
++						flags |= MessageFlag::Outgoing;
++					}
++					if (post) {
++						flags |= MessageFlag::Post;
++					}
++					auto text = TextWithEntities{ QString::fromStdString(row.text) };
++					if (!row.textEntities.empty()) {
++						const auto entities = AyuMapper::deserializeTextWithEntities(
++							row.textEntities);
++						text.entities = Api::EntitiesFromMTP(&session(), entities.v);
++					}
++					item = makeMessage({
++						.id = MsgId(row.messageId),
++						.flags = flags,
++						.from = sender ? sender->id : PeerId(0),
++						.date = row.date,
++					}, text, MTP_messageMediaEmpty());
++					item->setRestoredDeleted(!sender);
++				}
++
++				auto inserted = false;
++				for (auto blockIndex = 0; blockIndex != blocks.size(); ++blockIndex) {
++					const auto &messages = blocks[blockIndex]->messages;
++					for (auto index = 0; index != messages.size(); ++index) {
++						const auto next = messages[index]->data();
++						if (next->isRegular() && next->id > item->id) {
++							addNewInTheMiddle(item, blockIndex, index);
++							inserted = true;
++							break;
++						}
++					}
++					if (inserted) {
++						break;
++					}
++				}
++				if (!inserted) {
++					addItemToBlock(item);
++				}
++			}
++			owner().notifyHistoryChangeDelayed(this);
++			const auto next = ID(rows.back().messageId);
++			if (rows.size() == kPageSize
++				&& next > range.after
++				&& next < before) {
++				_deletedRestoreCursor = next;
++				queueDeletedMessagesPage();
++			}
++			owner().sendHistoryChangeNotifications();
++		});
++	});
+ }
+ 
+ void History::addCreatedOlderSlice(
+@@ -1918,6 +2085,7 @@ void History::addNewerSlice(const QVector<MTPMessage> &slice) {
+ 
+ 	checkLocalMessages();
+ 	checkLastMessage();
++	restoreDeletedMessages();
+ }
+ 
+ void History::checkLastMessage() {
+@@ -2095,6 +2263,161 @@ void History::calculateFirstUnreadMessage() {
+ 	}
+ }
+ 
++bool History::supportsLocalRead() const {
++	return !peer->isSelf() && !peer->isForum() && !peer->isMonoforum();
++}
++
++void History::loadLocalRead() {
++	if (!supportsLocalRead()) {
++		return;
++	}
++	const auto key = Ayu::LocalRead::Key(session().userId().bare, peer->id.value);
++	const auto record = Ayu::LocalRead::Parse(
++		session().local().readPref<QByteArray>(key).toStdString());
++	_localReadTill = record.till;
++	_localReadAt = record.readAt;
++	_localUnreadMark = record.unreadMark;
++	if (_localReadTill > 0) {
++		_inboxReadBefore = _localReadTill + 1;
++	}
++}
++
++void History::saveLocalRead() {
++	const auto key = Ayu::LocalRead::Key(session().userId().bare, peer->id.value);
++	session().local().writePref<QByteArray>(key, QByteArray::fromStdString(
++		Ayu::LocalRead::Serialize({
++			.till = _localReadTill.bare,
++			.readAt = _localReadAt,
++			.unreadMark = _localUnreadMark,
++		})));
++}
++
++bool History::changeLocalUnreadMark(bool unread) {
++	if (!supportsLocalRead()) {
++		return false;
++	}
++	if (AyuSettings::ghost(&session()).sendReadMessages()) {
++		if (_localUnreadMark != -1) {
++			_localUnreadMark = -1;
++			saveLocalRead();
++		}
++		return false;
++	}
++	_localUnreadMark = unread ? 1 : 0;
++	saveLocalRead();
++	setUnreadMark(unread);
++	return true;
++}
++
++bool History::readLocally(MsgId tillId) {
++	if (!supportsLocalRead()
++		|| AyuSettings::ghost(&session()).sendReadMessages()
++		|| tillId < 0
++		|| tillId.bare > std::numeric_limits<int32>::max()) {
++		return false;
++	}
++	readClientSideMessages();
++	const auto last = lastServerMessage();
++	const auto count = (last && tillId >= last->id)
++		? std::optional<int>(0)
++		: countStillUnreadLocal(tillId);
++	cancelLocalReadCount();
++	if (tillId > _localReadTill || _localUnreadMark != 0) {
++		accumulate_max(_localReadTill, tillId);
++		_localReadAt = base::unixtime::now();
++		_localUnreadMark = 0;
++		saveLocalRead();
++	}
++	setUnreadMark(false);
++	if (tillId > 0) {
++		setInboxReadTill(tillId);
++	}
++	if (folderKnown() && count) {
++		setUnreadCount(*count, false);
++	} else {
++		owner().histories().requestDialogEntry(this);
++	}
++	updateChatListEntry();
++	return true;
++}
++
++void History::cancelLocalReadCount() {
++	++_localReadGeneration;
++	if (_localReadRequest) {
++		session().api().request(base::take(_localReadRequest)).cancel();
++	}
++}
++
++void History::refreshLocalReadCount(MsgId top, int serverCount) {
++	const auto counter = std::make_shared<Ayu::LocalRead::Counter>();
++	counter->till = inboxReadTillId().bare;
++	counter->before = top.bare + 1;
++	requestLocalReadPage(counter, _localReadGeneration, serverCount);
++}
++
++void History::requestLocalReadPage(
++		std::shared_ptr<Ayu::LocalRead::Counter> counter,
++		uint64 generation,
++		int serverCount) {
++	if (generation != _localReadGeneration || !supportsLocalRead()) {
++		return;
++	}
++	const auto before = (counter->before > std::numeric_limits<int32>::max())
++		? 0 : int32(counter->before);
++	_localReadRequest = session().api().request(MTPmessages_GetHistory(
++		peer->input(),
++		MTP_int(before),
++		MTP_int(0),
++		MTP_int(0),
++		MTP_int(100),
++		MTP_int(before),
++		MTP_int(counter->till),
++		MTP_long(0)
++	)).done(crl::guard(this, [=](const MTPmessages_Messages &result) {
++		if (generation != _localReadGeneration) {
++			return;
++		}
++		_localReadRequest = 0;
++		auto messages = std::vector<Ayu::LocalRead::Message>();
++		auto valid = true;
++		result.match([&](const MTPDmessages_messagesNotModified &) {
++			valid = false;
++		}, [&](const auto &data) {
++			for (const auto &message : data.vmessages().v) {
++				message.match([&](const MTPDmessage &data) {
++					messages.push_back({
++						.id = data.vid().v,
++						.incoming = !data.is_out()
++							|| data.is_post()
++							|| data.is_from_scheduled(),
++					});
++				}, [&](const MTPDmessageService &data) {
++					messages.push_back({
++						.id = data.vid().v,
++						.incoming = !data.is_out() || data.is_post(),
++					});
++				}, [&](const MTPDmessageEmpty &) {
++					valid = false;
++				});
++			}
++		});
++		if (!valid || !counter->add(messages)) {
++			return;
++		}
++		if (counter->complete) {
++			setUnreadCount(std::min(counter->count, serverCount), false);
++			calculateFirstUnreadMessage();
++			updateChatListEntry();
++		} else {
++			requestLocalReadPage(counter, generation, serverCount);
++		}
++	})).fail(crl::guard(this, [=] {
++		if (generation == _localReadGeneration) {
++			_localReadRequest = 0;
++		}
++	})).send();
++}
++
+ bool History::readInboxTillNeedsRequest(MsgId tillId) {
+ 	Expects(!tillId || IsServerMsgId(tillId));
+ 
+@@ -2207,6 +2530,11 @@ void History::applyInboxReadUpdate(
+ 		MsgId upTo,
+ 		int stillUnread,
+ 		int32 channelPts) {
++	if (supportsLocalRead() && _localReadTill > upTo) {
++		cancelLocalReadCount();
++		owner().histories().requestDialogEntry(this);
++		return;
++	}
+ 	const auto folder = folderId ? owner().folderLoaded(folderId) : nullptr;
+ 	if (folder && this->folder() != folder) {
+ 		// If history folder is unknown or not synced, request both.
+@@ -2223,6 +2551,10 @@ void History::applyInboxReadUpdate(
+ }
+ 
+ void History::inboxRead(MsgId upTo, std::optional<int> stillUnread) {
++	if (supportsLocalRead() && _localReadTill > upTo) {
++		return;
++	}
++	cancelLocalReadCount();
+ 	if (stillUnread.has_value() && folderKnown()) {
+ 		setUnreadCount(*stillUnread);
+ 	} else if (const auto still = countStillUnreadLocal(upTo)) {
+@@ -2287,7 +2619,14 @@ MsgId History::outboxReadTillId() const {
+ }
+ 
+ HistoryItem *History::lastAvailableMessage() const {
+-	return isEmpty() ? nullptr : blocks.back()->messages.back()->data().get();
++	for (const auto &block : ranges::views::reverse(blocks)) {
++		for (const auto &view : ranges::views::reverse(block->messages)) {
++			if (!view->data()->isRestoredDeleted()) {
++				return view->data();
++			}
++		}
++	}
++	return nullptr;
+ }
+ 
+ int History::unreadCount() const {
+@@ -2302,7 +2641,7 @@ bool History::useMyUnreadInParent() const {
+ 	return !isForum() && !amMonoforumAdmin();
+ }
+ 
+-void History::setUnreadCount(int newUnreadCount) {
++void History::setUnreadCount(int newUnreadCount, bool advanceCursor) {
+ 	Expects(folderKnown());
+ 
+ 	if (_unreadCount == newUnreadCount) {
+@@ -2320,7 +2659,7 @@ void History::setUnreadCount(int newUnreadCount) {
+ 			&& blocks.back()->messages.back()->data() == last
+ 			&& last->out();
+ 	}();
+-	if (newUnreadCount == 1 && !lastOutgoing) {
++	if (advanceCursor && newUnreadCount == 1 && !lastOutgoing) {
+ 		if (loadedAtBottom()) {
+ 			_firstUnreadView = !isEmpty()
+ 				? blocks.back()->messages.back().get()
+@@ -2331,8 +2670,10 @@ void History::setUnreadCount(int newUnreadCount) {
+ 		}
+ 	} else if (!newUnreadCount) {
+ 		_firstUnreadView = nullptr;
+-		if (const auto last = msgIdForRead()) {
+-			setInboxReadTill(last);
++		if (advanceCursor) {
++			if (const auto last = msgIdForRead()) {
++				setInboxReadTill(last);
++			}
+ 		}
+ 	} else if (!_firstUnreadView && !_unreadBarView && loadedAtBottom()) {
+ 		calculateFirstUnreadMessage();
+@@ -2998,6 +3339,7 @@ void History::markLoadedAtTop() {
+ 	_loadedAtTop = true;
+ 	checkLocalMessages();
+ 	addEdgesToSharedMedia();
++	restoreDeletedMessages();
+ }
+ 
+ bool History::hasGuestChatBotMessages() const {
+@@ -3437,6 +3779,10 @@ bool History::shouldBeInChatList() const {
+ }
+ 
+ void History::unknownMessageDeleted(MsgId messageId) {
++	if (_localReadRequest) {
++		cancelLocalReadCount();
++		owner().histories().requestDialogEntry(this);
++	}
+ 	/*LOG(("History::unknownMessageDeleted. Peer ID: %1, Message ID: %2.")
+ 		.arg(peer->id.value & PeerId::kChatTypeMask)
+ 		.arg(messageId.bare));*/
+@@ -3461,6 +3807,16 @@ bool History::isServerSideUnread(not_null<const HistoryItem*> item) const {
+ void History::applyDialog(
+ 		Data::Folder *requestFolder,
+ 		const MTPDdialog &data) {
++	const auto last = lastServerMessage();
++	if (supportsLocalRead() && _localReadTill > 0
++		&& last && !last->isDeleted()
++		&& Ayu::LocalRead::SnapshotIsStale(
++			data.vtop_message().v, last->id.bare)) {
++		crl::on_main(this, [=] {
++			owner().histories().requestDialogEntry(this);
++		});
++		return;
++	}
+ 	const auto folderId = data.vfolder_id();
+ 	const auto folder = !folderId
+ 		? requestFolder
+@@ -3471,9 +3827,12 @@ void History::applyDialog(
+ 		folder,
+ 		data.vunread_count().v,
+ 		data.vread_inbox_max_id().v,
+-		data.vread_outbox_max_id().v);
++		data.vread_outbox_max_id().v,
++		data.vtop_message().v);
+ 	applyDialogTopMessage(data.vtop_message().v);
+-	setUnreadMark(data.is_unread_mark());
++	setUnreadMark((supportsLocalRead() && _localUnreadMark >= 0)
++		? (_localUnreadMark != 0)
++		: data.is_unread_mark());
+ 	unreadMentions().setCount(data.vunread_mentions_count().v);
+ 	unreadReactions().setCount(data.vunread_reactions_count().v);
+ 	const auto pollVotesCount = data.vunread_poll_votes_count().v;
+@@ -3610,13 +3969,30 @@ void History::applyDialogFields(
+ 		Data::Folder *folder,
+ 		int unreadCount,
+ 		MsgId maxInboxRead,
+-		MsgId maxOutboxRead) {
++		MsgId maxOutboxRead,
++		MsgId topMessageId) {
+ 	if (folder) {
+ 		setFolder(folder);
+ 	} else {
+ 		clearFolder();
+ 	}
+-	if (!skipUnreadUpdate()
++	if (supportsLocalRead() && _localReadTill > 0
++		&& topMessageId < 0) {
++		cancelLocalReadCount();
++		owner().histories().requestDialogEntry(this);
++	} else if (supportsLocalRead() && _localReadTill > 0) {
++		cancelLocalReadCount();
++		const auto merged = Ayu::LocalRead::Merge(
++			_localReadTill.bare,
++			maxInboxRead.bare,
++			topMessageId.bare,
++			unreadCount);
++		setInboxReadTill(merged.till);
++		setUnreadCount(merged.count.value_or(unreadCount), false);
++		if (!merged.count) {
++			refreshLocalReadCount(topMessageId, unreadCount);
++		}
++	} else if (!skipUnreadUpdate()
+ 		&& maxInboxRead + 1 >= _inboxReadBefore.value_or(1)) {
+ 		setUnreadCount(unreadCount);
+ 		setInboxReadTill(maxInboxRead);
+@@ -3785,7 +4161,7 @@ MsgId History::minMsgId() const {
+ 	for (const auto &block : blocks) {
+ 		for (const auto &message : block->messages) {
+ 			const auto item = message->data();
+-			if (item->isRegular()) {
++			if (item->isRegular() && !item->isRestoredDeleted()) {
+ 				return item->id;
+ 			}
+ 		}
+@@ -3797,7 +4173,7 @@ MsgId History::maxMsgId() const {
+ 	for (const auto &block : ranges::views::reverse(blocks)) {
+ 		for (const auto &message : ranges::views::reverse(block->messages)) {
+ 			const auto item = message->data();
+-			if (item->isRegular()) {
++			if (item->isRegular() && !item->isRestoredDeleted()) {
+ 				return item->id;
+ 			}
+ 		}
+@@ -3874,6 +4250,15 @@ const Data::Thread *History::threadFor(
+ }
+ 
+ void History::forumChanged(Data::Forum *old) {
++	if (!supportsLocalRead() && _localReadTill > 0) {
++		cancelLocalReadCount();
++		_localReadTill = 0;
++		_localReadAt = 0;
++		_localUnreadMark = -1;
++		saveLocalRead();
++		_inboxReadBefore.reset();
++		owner().histories().requestDialogEntry(this);
++	}
+ 	if (inChatList()) {
+ 		notifyUnreadStateChange(old
+ 			? AdjustedForumUnreadState(old->topicsList()->unreadState())
+@@ -3910,6 +4295,15 @@ bool History::isForum() const {
+ }
+ 
+ void History::monoforumChanged(Data::SavedMessages *old) {
++	if (!supportsLocalRead() && _localReadTill > 0) {
++		cancelLocalReadCount();
++		_localReadTill = 0;
++		_localReadAt = 0;
++		_localUnreadMark = -1;
++		saveLocalRead();
++		_inboxReadBefore.reset();
++		owner().histories().requestDialogEntry(this);
++	}
+ 	if (inChatList()) {
+ 		notifyUnreadStateChange(old
+ 			? AdjustedForumUnreadState(
+@@ -4393,6 +4787,10 @@ std::vector<MsgId> History::collectMessagesFromParticipantToDelete(
+ }
+ 
+ void History::clear(ClearType type, bool markEmpty) {
++	if (type != ClearType::Unload) {
++		cancelLocalReadCount();
++	}
++	++_deletedRestoreGeneration;
+ 	_unreadBarView = nullptr;
+ 	_firstUnreadView = nullptr;
+ 	removeJoinedMessage();
+@@ -4463,6 +4861,7 @@ void History::clear(ClearType type, bool markEmpty) {
+ }
+ 
+ void History::clearUpTill(MsgId availableMinId) {
++	cancelDeletedMessageRestore();
+ 	auto remove = std::vector<not_null<HistoryItem*>>();
+ 	remove.reserve(_items.size());
+ 	for (const auto &item : _items) {
+diff --git a/Telegram/SourceFiles/history/history.h b/Telegram/SourceFiles/history/history.h
+index d3a6412..696ae84 100644
+--- a/Telegram/SourceFiles/history/history.h
++++ b/Telegram/SourceFiles/history/history.h
+@@ -16,6 +16,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ #include "base/flat_set.h"
+ #include "base/flags.h"
+ 
++namespace Ayu::LocalRead {
++struct Counter;
++} // namespace Ayu::LocalRead
++
+ class History;
+ class HistoryBlock;
+ class HistoryTranslation;
+@@ -199,6 +203,7 @@ public:
+ 		const QVector<MTPMessage> &data);
+ 
+ 	void addOlderSlice(const QVector<MTPMessage> &slice);
++	void cancelDeletedMessageRestore();
+ 	void addNewerSlice(const QVector<MTPMessage> &slice);
+ 
+ 	void newItemAdded(not_null<HistoryItem*> item, NewAddType type);
+@@ -234,7 +239,9 @@ public:
+ 	// Some old unread count is known, but we read history till some place.
+ 	[[nodiscard]] bool unreadCountRefreshNeeded(MsgId readTillId) const;
+ 
+-	void setUnreadCount(int newUnreadCount);
++	void setUnreadCount(int newUnreadCount, bool advanceCursor = true);
++	bool readLocally(MsgId tillId);
++	bool changeLocalUnreadMark(bool unread);
+ 	void setUnreadMark(bool unread);
+ 	void setFakeUnreadWhileOpened(bool enabled);
+ 	[[nodiscard]] bool fakeUnreadWhileOpened() const;
+@@ -268,7 +275,8 @@ public:
+ 		Data::Folder *folder,
+ 		int unreadCount,
+ 		MsgId maxInboxRead,
+-		MsgId maxOutboxRead);
++		MsgId maxOutboxRead,
++		MsgId topMessageId);
+ 	void dialogEntryApplied();
+ 
+ 	void cacheTopPromotion(
+@@ -515,6 +523,9 @@ public:
+ 	mtpRequestId sendRequestId = 0;
+ 
+ private:
++	void restoreDeletedMessages();
++	void queueDeletedMessagesPage();
++
+ 	friend class HistoryBlock;
+ 
+ 	enum class Flag : ushort {
+@@ -545,6 +556,16 @@ private:
+ 	// helper method for countScrollState(int top)
+ 	[[nodiscard]] Element *findScrollTopItem(int top) const;
+ 
++	[[nodiscard]] bool supportsLocalRead() const;
++	void loadLocalRead();
++	void saveLocalRead();
++	void cancelLocalReadCount();
++	void refreshLocalReadCount(MsgId top, int serverCount);
++	void requestLocalReadPage(
++		std::shared_ptr<Ayu::LocalRead::Counter> counter,
++		uint64 generation,
++		int serverCount);
++
+ 	[[nodiscard]] std::optional<int> countStillUnreadLocalFromMessages(
+ 		MsgId readTillId) const;
+ 
+@@ -665,6 +686,10 @@ private:
+ 	const std::unique_ptr<HistoryMainElementDelegateMixin> _delegateMixin;
+ 
+ 	Flags _flags = 0;
++	uint64 _deletedRestoreGeneration = 0;
++	int64 _deletedRestoreAfter = 0;
++	int64 _deletedRestoreBefore = 0;
++	int64 _deletedRestoreCursor = 0;
+ 	int _width = 0;
+ 	int _height = 0;
+ 	Element *_unreadBarView = nullptr;
+@@ -678,6 +703,11 @@ private:
+ 	std::optional<Data::Folder*> _folder;
+ 	Data::CommunityInfo *_communityInfo = nullptr;
+ 
++	MsgId _localReadTill = 0;
++	int64 _localReadAt = 0;
++	int _localUnreadMark = -1;
++	uint64 _localReadGeneration = 0;
++	mtpRequestId _localReadRequest = 0;
+ 	std::optional<MsgId> _inboxReadBefore;
+ 	std::optional<MsgId> _outboxReadBefore;
+ 	std::optional<int> _unreadCount;
+diff --git a/Telegram/SourceFiles/history/history_item.cpp b/Telegram/SourceFiles/history/history_item.cpp
+index 3f9ecd1..9248808 100644
+--- a/Telegram/SourceFiles/history/history_item.cpp
++++ b/Telegram/SourceFiles/history/history_item.cpp
+@@ -1550,6 +1550,9 @@ HistoryItem *HistoryItem::lookupDiscussionPostOriginal() const {
+ }
+ 
+ PeerData *HistoryItem::computeDisplayFrom() const {
++	if (isRestoredUnknownSender()) {
++		return nullptr;
++	}
+ 	if (const auto sender = discussionPostOriginalSender()) {
+ 		return sender;
+ 	} else if (const auto forwarded = Get<HistoryMessageForwarded>()) {
+@@ -3130,6 +3133,9 @@ void HistoryItem::changeReplyToTopCounter(
+ }
+ 
+ QString HistoryItem::notificationHeader() const {
++	if (isRestoredUnknownSender()) {
++		return displayHiddenSenderInfo()->name;
++	}
+ 	if (isService()) {
+ 		return QString();
+ 	} else if (out() && isFromScheduled() && !_history->peer->isSelf()) {
+@@ -3925,6 +3931,9 @@ TimeId HistoryItem::originalDate() const {
+ }
+ 
+ PeerData *HistoryItem::originalSender() const {
++	if (isRestoredUnknownSender()) {
++		return nullptr;
++	}
+ 	if (const auto forwarded = Get<HistoryMessageForwarded>()) {
+ 		return forwarded->originalSender;
+ 	}
+@@ -3933,6 +3942,9 @@ PeerData *HistoryItem::originalSender() const {
+ }
+ 
+ const HiddenSenderInfo *HistoryItem::originalHiddenSenderInfo() const {
++	if (isRestoredUnknownSender()) {
++		return displayHiddenSenderInfo();
++	}
+ 	if (const auto forwarded = Get<HistoryMessageForwarded>()) {
+ 		return forwarded->originalHiddenSenderInfo.get();
+ 	}
+@@ -3940,6 +3952,11 @@ const HiddenSenderInfo *HistoryItem::originalHiddenSenderInfo() const {
+ }
+ 
+ const HiddenSenderInfo *HistoryItem::displayHiddenSenderInfo() const {
++	if (isRestoredUnknownSender()) {
++		static const auto unknown = HiddenSenderInfo(
++			QStringLiteral("Unknown sender"), false);
++		return &unknown;
++	}
+ 	if (const auto forwarded = Get<HistoryMessageForwarded>()) {
+ 		return forwarded->savedFromHiddenSenderInfo
+ 			? forwarded->savedFromHiddenSenderInfo.get()
+@@ -4161,6 +4178,23 @@ void HistoryItem::setDeleted() {
+ 	}
+ }
+ 
++void HistoryItem::setRestoredDeleted(bool unknownSender) {
++	_restoredDeleted = true;
++	_restoredUnknownSender = unknownSender;
++	_flags &= ~(MessageFlag::DisplayFromChecked | MessageFlag::DisplayFromProfiles);
++	_displayFrom = nullptr;
++	setDeleted();
++	markDeletedAnimated();
++}
++
++bool HistoryItem::isRestoredUnknownSender() const {
++	return _restoredUnknownSender;
++}
++
++bool HistoryItem::isRestoredDeleted() const {
++	return _restoredDeleted;
++}
++
+ bool HistoryItem::isDeleted() const {
+ 	return _deleted;
+ }
+@@ -4526,6 +4560,9 @@ bool HistoryItem::isService() const {
+ }
+ 
+ bool HistoryItem::unread(not_null<Data::Thread*> thread) const {
++	if (isDeleted()) {
++		return false;
++	}
+ 	// Messages from myself are always read, unless scheduled.
+ 	if (_history->peer->isSelf() && !isFromScheduled()) {
+ 		return false;
+@@ -5005,6 +5042,8 @@ ItemPreview HistoryItem::toPreview(ToPreviewOptions options) const {
+ 	const auto sender = [&]() -> std::optional<QString> {
+ 		if (options.hideSender || isPostHidingAuthor() || isEmpty()) {
+ 			return {};
++		} else if (isRestoredUnknownSender()) {
++			return displayHiddenSenderInfo()->name;
+ 		} else if (!_history->peer->isUser() || isGuestChatBotMessage()) {
+ 			if (const auto from = displayFrom()) {
+ 				return fromSender(from);
+diff --git a/Telegram/SourceFiles/history/history_item.h b/Telegram/SourceFiles/history/history_item.h
+index 8eb5502..2b1ba8d 100644
+--- a/Telegram/SourceFiles/history/history_item.h
++++ b/Telegram/SourceFiles/history/history_item.h
+@@ -470,6 +470,9 @@ public:
+ 	void setPostAuthor(const QString &author);
+ 	void setDeleted();
+ 	[[nodiscard]] bool isDeleted() const;
++	[[nodiscard]] bool isRestoredDeleted() const;
++	void setRestoredDeleted(bool unknownSender = false);
++	[[nodiscard]] bool isRestoredUnknownSender() const;
+ 	[[nodiscard]] bool isBurnt() const;
+ 	[[nodiscard]] bool wasDeletedAnimated() const;
+ 	void markDeletedAnimated();
+@@ -829,6 +832,8 @@ private:
+ 
+ 	bool _deleted = false;
+ 	bool _deletedAnimated = false;
++	bool _restoredDeleted : 1 = false;
++	bool _restoredUnknownSender : 1 = false;
+ 
+ 	TimeId _date = 0;
+ 	TimeId _ttlDestroyAt = 0;
+diff --git a/Telegram/SourceFiles/history/history_item_text.cpp b/Telegram/SourceFiles/history/history_item_text.cpp
+index 0e10e5a..bf6d41c 100644
+--- a/Telegram/SourceFiles/history/history_item_text.cpp
++++ b/Telegram/SourceFiles/history/history_item_text.cpp
+@@ -286,6 +286,9 @@ QString ReplySenderNameForSelectedCopy(
+ 		}
+ 	}
+ 	if (message) {
++		if (message->isRestoredUnknownSender()) {
++			return message->originalHiddenSenderInfo()->name;
++		}
+ 		if (const auto from = message->displayFrom()) {
+ 			return from->name();
+ 		}
+@@ -409,7 +412,9 @@ TextForMimeData HistorySelectedItemPlainWrappedText(
+ 	auto result = TextForMimeData();
+ 	const auto time = u"[%1] "_q.arg(
+ 		QLocale().toString(ItemDateTime(item), QLocale::ShortFormat));
+-	const auto author = item->author()->name();
++	const auto author = item->isRestoredUnknownSender()
++		? item->originalHiddenSenderInfo()->name
++		: item->author()->name();
+ 	const auto size = time.size() + author.size() + 2 + body.expanded.size();
+ 	result.reserve(size);
+ 	result.append(time).append(author).append(u": "_q);
+@@ -570,7 +575,9 @@ TextForMimeData HistorySelectedItemWrappedText(
+ 	auto result = TextForMimeData();
+ 	const auto time = u"[%1] "_q.arg(
+ 		QLocale().toString(ItemDateTime(item), QLocale::ShortFormat));
+-	const auto author = item->author()->name();
++	const auto author = item->isRestoredUnknownSender()
++		? item->originalHiddenSenderInfo()->name
++		: item->author()->name();
+ 	const auto replyTo = tr::lng_context_copy_in_reply_to(
+ 		tr::now,
+ 		lt_name,
+diff --git a/Telegram/SourceFiles/history/view/history_view_element.cpp b/Telegram/SourceFiles/history/view/history_view_element.cpp
+index d65dda4..1e0d000 100644
+--- a/Telegram/SourceFiles/history/view/history_view_element.cpp
++++ b/Telegram/SourceFiles/history/view/history_view_element.cpp
+@@ -2394,6 +2394,7 @@ bool Element::computeIsAttachToPrevious(not_null<Element*> previous) {
+ 	const auto mayBeAttached = [](not_null<Element*> view) {
+ 		const auto item = view->data();
+ 		return !item->isService()
++			&& !item->isRestoredUnknownSender()
+ 			&& !item->isEmpty()
+ 			&& !item->isSponsored()
+ 			&& !item->isPostHidingAuthor()
+@@ -2477,6 +2478,9 @@ bool Element::computeIsAttachToPrevious(not_null<Element*> previous) {
+ }
+ 
+ ClickHandlerPtr Element::fromLink() const {
++	if (data()->isRestoredUnknownSender()) {
++		return nullptr;
++	}
+ 	if (_fromLink) {
+ 		return _fromLink;
+ 	}
+diff --git a/Telegram/SourceFiles/history/view/history_view_reply.cpp b/Telegram/SourceFiles/history/view/history_view_reply.cpp
+index 8ac7151..122f16e 100644
+--- a/Telegram/SourceFiles/history/view/history_view_reply.cpp
++++ b/Telegram/SourceFiles/history/view/history_view_reply.cpp
+@@ -581,6 +581,9 @@ PeerData *Reply::sender(
+ 			return forwarded->originalSender;
+ 		}
+ 	}
++	if (message->isRestoredUnknownSender()) {
++		return nullptr;
++	}
+ 	if (const auto from = message->displayFrom()) {
+ 		return from;
+ 	}
+@@ -591,6 +594,10 @@ QString Reply::senderName(
+ 		not_null<const Element*> view,
+ 		not_null<HistoryMessageReply*> data,
+ 		bool shorten) const {
++	if (data->resolvedMessage
++		&& data->resolvedMessage->isRestoredUnknownSender()) {
++		return data->resolvedMessage->originalHiddenSenderInfo()->name;
++	}
+ 	if (const auto peer = sender(view, data)) {
+ 		return senderName(peer, shorten);
+ 	} else if (!data->resolvedMessage) {
+diff --git a/Telegram/SourceFiles/platform/mac/launcher_mac.mm b/Telegram/SourceFiles/platform/mac/launcher_mac.mm
+index 0fe503d..51817b6 100644
+--- a/Telegram/SourceFiles/platform/mac/launcher_mac.mm
++++ b/Telegram/SourceFiles/platform/mac/launcher_mac.mm
+@@ -40,9 +40,16 @@
+ 		const auto updaterDisabled = Core::UpdaterDisabled();
+ #endif
+ 		if (updaterDisabled) {
+-			NSDictionary *conf = [NSDictionary dictionaryWithObject:[NSArray array] forKey:NSWorkspaceLaunchConfigurationArguments];
+-			[[NSWorkspace sharedWorkspace] launchApplicationAtURL:[NSURL fileURLWithPath:Q2NSString(cExeDir() + cExeName())] options:NSWorkspaceLaunchAsync | NSWorkspaceLaunchNewInstance configuration:conf error:0];
+-			return true;
++			NSMutableArray *arguments = [NSMutableArray arrayWithObjects:
++				@"-workdir", Q2NSString(cWorkingDir()), @"-noupdate", nil];
++			if (cRestartingToSettings()) [arguments addObject:@"-tosettings"];
++			if (cStartInTray()) [arguments addObject:@"-startintray"];
++			if (cDataFile() != u"data"_q) {
++				[arguments addObject:@"-key"];
++				[arguments addObject:Q2NSString(cDataFile())];
++			}
++			NSDictionary *conf = [NSDictionary dictionaryWithObject:arguments forKey:NSWorkspaceLaunchConfigurationArguments];
++			return [[NSWorkspace sharedWorkspace] launchApplicationAtURL:[NSURL fileURLWithPath:Q2NSString(cExeDir() + cExeName())] options:NSWorkspaceLaunchAsync | NSWorkspaceLaunchNewInstance configuration:conf error:0] != nil;
+ 		}
+ 	}
+ 
+diff --git a/Telegram/SourceFiles/storage/storage_account.cpp b/Telegram/SourceFiles/storage/storage_account.cpp
+index 4a6b4ac..f5f63f1 100644
+--- a/Telegram/SourceFiles/storage/storage_account.cpp
++++ b/Telegram/SourceFiles/storage/storage_account.cpp
+@@ -3843,4 +3843,17 @@ void Account::writePrefImpl<bool>(std::string_view key, bool value) {
+ 	writePrefGeneric(key, value ? "\x1"_q : QByteArray());
+ }
+ 
++template <>
++std::optional<QByteArray> Account::readPrefImpl<QByteArray>(
++		std::string_view key) {
++	return readPrefGeneric(key);
++}
++
++template <>
++void Account::writePrefImpl<QByteArray>(
++		std::string_view key,
++		QByteArray value) {
++	writePrefGeneric(key, value);
++}
++
+ } // namespace Storage
+diff --git a/Telegram/Telegram.plist b/Telegram/Telegram.plist
+index 5e7e81a..211cb50 100644
+--- a/Telegram/Telegram.plist
++++ b/Telegram/Telegram.plist
+@@ -140,37 +140,6 @@
+ 	<array>
+ 		<string>MacOSX</string>
+ 	</array>
+-	<key>CFBundleURLTypes</key>
+-	<array>
+-		<dict>
+-			<key>CFBundleTypeRole</key>
+-			<string>Viewer</string>
+-			<key>CFBundleURLIconFile</key>
+-			<string>AppIcon-Default.icns</string>
+-			<key>CFBundleURLName</key>
+-			<string>@bundle_identifier_plist@</string>
+-			<key>CFBundleURLSchemes</key>
+-			<array>
+-				<string>tg</string>
+-				<string>tonsite</string>
+-			</array>
+-		</dict>
+-	</array>
+-	<key>CFBundleDocumentTypes</key>
+-	<array>
+-		<dict>
+-			<key>CFBundleTypeName</key>
+-			<string>Any File</string>
+-			<key>CFBundleTypeRole</key>
+-			<string>Viewer</string>
+-			<key>LSHandlerRank</key>
+-			<string>Alternate</string>
+-			<key>LSItemContentTypes</key>
+-			<array>
+-				<string>public.data</string>
+-			</array>
+-		</dict>
+-	</array>
+ 	<key>CFBundleVersion</key>
+ 	<string>@desktop_app_version_string@</string>
+ 	<key>ITSAppUsesNonExemptEncryption</key>
+--- /dev/null
++++ b/Telegram/SourceFiles/ayu/data/deleted_message_restore.h
+@@ -0,0 +1,75 @@
++// Local restoration policy; independent of UI and database dependencies.
++#pragma once
++
++#include <cstdint>
++
++namespace AyuMessages {
++
++struct DeletedHistoryRange {
++	std::int64_t after = 0;
++	std::int64_t before = 0;
++
++	[[nodiscard]] bool contains(std::int64_t id) const {
++		return id > after && id < before;
++	}
++};
++
++[[nodiscard]] inline DeletedHistoryRange DeletedRange(
++		std::int64_t first,
++		std::int64_t last,
++		bool atTop,
++		bool atBottom,
++		std::int64_t serverMax) {
++	if ((!first || !last) && !(atTop && atBottom)) {
++		return {};
++	}
++	return {
++		.after = atTop ? 0 : first - 1,
++		.before = atBottom ? serverMax + 1 : last + 1,
++	};
++}
++
++enum class DeletedSenderIdentity {
++	Invalid,
++	Unknown,
++	Self,
++	Peer,
++};
++
++[[nodiscard]] inline DeletedSenderIdentity DeletedSender(
++		std::int64_t from,
++		std::int64_t self,
++		std::int64_t peer,
++		int flags,
++		bool privateChat,
++		bool channel) {
++	const auto outgoing = (flags & 0x00000002) != 0;
++	const auto post = (flags & 0x00004000) != 0;
++	if (post && !channel) {
++		return DeletedSenderIdentity::Invalid;
++	} else if (outgoing && from == self) {
++		return DeletedSenderIdentity::Self;
++	} else if ((!outgoing || post) && (privateChat || post) && from == peer) {
++		return DeletedSenderIdentity::Peer;
++	}
++	return DeletedSenderIdentity::Unknown;
++}
++
++template <typename Message>
++[[nodiscard]] bool CanRestoreDeleted(
++		const Message &message,
++		std::int64_t user,
++		std::int64_t dialog,
++		DeletedHistoryRange range) {
++	return message.userId == user
++		&& message.dialogId == dialog
++		&& message.topicId == 0
++		&& message.replyTopId == 0
++		&& !message.replyForumTopic
++		&& !(message.flags & (0x00040000 | 0x10000000))
++		&& message.date > 0
++		&& !message.text.empty()
++		&& range.contains(message.messageId);
++}
++
++} // namespace AyuMessages
+--- /dev/null
++++ b/Telegram/SourceFiles/ayu/data/local_read_state.h
+@@ -0,0 +1,128 @@
++#pragma once
++
++#include <algorithm>
++#include <charconv>
++#include <cstdint>
++#include <limits>
++#include <optional>
++#include <span>
++#include <string>
++#include <string_view>
++
++namespace Ayu::LocalRead {
++
++struct Record {
++	std::int64_t till = 0;
++	std::int64_t readAt = 0;
++	int unreadMark = -1;
++	friend bool operator==(const Record &, const Record &) = default;
++};
++
++inline std::string Key(std::uint64_t user, std::uint64_t peer) {
++	return "ayu/local-read/1/" + std::to_string(user)
++		+ "/" + std::to_string(peer);
++}
++
++inline std::string Serialize(Record record) {
++	return "1:" + std::to_string(record.till)
++		+ ":" + std::to_string(record.readAt)
++		+ ":" + std::to_string(record.unreadMark);
++}
++
++inline Record Parse(std::string_view bytes) {
++	if (!bytes.starts_with("1:") || bytes.size() > 64) {
++		return {};
++	}
++	bytes.remove_prefix(2);
++	auto record = Record();
++	const auto number = [&](auto &value, bool last) {
++		const auto end = last ? bytes.size() : bytes.find(':');
++		if (!end || end == std::string_view::npos) {
++			return false;
++		}
++		const auto result = std::from_chars(
++			bytes.data(), bytes.data() + end, value);
++		if (result.ec != std::errc() || result.ptr != bytes.data() + end) {
++			return false;
++		}
++		bytes.remove_prefix(end + (last ? 0 : 1));
++		return true;
++	};
++	if (!number(record.till, false)
++		|| !number(record.readAt, false)
++		|| !number(record.unreadMark, true)
++		|| record.till < 0
++		|| record.till > std::numeric_limits<std::int32_t>::max()
++		|| record.readAt < 0
++		|| record.unreadMark < -1
++		|| record.unreadMark > 1) {
++		return {};
++	}
++	return record;
++}
++
++inline bool SnapshotIsStale(std::int64_t top, std::int64_t knownTop) {
++	return knownTop > top;
++}
++
++struct MergeResult {
++	std::int64_t till = 0;
++	std::optional<int> count;
++};
++
++inline MergeResult Merge(
++		std::int64_t local,
++		std::int64_t server,
++		std::int64_t top,
++		int serverCount) {
++	return {
++		.till = std::max(local, server),
++		.count = (server >= local || !serverCount)
++			? std::optional<int>(serverCount)
++			: (top >= 0 && top <= local)
++			? std::optional<int>(0) : std::nullopt,
++	};
++}
++
++struct Message {
++	std::int64_t id = 0;
++	bool incoming = false;
++	bool known = true;
++};
++
++struct Counter {
++	std::int64_t till = 0;
++	std::int64_t before = 0;
++	int count = 0;
++	int pages = 0;
++	bool complete = false;
++	bool failed = false;
++
++	bool add(std::span<const Message> messages) {
++		if (complete || failed || ++pages > 20) {
++			failed = true;
++			return false;
++		}
++		if (messages.empty()) {
++			complete = true;
++			return true;
++		}
++		auto next = before;
++		for (const auto &message : messages) {
++			if (message.id <= 0 || message.id >= next || !message.known) {
++				failed = true;
++				return false;
++			}
++			next = message.id;
++			if (message.id <= till) {
++				complete = true;
++			} else if (message.incoming) {
++				++count;
++			}
++		}
++		before = next;
++		return true;
++	}
++};
++
++} // namespace Ayu::LocalRead
+--- /dev/null
++++ b/Telegram/SourceFiles/test/deleted_message_restore_test.cpp
+@@ -0,0 +1,152 @@
++#include "ayu/data/deleted_message_restore.h"
++
++#include <sqlite3.h>
++#include <algorithm>
++#include <cassert>
++#include <iostream>
++#include <filesystem>
++#include <string>
++#include <vector>
++
++namespace {
++
++struct Row {
++	long long userId = 1;
++	long long dialogId = 2;
++	long long topicId = 0;
++	long long replyTopId = 0;
++	bool replyForumTopic = false;
++	int date = 100;
++	int flags = 0;
++	int messageId = 50;
++	std::string text = "saved text";
++};
++
++void CheckPolicy() {
++	using namespace AyuMessages;
++	const auto partial = DeletedRange(20, 80, false, false, 1000);
++	assert(partial.contains(20) && partial.contains(80));
++	assert(!partial.contains(19) && !partial.contains(81));
++	assert(!DeletedRange(0, 0, false, true, 1000).contains(50));
++	assert(!DeletedRange(0, 0, true, false, 1000).contains(50));
++	const auto empty = DeletedRange(0, 0, true, true, 1000);
++	assert(empty.contains(1) && empty.contains(1000));
++	assert(!empty.contains(0) && !empty.contains(1001));
++	assert(DeletedRange(20, 80, true, false, 1000).contains(1));
++	assert(!DeletedRange(20, 80, true, false, 1000).contains(81));
++	assert(DeletedRange(20, 80, false, true, 1000).contains(1000));
++	assert(!DeletedRange(20, 80, false, true, 1000).contains(19));
++
++	using Sender = DeletedSenderIdentity;
++	assert(DeletedSender(11, 1, 2, 0, false, false) == Sender::Unknown);
++	assert(DeletedSender(2, 1, 2, 0, false, false) == Sender::Unknown);
++	assert(DeletedSender(2, 1, 2, 0, true, false) == Sender::Peer);
++	assert(DeletedSender(1, 1, 2, 2, false, false) == Sender::Self);
++	assert(DeletedSender(11, 1, 2, 2, false, false) == Sender::Unknown);
++	assert(DeletedSender(2, 1, 2, 2, true, false) == Sender::Unknown);
++	assert(DeletedSender(2, 1, 2, 0x4002, false, true) == Sender::Peer);
++	assert(DeletedSender(2, 1, 2, 0x4000, false, true) == Sender::Peer);
++	assert(DeletedSender(11, 1, 2, 0x4000, false, true) == Sender::Unknown);
++	assert(DeletedSender(2, 1, 2, 0x4000, false, false) == Sender::Invalid);
++
++	auto row = Row();
++	assert(CanRestoreDeleted(row, 1, 2, partial));
++	assert(!CanRestoreDeleted(row, 3, 2, partial));
++	assert(!CanRestoreDeleted(row, 1, 3, partial));
++	row.topicId = 7;
++	assert(!CanRestoreDeleted(row, 1, 2, partial));
++	row.topicId = 0;
++	row.replyTopId = 9;
++	assert(!CanRestoreDeleted(row, 1, 2, partial));
++	row.replyTopId = 0;
++	row.replyForumTopic = true;
++	assert(!CanRestoreDeleted(row, 1, 2, partial));
++	row.replyForumTopic = false;
++	row.flags = 0x00040000;
++	assert(!CanRestoreDeleted(row, 1, 2, partial));
++	row.flags = 0x10000000;
++	assert(!CanRestoreDeleted(row, 1, 2, partial));
++	row.flags = 0;
++	row.messageId = -1;
++	assert(!CanRestoreDeleted(row, 1, 2, partial));
++	row.messageId = 50;
++	row.date = 0;
++	assert(!CanRestoreDeleted(row, 1, 2, partial));
++	row.date = 100;
++	row.text.clear();
++	assert(!CanRestoreDeleted(row, 1, 2, partial));
++}
++
++void CheckDatabasePaging(const char *path) {
++	sqlite3 *db = nullptr;
++	assert(sqlite3_open(path, &db) == SQLITE_OK);
++	assert(sqlite3_exec(db,
++		"CREATE TABLE IF NOT EXISTS deleted (user INTEGER, dialog INTEGER, "
++		"topic INTEGER, id INTEGER, date INTEGER, text TEXT)",
++		nullptr, nullptr, nullptr) == SQLITE_OK);
++	assert(sqlite3_exec(db, "DELETE FROM deleted", nullptr, nullptr, nullptr)
++		== SQLITE_OK);
++	assert(sqlite3_exec(db, "BEGIN", nullptr, nullptr, nullptr) == SQLITE_OK);
++	for (auto id = 1; id <= 701; ++id) {
++		const auto sql = "INSERT INTO deleted VALUES (1,2,0,"
++			+ std::to_string(id) + ",100,'saved text')";
++		assert(sqlite3_exec(db, sql.c_str(), nullptr, nullptr, nullptr)
++			== SQLITE_OK);
++	}
++	assert(sqlite3_exec(db,
++		"INSERT INTO deleted VALUES (99,2,0,400,100,'other account');"
++		"INSERT INTO deleted VALUES (1,99,0,401,100,'other chat');"
++		"INSERT INTO deleted VALUES (1,2,9,402,100,'topic');"
++		"COMMIT", nullptr, nullptr, nullptr) == SQLITE_OK);
++	assert(sqlite3_close(db) == SQLITE_OK);
++	// Reopen the actual SQLite file to check persistence across connections.
++	assert(sqlite3_open(path, &db) == SQLITE_OK);
++	const auto range = AyuMessages::DeletedRange(100, 600, false, false, 1000);
++	auto before = range.before;
++	auto ids = std::vector<int>();
++	while (before > range.after) {
++		sqlite3_stmt *statement = nullptr;
++		assert(sqlite3_prepare_v2(db,
++			"SELECT user,dialog,topic,id,date,text FROM deleted "
++			"WHERE user=1 AND dialog=2 AND id>? AND id<? "
++			"ORDER BY id DESC LIMIT 32", -1, &statement, nullptr) == SQLITE_OK);
++		sqlite3_bind_int64(statement, 1, range.after);
++		sqlite3_bind_int64(statement, 2, before);
++		auto next = before;
++		while (sqlite3_step(statement) == SQLITE_ROW) {
++			auto row = Row();
++			row.userId = sqlite3_column_int64(statement, 0);
++			row.dialogId = sqlite3_column_int64(statement, 1);
++			row.topicId = sqlite3_column_int64(statement, 2);
++			row.messageId = sqlite3_column_int(statement, 3);
++			row.date = sqlite3_column_int(statement, 4);
++			next = row.messageId;
++			if (AyuMessages::CanRestoreDeleted(row, 1, 2, range)) {
++				ids.push_back(row.messageId);
++			}
++		}
++		sqlite3_finalize(statement);
++		if (next >= before) {
++			break;
++		}
++		before = next;
++	}
++	assert(ids.size() == 501);
++	assert(ids.front() == 600 && ids.back() == 100);
++	assert(std::count(ids.begin(), ids.end(), 402) == 1);
++	assert(std::is_sorted(ids.begin(), ids.end(), std::greater<>()));
++	assert(sqlite3_close(db) == SQLITE_OK);
++}
++
++} // namespace
++
++int main(int argc, char **argv) {
++	if (argc != 2 || !*argv[1] || std::filesystem::exists(
++			std::filesystem::symlink_status(argv[1]))) {
++		std::cerr << "Pass a fresh, nonexistent test database path.\n";
++		return 1;
++	}
++	CheckPolicy();
++	CheckDatabasePaging(argv[1]);
++	std::cout << "PASS: bounds, isolation, unsupported topics, persistence, paging\n";
++}
+--- /dev/null
++++ b/Telegram/SourceFiles/test/local_read_state_test.cpp
+@@ -0,0 +1,90 @@
++#include "ayu/data/local_read_state.h"
++
++#include <cassert>
++#include <filesystem>
++#include <fstream>
++#include <iostream>
++#include <iterator>
++#include <map>
++#include <vector>
++
++using namespace Ayu::LocalRead;
++
++void CheckPolicy() {
++	const auto record = Record{ 501, 1792065600, 0 };
++	assert(Parse(Serialize(record)) == record);
++	assert(Parse(Serialize({ 0, 0, 1 })).unreadMark == 1);
++	for (const auto bad : { "", "2:501:1:0", "1:-1:1:0", "1:2:-1:0",
++		"1:2147483648:1:0", "1:2:1:3", "1:2:1:0x", "1:2:1:",
++		"1:9999999999999999999999999999:1:0", "1:2:1:0:0" }) {
++		assert(Parse(bad) == Record());
++	}
++	assert(Key(1, 2) != Key(2, 2));
++	assert(Key(1, 2) != Key(1, (1ULL << 32) + 2));
++	assert(Merge(501, 400, 501, 40).count == 0);
++	assert(SnapshotIsStale(501, 502));
++	assert(!SnapshotIsStale(502, 502));
++	assert(!SnapshotIsStale(502, 501));
++	assert(Merge(501, 510, 600, 7).count == 7);
++	assert(Merge(501, 510, 600, 7).till == 510);
++	assert(!Merge(501, 400, 600, 40).count);
++	assert(!Merge(501, 400, -1, 40).count);
++	assert(Merge(501, 400, 600, 0).count == 0);
++	assert(Merge(501, 400, 0, 0).till == 501);
++
++	auto counter = Counter{ .till = 501, .before = 601 };
++	const auto page1 = std::vector<Message>{ {600, false}, {590, true}, {540, true} };
++	const auto page2 = std::vector<Message>{ {520, false}, {510, true} };
++	assert(counter.add(page1) && !counter.complete && counter.count == 2);
++	assert(counter.add(page2) && !counter.complete && counter.count == 3);
++	assert(counter.add({}) && counter.complete && counter.count == 3);
++	// Deleted messages and ID gaps are absent, not subtracted as if still present.
++	auto deleted = Counter{ .till = 501, .before = 601 };
++	assert(deleted.add(std::vector<Message>{ {600, false}, {510, true} }));
++	assert(deleted.add({}) && deleted.count == 1);
++	// Empty/error/duplicate or non-progressing responses never become a zero count.
++	for (const auto &page : {
++		std::vector<Message>{{600, true, false}},
++		std::vector<Message>{{600, true}, {600, true}},
++		std::vector<Message>{{601, true}},
++		std::vector<Message>{{0, true}},
++	}) {
++		auto failed = Counter{ .till = 501, .before = 601 };
++		assert(!failed.add(page) && failed.failed && !failed.complete);
++	}
++	auto bounded = Counter{ .till = 1, .before = 10000 };
++	for (auto i = 0; i < 20; ++i) {
++		assert(bounded.add(std::vector<Message>{{9999 - i, true}}));
++	}
++	assert(!bounded.add({}) && bounded.failed && !bounded.complete);
++	// Partial reads retain only the newer incoming messages.
++	auto partial = Counter{ .till = 550, .before = 601 };
++	assert(partial.add(page1) && partial.complete && partial.count == 1);
++}
++
++int main(int argc, char **argv) {
++	CheckPolicy();
++	if (argc != 3) {
++		return 1;
++	}
++	const auto path = std::filesystem::path(argv[2]);
++	const auto record = Record{ 501, 1792065600, 0 };
++	if (std::string_view(argv[1]) == "write") {
++		assert(!std::filesystem::exists(std::filesystem::symlink_status(path)));
++		auto output = std::ofstream(path, std::ios::binary);
++		output << Serialize(record);
++		output.close();
++		assert(output.good());
++	} else {
++		assert(std::string_view(argv[1]) == "read");
++		assert(std::filesystem::is_regular_file(std::filesystem::symlink_status(path)));
++		auto input = std::ifstream(path, std::ios::binary);
++		const auto bytes = std::string(std::istreambuf_iterator<char>(input), {});
++		const auto restored = Parse(bytes);
++		assert(restored == record);
++		assert(Merge(restored.till, 400, 501, 40).count == 0);
++		assert(!Merge(restored.till, 400, 600, 43).count);
++	}
++	std::cout << "PASS: restart, read timestamp, account/peer isolation, partial reads, "
++		"new/deleted/outgoing messages, malformed data, bounded paging\n";
++}

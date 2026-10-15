@@ -24,3 +24,10 @@ __pycache__/
 # ── Docs, kept local only ─────────────────────────────────────────────
 README.md
 CLAUDE.md
+
+# Machine-local account inventories and test/install receipts
+docs/AUDIT_2026-10-14.md
+docs/AUDIT_FIXES_2026-10-14.md
+docs/AUS3_LIVE_TEST_2026-10-14.md
+experimental/ayugram-inline/*.json
+experimental/ayugram-inline/open-aus3.applescript

@@ -295,6 +295,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
+if CommandLine.arguments.dropFirst().first == "--quit-pid" {
+    guard CommandLine.arguments.count == 4,
+          let pid = Int32(CommandLine.arguments[2]), pid > 0,
+          let target = NSRunningApplication(processIdentifier: pid),
+          let executable = target.executableURL,
+          executable.resolvingSymlinksInPath().path == URL(fileURLWithPath: CommandLine.arguments[3]).resolvingSymlinksInPath().path
+    else { exit(2) }
+    exit(target.terminate() ? 0 : 1)
+}
 let app = NSApplication.shared
 let del = AppDelegate()
 app.delegate = del

@@ -1,0 +1,324 @@
+diff --git a/Telegram/build/prepare/prepare.py b/Telegram/build/prepare/prepare.py
+index c71d293..c1f5ff0 100644
+--- a/Telegram/build/prepare/prepare.py
++++ b/Telegram/build/prepare/prepare.py
+@@ -270,6 +270,9 @@ def filterByPlatform(commands):
+     return [result, dependencies, version]
+ 
+ def stage(name, commands, location = 'Libraries'):
++    # The isolated macOS build forces crash reporting off.
++    if mac and name in ('breakpad', 'crashpad'):
++        return
+     if location == 'Libraries':
+         directory = libsDir
+     elif location == 'ThirdParty':
+@@ -690,7 +693,7 @@ mac:
+ """)
+ 
+ stage('opus', """
+-    git clone -b v1.5.2 https://github.com/xiph/opus.git
++    git clone --filter=blob:none -b v1.5.2 https://github.com/xiph/opus.git
+     cd opus
+ win:
+     cmake -B out . ^
+@@ -708,7 +711,7 @@ mac:
+ """)
+ 
+ stage('rnnoise', """
+-    git clone https://github.com/desktop-app/rnnoise.git
++    git clone --filter=blob:none https://github.com/desktop-app/rnnoise.git
+     cd rnnoise
+     git checkout d8ea2b0
+     mkdir out
+@@ -768,7 +771,7 @@ win:
+ 
+ # Somehow in x86 Debug build dav1d crashes on AV1 10bpc videos.
+ stage('dav1d', """
+-    git clone -b 1.5.4 https://code.videolan.org/videolan/dav1d.git
++    git clone --filter=blob:none -b 1.5.4 https://code.videolan.org/videolan/dav1d.git
+     cd dav1d
+ win32:
+     SET "TARGET=x86"
+@@ -833,7 +836,7 @@ mac:
+ """)
+ 
+ stage('openh264', """
+-    git clone -b v2.6.0 https://github.com/cisco/openh264.git
++    git clone --filter=blob:none -b v2.6.0 https://github.com/cisco/openh264.git
+     cd openh264
+ win32:
+     SET "TARGET=x86"
+@@ -891,7 +894,7 @@ mac:
+ """)
+ 
+ stage('libavif', """
+-    git clone -b v1.4.2 https://github.com/AOMediaCodec/libavif.git
++    git clone --filter=blob:none -b v1.4.2 https://github.com/AOMediaCodec/libavif.git
+     cd libavif
+ win:
+     cmake . ^
+@@ -920,7 +923,7 @@ mac:
+ """)
+ 
+ stage('libde265', """
+-    git clone -b v1.1.1 https://github.com/strukturag/libde265.git
++    git clone --filter=blob:none -b v1.1.1 https://github.com/strukturag/libde265.git
+     cd libde265
+ win:
+     cmake . ^
+@@ -952,7 +955,7 @@ mac:
+ """)
+ 
+ stage('libwebp', """
+-    git clone -b v1.6.0 https://github.com/webmproject/libwebp.git
++    git clone --filter=blob:none -b v1.6.0 https://github.com/webmproject/libwebp.git
+     cd libwebp
+ win:
+     nmake /f Makefile.vc CFG=debug-static OBJDIR=out RTLIBCFG=static all
+@@ -991,7 +994,7 @@ mac:
+ """)
+ 
+ stage('libheif', """
+-    git clone -b v1.23.1 https://github.com/strukturag/libheif.git
++    git clone --filter=blob:none -b v1.23.1 https://github.com/strukturag/libheif.git
+     cd libheif
+ win:
+     %THIRDPARTY_DIR%\\msys64\\usr\\bin\\sed.exe -i 's/LIBHEIF_EXPORTS/LIBDE265_STATIC_BUILD/g' libheif/CMakeLists.txt
+@@ -1051,7 +1054,7 @@ mac:
+ """)
+ 
+ stage('libjxl', """
+-    git clone -b v0.12.0 --recursive --shallow-submodules https://github.com/libjxl/libjxl.git
++    git clone --filter=blob:none -b v0.12.0 --recursive --also-filter-submodules --shallow-submodules https://github.com/libjxl/libjxl.git
+     cd libjxl
+ """ + setVar("cmake_defines", """
+     -DBUILD_SHARED_LIBS=OFF
+@@ -1094,7 +1097,7 @@ mac:
+ """)
+ 
+ stage('libvpx', """
+-    git clone https://github.com/webmproject/libvpx.git
++    git clone --filter=blob:none https://github.com/webmproject/libvpx.git
+ depends:patches/libvpx/*.patch
+     cd libvpx
+     git checkout v1.14.1
+@@ -1156,7 +1159,7 @@ mac:
+ """)
+ 
+ stage('liblcms2', """
+-    git clone -b lcms2.16 https://github.com/mm2/Little-CMS.git liblcms2
++    git clone --filter=blob:none -b lcms2.16 https://github.com/mm2/Little-CMS.git liblcms2
+     cd liblcms2
+ win:
+ depends:python/Scripts/activate.bat
+@@ -1195,11 +1198,11 @@ win:
+ """)
+ 
+ stage('regex', """
+-    git clone -b boost-1.83.0 https://github.com/boostorg/regex.git
++    git clone --filter=blob:none -b boost-1.83.0 https://github.com/boostorg/regex.git
+ """)
+ 
+ stage('ffmpeg', """
+-    git clone -b n6.1.6 https://github.com/FFmpeg/FFmpeg.git ffmpeg
++    git clone --filter=blob:none -b n6.1.6 https://github.com/FFmpeg/FFmpeg.git ffmpeg
+     cd ffmpeg
+ win:
+ depends:patches/ffmpeg.patch
+@@ -1381,7 +1384,7 @@ mac:
+ """)
+ 
+ stage('openal-soft', """
+-    git clone https://github.com/telegramdesktop/openal-soft.git
++    git clone --filter=blob:none https://github.com/telegramdesktop/openal-soft.git
+     cd openal-soft
+ win:
+     git checkout 291c0fdbbd
+@@ -1427,12 +1430,12 @@ depends:patches/breakpad.diff
+ """)
+ 
+ stage('breakpad', """
+-    git clone https://chromium.googlesource.com/breakpad/breakpad
++    git clone --filter=blob:none https://chromium.googlesource.com/breakpad/breakpad
+     cd breakpad
+     git checkout dfcb7b6799
+ depends:patches/breakpad.diff
+     git apply ../patches/breakpad.diff
+-    git clone -b release-1.11.0 https://github.com/google/googletest src/testing
++    git clone --filter=blob:none -b release-1.11.0 https://github.com/google/googletest src/testing
+ win:
+     SET "PYTHONUTF8=1"
+     SET "FolderPostfix="
+@@ -1457,7 +1460,7 @@ release:
+ win:
+     deactivate
+ mac:
+-    git clone https://chromium.googlesource.com/linux-syscall-support src/third_party/lss
++    git clone --filter=blob:none https://chromium.googlesource.com/linux-syscall-support src/third_party/lss
+     cd src/third_party/lss
+     git checkout e1e7b0ad8e
+     cd ../../..
+@@ -1471,11 +1474,11 @@ release:
+ 
+ stage('crashpad', """
+ mac:
+-    git clone https://github.com/desktop-app/crashpad.git
++    git clone --filter=blob:none https://github.com/desktop-app/crashpad.git
+     cd crashpad
+     git checkout 3279fae3f0
+     git submodule init
+-    git submodule update third_party/mini_chromium
++    git submodule update --filter=blob:none third_party/mini_chromium
+     ZLIB_PATH=$USED_PREFIX/include
+     ZLIB_LIB=$USED_PREFIX/lib/libz.a
+     mkdir out
+@@ -1614,9 +1617,9 @@ win:
+ else: # qt > '6'
+     branch = 'v$QT' + ('-lts-lgpl' if qt.startswith('6.2.') else '')
+     stage('qt_' + qt, """
+-    git clone -b """ + branch + """ https://github.com/qt/qt5.git qt_$QT
++    git clone --filter=blob:none -b """ + branch + """ https://github.com/qt/qt5.git qt_$QT
+     cd qt_$QT
+-    git submodule update --init --recursive --progress qtbase qtimageformats qtshadertools qtsvg
++    git submodule update --filter=blob:none --init --recursive --progress qtbase qtimageformats qtshadertools qtsvg
+ depends:patches/qtbase_""" + qt + """/*.patch
+ mac:
+     if [ -d "../patches/qt6_highsierra" ]; then
+@@ -1649,7 +1652,7 @@ mac:
+         -no-feature-brotli \
+         -no-feature-cxx17_filesystem \
+         -platform macx-clang -- \
+-        -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64" \
++        -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0 -DCMAKE_OSX_ARCHITECTURES=arm64 \
+         -DCMAKE_PREFIX_PATH="$USED_PREFIX" \
+         -DQT_NO_HANDLE_APPLE_SINGLE_ARCH_CROSS_COMPILING=ON \
+         -DQT_SYNC_HEADERS_AT_CONFIGURE_TIME=ON
+@@ -1729,10 +1732,10 @@ win:
+ """)
+ 
+ stage('tg_owt', """
+-    git clone https://github.com/desktop-app/tg_owt.git
++    git clone --filter=blob:none https://github.com/desktop-app/tg_owt.git
+     cd tg_owt
+     git checkout 89df288dd6ba5b2ec95b3c5eaf1e7e0c3a870fc4
+-    git submodule update --init --recursive
++    git submodule update --filter=blob:none --init --recursive
+ win:
+     SET MOZJPEG_PATH=$LIBS_DIR/mozjpeg
+     SET OPUS_PATH=$USED_PREFIX/include/opus
+@@ -1761,26 +1764,11 @@ mac:
+     FFMPEG_PATH=$USED_PREFIX/include
+     mkdir out
+     cd out
+-    mkdir Debug.x86_64
+-    cd Debug.x86_64
+-    cmake \
+-        -DCMAKE_BUILD_TYPE=Debug \
+-        -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+-        -DTG_OWT_BUILD_AUDIO_BACKENDS=OFF \
+-        -DTG_OWT_SPECIAL_TARGET=$SPECIAL_TARGET \
+-        -DTG_OWT_LIBJPEG_INCLUDE_PATH=$MOZJPEG_PATH \
+-        -DTG_OWT_OPENSSL_INCLUDE_PATH=$LIBS_DIR/openssl3/include \
+-        -DTG_OWT_OPUS_INCLUDE_PATH=$OPUS_PATH \
+-        -DTG_OWT_LIBVPX_INCLUDE_PATH=$LIBVPX_PATH \
+-        -DTG_OWT_OPENH264_INCLUDE_PATH=$OPENH264_PATH \
+-        -DTG_OWT_FFMPEG_INCLUDE_PATH=$FFMPEG_PATH ../..
+-    cmake --build .
+-    cd ..
+     mkdir Debug.arm64
+     cd Debug.arm64
+     cmake \
+         -DCMAKE_BUILD_TYPE=Debug \
+-        -DCMAKE_OSX_ARCHITECTURES=arm64 \
++        -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0 -DCMAKE_OSX_ARCHITECTURES=arm64 \
+         -DTG_OWT_BUILD_AUDIO_BACKENDS=OFF \
+         -DTG_OWT_SPECIAL_TARGET=$SPECIAL_TARGET \
+         -DTG_OWT_LIBJPEG_INCLUDE_PATH=$MOZJPEG_PATH \
+@@ -1792,13 +1780,13 @@ mac:
+     cmake --build .
+     cd ..
+     mkdir Debug
+-    lipo -create Debug.arm64/libtg_owt.a Debug.x86_64/libtg_owt.a -output Debug/libtg_owt.a
++    cp Debug.arm64/libtg_owt.a Debug/libtg_owt.a
+ release:
+     mkdir Release.x86_64
+     cd Release.x86_64
+     cmake \
+         -DCMAKE_BUILD_TYPE=Release \
+-        -DCMAKE_OSX_ARCHITECTURES=x86_64 \
++        -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0 -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+         -DTG_OWT_SPECIAL_TARGET=$SPECIAL_TARGET \
+         -DTG_OWT_LIBJPEG_INCLUDE_PATH=$MOZJPEG_PATH \
+         -DTG_OWT_OPENSSL_INCLUDE_PATH=$LIBS_DIR/openssl3/include \
+@@ -1812,7 +1800,7 @@ release:
+     cd Release.arm64
+     cmake \
+         -DCMAKE_BUILD_TYPE=Release \
+-        -DCMAKE_OSX_ARCHITECTURES=arm64 \
++        -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0 -DCMAKE_OSX_ARCHITECTURES=arm64 \
+         -DTG_OWT_SPECIAL_TARGET=$SPECIAL_TARGET \
+         -DTG_OWT_LIBJPEG_INCLUDE_PATH=$MOZJPEG_PATH \
+         -DTG_OWT_OPENSSL_INCLUDE_PATH=$LIBS_DIR/openssl3/include \
+@@ -1827,7 +1815,7 @@ release:
+ """)
+ 
+ stage('ada', """
+-    git clone -b v3.2.4 https://github.com/ada-url/ada.git
++    git clone --filter=blob:none -b v3.2.4 https://github.com/ada-url/ada.git
+     cd ada
+ win:
+     cmake -B out . ^
+@@ -1841,14 +1829,14 @@ mac:
+     CFLAGS="$UNGUARDED" CPPFLAGS="$UNGUARDED" cmake -B build . \\
+         -D ADA_TESTING=OFF \\
+         -D ADA_TOOLS=OFF \\
+-        -D CMAKE_OSX_ARCHITECTURES="x86_64;arm64" \\
++        -D CMAKE_OSX_DEPLOYMENT_TARGET=12.0 -D CMAKE_OSX_ARCHITECTURES=arm64 \\
+         -D CMAKE_INSTALL_PREFIX:STRING=$USED_PREFIX
+     cmake --build build
+     cmake --install build
+ """)
+ 
+ stage('tde2e', """
+-    git clone https://github.com/tdlib/td.git tde2e
++    git clone --filter=blob:none https://github.com/tdlib/td.git tde2e
+     cd tde2e
+     git checkout 51743df
+ win:
+@@ -1907,7 +1895,7 @@ mac:
+         cd out/$BUILD_CONFIG
+         cmake \
+             -DCMAKE_BUILD_TYPE=$BUILD_CONFIG \
+-            -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64" \
++            -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0 -DCMAKE_OSX_ARCHITECTURES=arm64 \
+             -DOPENSSL_FOUND=1 \
+             -DOPENSSL_INCLUDE_DIR=$LIBS_DIR/openssl3/include \
+             -DOPENSSL_SSL_LIBRARY=$LIBS_DIR/openssl3/libssl.a \
+@@ -1927,7 +1915,7 @@ release:
+ 
+ stage('tlottie', """
+ depends:patches/tlottie.patch
+-    git clone https://github.com/dkaraush/tlottie.git
++    git clone --filter=blob:none https://github.com/dkaraush/tlottie.git
+     cd tlottie
+     git checkout 31f1b542f8
+     git apply ../patches/tlottie.patch
+@@ -1958,6 +1946,7 @@ win:
+     copy target\\%RUST_TARGET%\\release\\tlottie.lib out\\lib\\tlottie.lib
+     copy include\\tlottie.h out\\include\\tlottie.h
+ mac:
++    export MACOSX_DEPLOYMENT_TARGET=12.0
+     export RUSTUP_HOME=$THIRDPARTY_DIR/rust/rustup
+     export CARGO_HOME=$THIRDPARTY_DIR/rust/cargo
+     export RUSTUP_TOOLCHAIN=""" + rustToolchain + """
+@@ -1969,9 +1958,8 @@ mac:
+             -- --print native-static-libs
+     }
+     buildOneArch aarch64-apple-darwin
+-    buildOneArch x86_64-apple-darwin
+     mkdir -p $USED_PREFIX/lib $USED_PREFIX/include/tlottie
+-    lipo -create target/aarch64-apple-darwin/release/libtlottie.a target/x86_64-apple-darwin/release/libtlottie.a -output $USED_PREFIX/lib/libtlottie.a
++    cp target/aarch64-apple-darwin/release/libtlottie.a $USED_PREFIX/lib/libtlottie.a
+     cp include/tlottie.h $USED_PREFIX/include/tlottie/tlottie.h
+ """)
+ 

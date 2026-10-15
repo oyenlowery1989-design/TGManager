@@ -1,0 +1,856 @@
+--- a/Telegram/CMakeLists.txt
++++ b/Telegram/CMakeLists.txt
+@@ -250,6 +250,7 @@
+         ayu/data/messages_storage.cpp
+         ayu/data/messages_storage.h
+         ayu/data/deleted_message_restore.h
++        ayu/data/local_read_state.h
+         ayu/data/entities.h
+         ayu/data/ayu_database.cpp
+         ayu/data/ayu_database.h
+--- a/Telegram/SourceFiles/api/api_polls.cpp
++++ b/Telegram/SourceFiles/api/api_polls.cpp
+@@ -391,7 +391,9 @@
+ 		if (!ghost.sendReadMessages()
+ 			&& ghost.markReadAfterAction()
+ 			&& item) {
+-			readHistory(item);
++			if (const auto current = _session->data().message(itemId)) {
++				current->history()->readLocally(current->id);
++			}
+ 		}
+ 	}).fail([=](const MTP::Error &error) {
+ 		_pollVotesRequestIds.erase(itemId);
+--- a/Telegram/SourceFiles/apiwrap.cpp
++++ b/Telegram/SourceFiles/apiwrap.cpp
+@@ -1463,7 +1463,6 @@
+ 		QVector<MTPint>>();
+ 	markedIds.reserve(items.size());
+ 	for (const auto &item : items) {
+-		const auto passthrough = (item->isUnreadMention() || item->hasUnreadReaction()) && !item->isUnreadMedia();
+ 		const auto keepUnread = settings.saveDeletedMessages()
+ 			&& item->isIncomingUnreadMedia()
+ 			&& item->media()->ttlSeconds();
+@@ -1473,7 +1472,7 @@
+ 			continue;
+ 		}
+ 
+-		if (!ghost.sendReadMessages() && !passthrough) {
++		if (!ghost.sendReadMessages()) {
+ 			continue;
+ 		}
+ 
+@@ -1499,7 +1498,6 @@
+ }
+ 
+ void ApiWrap::markContentsRead(not_null<HistoryItem*> item) {
+-	const auto passthrough = (item->isUnreadMention() || item->hasUnreadReaction()) && !item->isUnreadMedia();
+ 	const auto keepUnread = AyuSettings::getInstance().saveDeletedMessages()
+ 		&& item->isIncomingUnreadMedia()
+ 		&& item->media()->ttlSeconds();
+@@ -1510,7 +1508,7 @@
+ 	}
+ 
+ 	const auto &ghost = AyuSettings::ghost(&session());
+-	if (!ghost.sendReadMessages() && !passthrough) {
++	if (!ghost.sendReadMessages()) {
+ 		return;
+ 	}
+ 
+--- /dev/null
++++ b/Telegram/SourceFiles/ayu/data/local_read_state.h
+@@ -0,0 +1,128 @@
++#pragma once
++
++#include <algorithm>
++#include <charconv>
++#include <cstdint>
++#include <limits>
++#include <optional>
++#include <span>
++#include <string>
++#include <string_view>
++
++namespace Ayu::LocalRead {
++
++struct Record {
++	std::int64_t till = 0;
++	std::int64_t readAt = 0;
++	int unreadMark = -1;
++	friend bool operator==(const Record &, const Record &) = default;
++};
++
++inline std::string Key(std::uint64_t user, std::uint64_t peer) {
++	return "ayu/local-read/1/" + std::to_string(user)
++		+ "/" + std::to_string(peer);
++}
++
++inline std::string Serialize(Record record) {
++	return "1:" + std::to_string(record.till)
++		+ ":" + std::to_string(record.readAt)
++		+ ":" + std::to_string(record.unreadMark);
++}
++
++inline Record Parse(std::string_view bytes) {
++	if (!bytes.starts_with("1:") || bytes.size() > 64) {
++		return {};
++	}
++	bytes.remove_prefix(2);
++	auto record = Record();
++	const auto number = [&](auto &value, bool last) {
++		const auto end = last ? bytes.size() : bytes.find(':');
++		if (!end || end == std::string_view::npos) {
++			return false;
++		}
++		const auto result = std::from_chars(
++			bytes.data(), bytes.data() + end, value);
++		if (result.ec != std::errc() || result.ptr != bytes.data() + end) {
++			return false;
++		}
++		bytes.remove_prefix(end + (last ? 0 : 1));
++		return true;
++	};
++	if (!number(record.till, false)
++		|| !number(record.readAt, false)
++		|| !number(record.unreadMark, true)
++		|| record.till < 0
++		|| record.till > std::numeric_limits<std::int32_t>::max()
++		|| record.readAt < 0
++		|| record.unreadMark < -1
++		|| record.unreadMark > 1) {
++		return {};
++	}
++	return record;
++}
++
++inline bool SnapshotIsStale(std::int64_t top, std::int64_t knownTop) {
++	return knownTop > top;
++}
++
++struct MergeResult {
++	std::int64_t till = 0;
++	std::optional<int> count;
++};
++
++inline MergeResult Merge(
++		std::int64_t local,
++		std::int64_t server,
++		std::int64_t top,
++		int serverCount) {
++	return {
++		.till = std::max(local, server),
++		.count = (server >= local || !serverCount)
++			? std::optional<int>(serverCount)
++			: (top >= 0 && top <= local)
++			? std::optional<int>(0) : std::nullopt,
++	};
++}
++
++struct Message {
++	std::int64_t id = 0;
++	bool incoming = false;
++	bool known = true;
++};
++
++struct Counter {
++	std::int64_t till = 0;
++	std::int64_t before = 0;
++	int count = 0;
++	int pages = 0;
++	bool complete = false;
++	bool failed = false;
++
++	bool add(std::span<const Message> messages) {
++		if (complete || failed || ++pages > 20) {
++			failed = true;
++			return false;
++		}
++		if (messages.empty()) {
++			complete = true;
++			return true;
++		}
++		auto next = before;
++		for (const auto &message : messages) {
++			if (message.id <= 0 || message.id >= next || !message.known) {
++				failed = true;
++				return false;
++			}
++			next = message.id;
++			if (message.id <= till) {
++				complete = true;
++			} else if (message.incoming) {
++				++count;
++			}
++		}
++		before = next;
++		return true;
++	}
++};
++
++} // namespace Ayu::LocalRead
+--- a/Telegram/SourceFiles/ayu/utils/telegram_helpers.cpp
++++ b/Telegram/SourceFiles/ayu/utils/telegram_helpers.cpp
+@@ -367,9 +367,20 @@
+ }
+ 
+ void MarkAsReadThread(not_null<Data::Thread*> thread) {
++	const auto readOnServer = AyuSettings::ghost(
++		&thread->session()).sendReadMessages();
+ 	const auto readHistoryNative = [&](const not_null<History*> history)
+ 	{
+-		history->owner().histories().readInbox(history);
++		if (readOnServer) {
++			history->owner().histories().changeDialogUnreadMark(history, false);
++			history->owner().histories().requestDialogEntry(history, [=] {
++				if (const auto last = history->lastServerMessage()) {
++					readHistory(last);
++				}
++			});
++		} else {
++			history->owner().histories().readInbox(history);
++		}
+ 	};
+ 	const auto sendReadMentions = [=](
+ 		const not_null<Data::Thread*> threadInner)
+@@ -382,7 +393,7 @@
+ 		readReactions(base::make_weak(threadInner));
+ 	};
+ 
+-	if (thread->chatListBadgesState().unread) {
++	if (thread->chatListBadgesState().unread || readOnServer) {
+ 		if (const auto forum = thread->asForum()) {
+ 			forum->enumerateTopics([](
+ 				not_null<Data::ForumTopic*> topic)
+@@ -397,6 +408,10 @@
+ 				readHistoryNative(migrated);
+ 			}
+ 		}
++	}
++
++	if (!AyuSettings::ghost(&thread->session()).sendReadMessages()) {
++		return;
+ 	}
+ 
+ 	if (thread->unreadMentions().has()) {
+@@ -462,7 +477,7 @@
+ 		return;
+ 	}
+ 	if (const auto last = history->lastServerMessage()) {
+-		readHistory(last);
++		history->readLocally(last->id);
+ 	}
+ }
+ 
+--- a/Telegram/SourceFiles/data/data_channel.cpp
++++ b/Telegram/SourceFiles/data/data_channel.cpp
+@@ -1472,7 +1472,8 @@
+ 				history->folder(),
+ 				update.vunread_count().v,
+ 				update.vread_inbox_max_id().v,
+-				update.vread_outbox_max_id().v);
++				update.vread_outbox_max_id().v,
++				MsgId(-1));
+ 		}
+ 	}
+ 	if (const auto pinned = update.vpinned_msg_id()) {
+--- a/Telegram/SourceFiles/data/data_histories.cpp
++++ b/Telegram/SourceFiles/data/data_histories.cpp
+@@ -274,7 +274,7 @@
+ 					).arg(tillId.bare));
+ 				if (last->id == tillId) {
+ 					DEBUG_LOG(("Reading: locally marked as read."));
+-					history->setUnreadCount(0);
++					history->setUnreadCount(0, false);
+ 					history->updateChatListEntry();
+ 				}
+ 			}
+@@ -282,6 +282,9 @@
+ 	});
+ 
+ 	Core::App().notifications().clearIncomingFromHistory(history);
++	if (history->readLocally(tillId)) {
++		return;
++	}
+ 
+ 	const auto needsRequest = history->readInboxTillNeedsRequest(tillId);
+ 	if (!needsRequest && !force) {
+@@ -525,6 +528,9 @@
+ void Histories::changeDialogUnreadMark(
+ 		not_null<History*> history,
+ 		bool unread) {
++	if (history->changeLocalUnreadMark(unread)) {
++		return;
++	}
+ 	history->setUnreadMark(unread);
+ 
+ 	using Flag = MTPmessages_MarkDialogUnread::Flag;
+--- a/Telegram/SourceFiles/data/data_message_reactions.cpp
++++ b/Telegram/SourceFiles/data/data_message_reactions.cpp
+@@ -1529,7 +1529,9 @@
+ 
+ 		const auto &ghost = AyuSettings::ghost(&_owner->session());
+ 		if (!ghost.sendReadMessages() && ghost.markReadAfterAction() && item) {
+-			readHistory(item);
++			if (const auto current = _owner->message(id)) {
++				current->history()->readLocally(current->id);
++			}
+ 		}
+ 	}).fail([=](const MTP::Error &error) {
+ 		_sentRequests.remove(id);
+--- a/Telegram/SourceFiles/history/history.cpp
++++ b/Telegram/SourceFiles/history/history.cpp
+@@ -89,6 +89,7 @@
+ #include "crl/crl_async.h"
+ #include "crl/crl_on_main.h"
+ #include "ayu/data/deleted_message_restore.h"
++#include "ayu/data/local_read_state.h"
+ #include "ayu/utils/ayu_mapper.h"
+ #include "ayu/utils/telegram_helpers.h"
+ #include "ayu/ayu_state.h"
+@@ -186,10 +187,13 @@
+ 			_outboxReadBefore = std::numeric_limits<MsgId>::max();
+ 		}
+ 	}
++	loadLocalRead();
+ 	updateCommunityRegistration();
+ }
+ 
+-History::~History() = default;
++History::~History() {
++	cancelLocalReadCount();
++}
+ 
+ void History::clearLastKeyboard() {
+ 	if (lastKeyboardId) {
+@@ -275,6 +279,10 @@
+ }
+ 
+ void History::itemVanished(not_null<HistoryItem*> item) {
++	if (_localReadRequest) {
++		cancelLocalReadCount();
++		owner().histories().requestDialogEntry(this);
++	}
+ 	if (const auto thread = item->maybeNotificationThread()) {
+ 		thread->removeNotification(item);
+ 	}
+@@ -1668,6 +1676,10 @@
+ }
+ 
+ void History::newItemAdded(not_null<HistoryItem*> item, NewAddType type) {
++	if (_localReadRequest) {
++		cancelLocalReadCount();
++		owner().histories().requestDialogEntry(this);
++	}
+ 	item->indexAsNewItem();
+ 	item->addToMessagesIndex();
+ 	if (const auto from = item->from() ? item->from()->asUser() : nullptr) {
+@@ -2251,6 +2263,161 @@
+ 	}
+ }
+ 
++bool History::supportsLocalRead() const {
++	return !peer->isSelf() && !peer->isForum() && !peer->isMonoforum();
++}
++
++void History::loadLocalRead() {
++	if (!supportsLocalRead()) {
++		return;
++	}
++	const auto key = Ayu::LocalRead::Key(session().userId().bare, peer->id.value);
++	const auto record = Ayu::LocalRead::Parse(
++		session().local().readPref<QByteArray>(key).toStdString());
++	_localReadTill = record.till;
++	_localReadAt = record.readAt;
++	_localUnreadMark = record.unreadMark;
++	if (_localReadTill > 0) {
++		_inboxReadBefore = _localReadTill + 1;
++	}
++}
++
++void History::saveLocalRead() {
++	const auto key = Ayu::LocalRead::Key(session().userId().bare, peer->id.value);
++	session().local().writePref<QByteArray>(key, QByteArray::fromStdString(
++		Ayu::LocalRead::Serialize({
++			.till = _localReadTill.bare,
++			.readAt = _localReadAt,
++			.unreadMark = _localUnreadMark,
++		})));
++}
++
++bool History::changeLocalUnreadMark(bool unread) {
++	if (!supportsLocalRead()) {
++		return false;
++	}
++	if (AyuSettings::ghost(&session()).sendReadMessages()) {
++		if (_localUnreadMark != -1) {
++			_localUnreadMark = -1;
++			saveLocalRead();
++		}
++		return false;
++	}
++	_localUnreadMark = unread ? 1 : 0;
++	saveLocalRead();
++	setUnreadMark(unread);
++	return true;
++}
++
++bool History::readLocally(MsgId tillId) {
++	if (!supportsLocalRead()
++		|| AyuSettings::ghost(&session()).sendReadMessages()
++		|| tillId < 0
++		|| tillId.bare > std::numeric_limits<int32>::max()) {
++		return false;
++	}
++	readClientSideMessages();
++	const auto last = lastServerMessage();
++	const auto count = (last && tillId >= last->id)
++		? std::optional<int>(0)
++		: countStillUnreadLocal(tillId);
++	cancelLocalReadCount();
++	if (tillId > _localReadTill || _localUnreadMark != 0) {
++		accumulate_max(_localReadTill, tillId);
++		_localReadAt = base::unixtime::now();
++		_localUnreadMark = 0;
++		saveLocalRead();
++	}
++	setUnreadMark(false);
++	if (tillId > 0) {
++		setInboxReadTill(tillId);
++	}
++	if (folderKnown() && count) {
++		setUnreadCount(*count, false);
++	} else {
++		owner().histories().requestDialogEntry(this);
++	}
++	updateChatListEntry();
++	return true;
++}
++
++void History::cancelLocalReadCount() {
++	++_localReadGeneration;
++	if (_localReadRequest) {
++		session().api().request(base::take(_localReadRequest)).cancel();
++	}
++}
++
++void History::refreshLocalReadCount(MsgId top, int serverCount) {
++	const auto counter = std::make_shared<Ayu::LocalRead::Counter>();
++	counter->till = inboxReadTillId().bare;
++	counter->before = top.bare + 1;
++	requestLocalReadPage(counter, _localReadGeneration, serverCount);
++}
++
++void History::requestLocalReadPage(
++		std::shared_ptr<Ayu::LocalRead::Counter> counter,
++		uint64 generation,
++		int serverCount) {
++	if (generation != _localReadGeneration || !supportsLocalRead()) {
++		return;
++	}
++	const auto before = (counter->before > std::numeric_limits<int32>::max())
++		? 0 : int32(counter->before);
++	_localReadRequest = session().api().request(MTPmessages_GetHistory(
++		peer->input(),
++		MTP_int(before),
++		MTP_int(0),
++		MTP_int(0),
++		MTP_int(100),
++		MTP_int(before),
++		MTP_int(counter->till),
++		MTP_long(0)
++	)).done(crl::guard(this, [=](const MTPmessages_Messages &result) {
++		if (generation != _localReadGeneration) {
++			return;
++		}
++		_localReadRequest = 0;
++		auto messages = std::vector<Ayu::LocalRead::Message>();
++		auto valid = true;
++		result.match([&](const MTPDmessages_messagesNotModified &) {
++			valid = false;
++		}, [&](const auto &data) {
++			for (const auto &message : data.vmessages().v) {
++				message.match([&](const MTPDmessage &data) {
++					messages.push_back({
++						.id = data.vid().v,
++						.incoming = !data.is_out()
++							|| data.is_post()
++							|| data.is_from_scheduled(),
++					});
++				}, [&](const MTPDmessageService &data) {
++					messages.push_back({
++						.id = data.vid().v,
++						.incoming = !data.is_out() || data.is_post(),
++					});
++				}, [&](const MTPDmessageEmpty &) {
++					valid = false;
++				});
++			}
++		});
++		if (!valid || !counter->add(messages)) {
++			return;
++		}
++		if (counter->complete) {
++			setUnreadCount(std::min(counter->count, serverCount), false);
++			calculateFirstUnreadMessage();
++			updateChatListEntry();
++		} else {
++			requestLocalReadPage(counter, generation, serverCount);
++		}
++	})).fail(crl::guard(this, [=] {
++		if (generation == _localReadGeneration) {
++			_localReadRequest = 0;
++		}
++	})).send();
++}
++
+ bool History::readInboxTillNeedsRequest(MsgId tillId) {
+ 	Expects(!tillId || IsServerMsgId(tillId));
+ 
+@@ -2363,6 +2530,11 @@
+ 		MsgId upTo,
+ 		int stillUnread,
+ 		int32 channelPts) {
++	if (supportsLocalRead() && _localReadTill > upTo) {
++		cancelLocalReadCount();
++		owner().histories().requestDialogEntry(this);
++		return;
++	}
+ 	const auto folder = folderId ? owner().folderLoaded(folderId) : nullptr;
+ 	if (folder && this->folder() != folder) {
+ 		// If history folder is unknown or not synced, request both.
+@@ -2379,6 +2551,10 @@
+ }
+ 
+ void History::inboxRead(MsgId upTo, std::optional<int> stillUnread) {
++	if (supportsLocalRead() && _localReadTill > upTo) {
++		return;
++	}
++	cancelLocalReadCount();
+ 	if (stillUnread.has_value() && folderKnown()) {
+ 		setUnreadCount(*stillUnread);
+ 	} else if (const auto still = countStillUnreadLocal(upTo)) {
+@@ -2465,7 +2641,7 @@
+ 	return !isForum() && !amMonoforumAdmin();
+ }
+ 
+-void History::setUnreadCount(int newUnreadCount) {
++void History::setUnreadCount(int newUnreadCount, bool advanceCursor) {
+ 	Expects(folderKnown());
+ 
+ 	if (_unreadCount == newUnreadCount) {
+@@ -2483,7 +2659,7 @@
+ 			&& blocks.back()->messages.back()->data() == last
+ 			&& last->out();
+ 	}();
+-	if (newUnreadCount == 1 && !lastOutgoing) {
++	if (advanceCursor && newUnreadCount == 1 && !lastOutgoing) {
+ 		if (loadedAtBottom()) {
+ 			_firstUnreadView = !isEmpty()
+ 				? blocks.back()->messages.back().get()
+@@ -2494,8 +2670,10 @@
+ 		}
+ 	} else if (!newUnreadCount) {
+ 		_firstUnreadView = nullptr;
+-		if (const auto last = msgIdForRead()) {
+-			setInboxReadTill(last);
++		if (advanceCursor) {
++			if (const auto last = msgIdForRead()) {
++				setInboxReadTill(last);
++			}
+ 		}
+ 	} else if (!_firstUnreadView && !_unreadBarView && loadedAtBottom()) {
+ 		calculateFirstUnreadMessage();
+@@ -3601,6 +3779,10 @@
+ }
+ 
+ void History::unknownMessageDeleted(MsgId messageId) {
++	if (_localReadRequest) {
++		cancelLocalReadCount();
++		owner().histories().requestDialogEntry(this);
++	}
+ 	/*LOG(("History::unknownMessageDeleted. Peer ID: %1, Message ID: %2.")
+ 		.arg(peer->id.value & PeerId::kChatTypeMask)
+ 		.arg(messageId.bare));*/
+@@ -3625,6 +3807,16 @@
+ void History::applyDialog(
+ 		Data::Folder *requestFolder,
+ 		const MTPDdialog &data) {
++	const auto last = lastServerMessage();
++	if (supportsLocalRead() && _localReadTill > 0
++		&& last && !last->isDeleted()
++		&& Ayu::LocalRead::SnapshotIsStale(
++			data.vtop_message().v, last->id.bare)) {
++		crl::on_main(this, [=] {
++			owner().histories().requestDialogEntry(this);
++		});
++		return;
++	}
+ 	const auto folderId = data.vfolder_id();
+ 	const auto folder = !folderId
+ 		? requestFolder
+@@ -3635,9 +3827,12 @@
+ 		folder,
+ 		data.vunread_count().v,
+ 		data.vread_inbox_max_id().v,
+-		data.vread_outbox_max_id().v);
++		data.vread_outbox_max_id().v,
++		data.vtop_message().v);
+ 	applyDialogTopMessage(data.vtop_message().v);
+-	setUnreadMark(data.is_unread_mark());
++	setUnreadMark((supportsLocalRead() && _localUnreadMark >= 0)
++		? (_localUnreadMark != 0)
++		: data.is_unread_mark());
+ 	unreadMentions().setCount(data.vunread_mentions_count().v);
+ 	unreadReactions().setCount(data.vunread_reactions_count().v);
+ 	const auto pollVotesCount = data.vunread_poll_votes_count().v;
+@@ -3774,13 +3969,30 @@
+ 		Data::Folder *folder,
+ 		int unreadCount,
+ 		MsgId maxInboxRead,
+-		MsgId maxOutboxRead) {
++		MsgId maxOutboxRead,
++		MsgId topMessageId) {
+ 	if (folder) {
+ 		setFolder(folder);
+ 	} else {
+ 		clearFolder();
+ 	}
+-	if (!skipUnreadUpdate()
++	if (supportsLocalRead() && _localReadTill > 0
++		&& topMessageId < 0) {
++		cancelLocalReadCount();
++		owner().histories().requestDialogEntry(this);
++	} else if (supportsLocalRead() && _localReadTill > 0) {
++		cancelLocalReadCount();
++		const auto merged = Ayu::LocalRead::Merge(
++			_localReadTill.bare,
++			maxInboxRead.bare,
++			topMessageId.bare,
++			unreadCount);
++		setInboxReadTill(merged.till);
++		setUnreadCount(merged.count.value_or(unreadCount), false);
++		if (!merged.count) {
++			refreshLocalReadCount(topMessageId, unreadCount);
++		}
++	} else if (!skipUnreadUpdate()
+ 		&& maxInboxRead + 1 >= _inboxReadBefore.value_or(1)) {
+ 		setUnreadCount(unreadCount);
+ 		setInboxReadTill(maxInboxRead);
+@@ -4038,6 +4250,15 @@
+ }
+ 
+ void History::forumChanged(Data::Forum *old) {
++	if (!supportsLocalRead() && _localReadTill > 0) {
++		cancelLocalReadCount();
++		_localReadTill = 0;
++		_localReadAt = 0;
++		_localUnreadMark = -1;
++		saveLocalRead();
++		_inboxReadBefore.reset();
++		owner().histories().requestDialogEntry(this);
++	}
+ 	if (inChatList()) {
+ 		notifyUnreadStateChange(old
+ 			? AdjustedForumUnreadState(old->topicsList()->unreadState())
+@@ -4074,6 +4295,15 @@
+ }
+ 
+ void History::monoforumChanged(Data::SavedMessages *old) {
++	if (!supportsLocalRead() && _localReadTill > 0) {
++		cancelLocalReadCount();
++		_localReadTill = 0;
++		_localReadAt = 0;
++		_localUnreadMark = -1;
++		saveLocalRead();
++		_inboxReadBefore.reset();
++		owner().histories().requestDialogEntry(this);
++	}
+ 	if (inChatList()) {
+ 		notifyUnreadStateChange(old
+ 			? AdjustedForumUnreadState(
+@@ -4557,6 +4787,9 @@
+ }
+ 
+ void History::clear(ClearType type, bool markEmpty) {
++	if (type != ClearType::Unload) {
++		cancelLocalReadCount();
++	}
+ 	++_deletedRestoreGeneration;
+ 	_unreadBarView = nullptr;
+ 	_firstUnreadView = nullptr;
+--- a/Telegram/SourceFiles/history/history.h
++++ b/Telegram/SourceFiles/history/history.h
+@@ -15,6 +15,10 @@
+ #include "base/variant.h"
+ #include "base/flat_set.h"
+ #include "base/flags.h"
++
++namespace Ayu::LocalRead {
++struct Counter;
++} // namespace Ayu::LocalRead
+ 
+ class History;
+ class HistoryBlock;
+@@ -235,7 +239,9 @@
+ 	// Some old unread count is known, but we read history till some place.
+ 	[[nodiscard]] bool unreadCountRefreshNeeded(MsgId readTillId) const;
+ 
+-	void setUnreadCount(int newUnreadCount);
++	void setUnreadCount(int newUnreadCount, bool advanceCursor = true);
++	bool readLocally(MsgId tillId);
++	bool changeLocalUnreadMark(bool unread);
+ 	void setUnreadMark(bool unread);
+ 	void setFakeUnreadWhileOpened(bool enabled);
+ 	[[nodiscard]] bool fakeUnreadWhileOpened() const;
+@@ -269,7 +275,8 @@
+ 		Data::Folder *folder,
+ 		int unreadCount,
+ 		MsgId maxInboxRead,
+-		MsgId maxOutboxRead);
++		MsgId maxOutboxRead,
++		MsgId topMessageId);
+ 	void dialogEntryApplied();
+ 
+ 	void cacheTopPromotion(
+@@ -549,6 +556,16 @@
+ 	// helper method for countScrollState(int top)
+ 	[[nodiscard]] Element *findScrollTopItem(int top) const;
+ 
++	[[nodiscard]] bool supportsLocalRead() const;
++	void loadLocalRead();
++	void saveLocalRead();
++	void cancelLocalReadCount();
++	void refreshLocalReadCount(MsgId top, int serverCount);
++	void requestLocalReadPage(
++		std::shared_ptr<Ayu::LocalRead::Counter> counter,
++		uint64 generation,
++		int serverCount);
++
+ 	[[nodiscard]] std::optional<int> countStillUnreadLocalFromMessages(
+ 		MsgId readTillId) const;
+ 
+@@ -686,6 +703,11 @@
+ 	std::optional<Data::Folder*> _folder;
+ 	Data::CommunityInfo *_communityInfo = nullptr;
+ 
++	MsgId _localReadTill = 0;
++	int64 _localReadAt = 0;
++	int _localUnreadMark = -1;
++	uint64 _localReadGeneration = 0;
++	mtpRequestId _localReadRequest = 0;
+ 	std::optional<MsgId> _inboxReadBefore;
+ 	std::optional<MsgId> _outboxReadBefore;
+ 	std::optional<int> _unreadCount;
+--- a/Telegram/SourceFiles/storage/storage_account.cpp
++++ b/Telegram/SourceFiles/storage/storage_account.cpp
+@@ -3843,4 +3843,17 @@
+ 	writePrefGeneric(key, value ? "\x1"_q : QByteArray());
+ }
+ 
++template <>
++std::optional<QByteArray> Account::readPrefImpl<QByteArray>(
++		std::string_view key) {
++	return readPrefGeneric(key);
++}
++
++template <>
++void Account::writePrefImpl<QByteArray>(
++		std::string_view key,
++		QByteArray value) {
++	writePrefGeneric(key, value);
++}
++
+ } // namespace Storage
+--- /dev/null
++++ b/Telegram/SourceFiles/test/local_read_state_test.cpp
+@@ -0,0 +1,90 @@
++#include "ayu/data/local_read_state.h"
++
++#include <cassert>
++#include <filesystem>
++#include <fstream>
++#include <iostream>
++#include <iterator>
++#include <map>
++#include <vector>
++
++using namespace Ayu::LocalRead;
++
++void CheckPolicy() {
++	const auto record = Record{ 501, 1792065600, 0 };
++	assert(Parse(Serialize(record)) == record);
++	assert(Parse(Serialize({ 0, 0, 1 })).unreadMark == 1);
++	for (const auto bad : { "", "2:501:1:0", "1:-1:1:0", "1:2:-1:0",
++		"1:2147483648:1:0", "1:2:1:3", "1:2:1:0x", "1:2:1:",
++		"1:9999999999999999999999999999:1:0", "1:2:1:0:0" }) {
++		assert(Parse(bad) == Record());
++	}
++	assert(Key(1, 2) != Key(2, 2));
++	assert(Key(1, 2) != Key(1, (1ULL << 32) + 2));
++	assert(Merge(501, 400, 501, 40).count == 0);
++	assert(SnapshotIsStale(501, 502));
++	assert(!SnapshotIsStale(502, 502));
++	assert(!SnapshotIsStale(502, 501));
++	assert(Merge(501, 510, 600, 7).count == 7);
++	assert(Merge(501, 510, 600, 7).till == 510);
++	assert(!Merge(501, 400, 600, 40).count);
++	assert(!Merge(501, 400, -1, 40).count);
++	assert(Merge(501, 400, 600, 0).count == 0);
++	assert(Merge(501, 400, 0, 0).till == 501);
++
++	auto counter = Counter{ .till = 501, .before = 601 };
++	const auto page1 = std::vector<Message>{ {600, false}, {590, true}, {540, true} };
++	const auto page2 = std::vector<Message>{ {520, false}, {510, true} };
++	assert(counter.add(page1) && !counter.complete && counter.count == 2);
++	assert(counter.add(page2) && !counter.complete && counter.count == 3);
++	assert(counter.add({}) && counter.complete && counter.count == 3);
++	// Deleted messages and ID gaps are absent, not subtracted as if still present.
++	auto deleted = Counter{ .till = 501, .before = 601 };
++	assert(deleted.add(std::vector<Message>{ {600, false}, {510, true} }));
++	assert(deleted.add({}) && deleted.count == 1);
++	// Empty/error/duplicate or non-progressing responses never become a zero count.
++	for (const auto &page : {
++		std::vector<Message>{{600, true, false}},
++		std::vector<Message>{{600, true}, {600, true}},
++		std::vector<Message>{{601, true}},
++		std::vector<Message>{{0, true}},
++	}) {
++		auto failed = Counter{ .till = 501, .before = 601 };
++		assert(!failed.add(page) && failed.failed && !failed.complete);
++	}
++	auto bounded = Counter{ .till = 1, .before = 10000 };
++	for (auto i = 0; i < 20; ++i) {
++		assert(bounded.add(std::vector<Message>{{9999 - i, true}}));
++	}
++	assert(!bounded.add({}) && bounded.failed && !bounded.complete);
++	// Partial reads retain only the newer incoming messages.
++	auto partial = Counter{ .till = 550, .before = 601 };
++	assert(partial.add(page1) && partial.complete && partial.count == 1);
++}
++
++int main(int argc, char **argv) {
++	CheckPolicy();
++	if (argc != 3) {
++		return 1;
++	}
++	const auto path = std::filesystem::path(argv[2]);
++	const auto record = Record{ 501, 1792065600, 0 };
++	if (std::string_view(argv[1]) == "write") {
++		assert(!std::filesystem::exists(std::filesystem::symlink_status(path)));
++		auto output = std::ofstream(path, std::ios::binary);
++		output << Serialize(record);
++		output.close();
++		assert(output.good());
++	} else {
++		assert(std::string_view(argv[1]) == "read");
++		assert(std::filesystem::is_regular_file(std::filesystem::symlink_status(path)));
++		auto input = std::ifstream(path, std::ios::binary);
++		const auto bytes = std::string(std::istreambuf_iterator<char>(input), {});
++		const auto restored = Parse(bytes);
++		assert(restored == record);
++		assert(Merge(restored.till, 400, 501, 40).count == 0);
++		assert(!Merge(restored.till, 400, 600, 43).count);
++	}
++	std::cout << "PASS: restart, read timestamp, account/peer isolation, partial reads, "
++		"new/deleted/outgoing messages, malformed data, bounded paging\n";
++}

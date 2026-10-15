@@ -194,16 +194,19 @@ class ManagedAccountPathTests(unittest.TestCase):
         self.original_root = state.ROOT_DIR
         self.original_server_root = server.ROOT_DIR
         self.original_metadata_file = state.METADATA_FILE
+        self.original_workspaces_file = state.WORKSPACES_FILE
         self.original_metadata = copy.deepcopy(state.metadata)
         state.ROOT_DIR = self.tmp
         server.ROOT_DIR = self.tmp
         state.METADATA_FILE = os.path.join(self.tmp, "manager_data.json")
+        state.WORKSPACES_FILE = os.path.join(self.tmp, "manager_workspaces.json")
 
     def tearDown(self):
         import shutil
         state.ROOT_DIR = self.original_root
         server.ROOT_DIR = self.original_server_root
         state.METADATA_FILE = self.original_metadata_file
+        state.WORKSPACES_FILE = self.original_workspaces_file
         state.metadata.clear()
         state.metadata.update(self.original_metadata)
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -723,7 +726,8 @@ class TelegramUpdateLifecycleTests(unittest.TestCase):
 
         with mock.patch("server.get_shared_app", return_value=master), \
              mock.patch("server.is_running", return_value=False), \
-             mock.patch("server.find_telegram_pid", side_effect=(None, 1)), \
+             mock.patch("server._get_ps_output", return_value="1 /bin/sleep"), \
+             mock.patch("server.find_client_pid", side_effect=(None, 1)), \
              mock.patch("server.subprocess.run", side_effect=run), \
              mock.patch("server.save_metadata"), \
              mock.patch("server._watcher_exempt"), \
@@ -737,7 +741,8 @@ class TelegramUpdateLifecycleTests(unittest.TestCase):
         self.assertEqual(server._read_clone_stamp(account), server._bundle_fingerprint(master))
 
     def test_open_refuses_to_launch_a_stale_clone_that_cannot_be_removed(self):
-        with mock.patch("server.find_telegram_pid", return_value=None), \
+        with mock.patch("server._get_ps_output", return_value="1 /bin/sleep"), \
+             mock.patch("server.find_client_pid", return_value=None), \
              mock.patch("server.find_account_app", return_value="/account/Telegram.app"), \
              mock.patch("server.get_shared_app", return_value="/master/Telegram.app"), \
              mock.patch("server._bundle_fingerprint", return_value="master"), \
@@ -760,11 +765,13 @@ class TelegramUpdateLifecycleTests(unittest.TestCase):
                 events.append("open")
             return mock.Mock(returncode=0, stderr=b"")
 
-        with mock.patch("server.is_running", return_value=False), \
+        with mock.patch("server._disable_telegram_auto_updates", return_value=(True, "")), \
+             mock.patch("server.is_running", return_value=False), \
              mock.patch("server.find_account_app", return_value="/account/Telegram.app"), \
              mock.patch("server.get_shared_app", return_value=None), \
              mock.patch("server.subprocess.run", side_effect=run), \
-             mock.patch("server.find_telegram_pid", side_effect=(None, 1)), \
+             mock.patch("server._get_ps_output", return_value="1 /bin/sleep"), \
+             mock.patch("server.find_client_pid", side_effect=(None, 1)), \
              mock.patch("server._watcher_exempt", side_effect=lambda _: events.append("grace")), \
              mock.patch("server.save_metadata"), \
              mock.patch("server.invalidate_tdata_size"):
@@ -785,11 +792,13 @@ class TelegramUpdateLifecycleTests(unittest.TestCase):
 
     def test_open_waits_for_the_account_process_before_reporting_success(self):
         pids = iter((None, 321))
-        with mock.patch("server.is_running", return_value=False), \
+        with mock.patch("server._disable_telegram_auto_updates", return_value=(True, "")), \
+             mock.patch("server.is_running", return_value=False), \
              mock.patch("server.find_account_app", return_value="/account/Telegram.app"), \
              mock.patch("server.get_shared_app", return_value=None), \
              mock.patch("server.subprocess.run", return_value=mock.Mock(returncode=0, stderr=b"")), \
-             mock.patch("server.find_telegram_pid", side_effect=lambda *args, **kwargs: next(pids)) as find_pid, \
+             mock.patch("server._get_ps_output", return_value="1 /bin/sleep"), \
+             mock.patch("server.find_client_pid", side_effect=lambda *args, **kwargs: next(pids)) as find_pid, \
              mock.patch("server.time.sleep"), \
              mock.patch("server.save_metadata"), \
              mock.patch("server.invalidate_tdata_size"):
@@ -799,9 +808,11 @@ class TelegramUpdateLifecycleTests(unittest.TestCase):
         self.assertTrue(any(call.kwargs.get("fresh") for call in find_pid.call_args_list))
 
     def test_open_does_not_report_success_when_telegram_never_starts(self):
-        with mock.patch("server.find_account_app", return_value="/account/Telegram.app"), \
+        with mock.patch("server._disable_telegram_auto_updates", return_value=(True, "")), \
+             mock.patch("server.find_account_app", return_value="/account/Telegram.app"), \
              mock.patch("server.get_shared_app", return_value=None), \
-             mock.patch("server.find_telegram_pid", return_value=None), \
+             mock.patch("server._get_ps_output", return_value="1 /bin/sleep"), \
+             mock.patch("server.find_client_pid", return_value=None), \
              mock.patch("server.subprocess.run", return_value=mock.Mock(returncode=0, stderr=b"")), \
              mock.patch("server.time.sleep"), \
              mock.patch("server.save_metadata") as save_metadata, \
@@ -826,13 +837,14 @@ class TelegramUpdateLifecycleTests(unittest.TestCase):
             commands.append(command)
             return mock.Mock(returncode=0, stderr=b"")
 
-        with mock.patch("server.find_telegram_pid", return_value=77), \
+        with mock.patch("server._request_client_quit"), \
+             mock.patch("server.find_telegram_pid", return_value=77), \
              mock.patch("server._pid_matches_account", side_effect=(True, False)), \
              mock.patch("server.subprocess.run", side_effect=run), \
              mock.patch("server.threading.Thread", InlineThread):
             self.assertTrue(server.kill_account("/account"))
 
-        self.assertEqual(commands, [["kill", "77"]])
+        self.assertFalse(any(command[0] in ("kill", "rm") for command in commands))
 
     def test_close_cleanup_preserves_a_clone_reopened_during_shutdown(self):
         account = "/account"
@@ -848,7 +860,8 @@ class TelegramUpdateLifecycleTests(unittest.TestCase):
             server._watcher_exempt(account)
             return mock.Mock(returncode=0, stderr=b"")
 
-        with mock.patch("server.find_telegram_pid", side_effect=(77, None)), \
+        with mock.patch("server._request_client_quit", side_effect=lambda *args: server._watcher_exempt(account)), \
+             mock.patch("server.find_telegram_pid", side_effect=(77, None)), \
              mock.patch("server._pid_matches_account", side_effect=(True, False)), \
              mock.patch("server.subprocess.run", side_effect=run), \
              mock.patch("server.threading.Thread", InlineThread), \
@@ -968,6 +981,8 @@ class BackupPathTests(unittest.TestCase):
         state.METADATA_FILE = os.path.join(self.tmp, "manager_data.json")
         self.account = os.path.join(self.tmp, "account")
         os.makedirs(os.path.join(self.account, "TelegramForcePortable", "tdata"))
+        with open(os.path.join(self.account, "TelegramForcePortable", "tdata", "key_datas"), "wb") as f:
+            f.write(b"fixture session key")
 
     def tearDown(self):
         import shutil
@@ -1328,6 +1343,8 @@ class RestoreBackupRollbackTests(unittest.TestCase):
     def _make_backup(self, date="2026-01-01_00-00", account="acct"):
         b = os.path.join(self.tmp, "Backups", date, account)
         os.makedirs(os.path.join(b, "tdata"))
+        with open(os.path.join(b, "tdata", "key_datas"), "wb") as f:
+            f.write(b"fixture session key")
         with open(os.path.join(b, "tdata", "backup_marker"), "w") as f:
             f.write("backup")
         return b
@@ -1380,6 +1397,8 @@ class PruneBackupsTests(unittest.TestCase):
     def _make_backup(self, date, account, account_id=None, account_name=None):
         b = os.path.join(self.tmp, "Backups", date, account)
         os.makedirs(os.path.join(b, "tdata"))
+        with open(os.path.join(b, "tdata", "key_datas"), "wb") as f:
+            f.write(b"fixture session key")
         if account_id is not None:
             with open(os.path.join(b, "backup.json"), "w", encoding="utf-8") as f:
                 json.dump({"account_id": account_id, "account_name": account_name,

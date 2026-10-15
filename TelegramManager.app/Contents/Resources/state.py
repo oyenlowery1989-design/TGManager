@@ -400,21 +400,35 @@ def _find_cache_dirs(tdata):
     """Return the top-most cache directories under tdata, scoped to user_data*
     subtrees and the known top-level cache dirs — never the session dirs."""
     targets = []
+    if os.path.islink(tdata) or not os.path.isdir(tdata):
+        return targets
     for name in CACHE_TOPLEVEL_NAMES:
         p = os.path.join(tdata, name)
-        if os.path.isdir(p):
+        if os.path.isdir(p) and not os.path.islink(p):
             targets.append(p)
     try:
         roots = [os.path.join(tdata, n) for n in os.listdir(tdata)
-                 if n.startswith("user_data") and os.path.isdir(os.path.join(tdata, n))]
+                 if (n == "user_data" or (n.startswith("user_data#") and n[10:].isdigit()))
+                 and not os.path.islink(os.path.join(tdata, n))
+                 and os.path.isdir(os.path.join(tdata, n))]
     except OSError:
         roots = []
     for root in roots:
-        for dp, dirnames, _ in os.walk(root, topdown=True):
-            for d in list(dirnames):
-                if d in CACHE_DIR_NAMES:
-                    targets.append(os.path.join(dp, d))
-                    dirnames.remove(d)   # don't descend into a dir we'll delete
+        for name in ("cache", "media_cache"):
+            path = os.path.join(root, name)
+            if os.path.isdir(path) and not os.path.islink(path):
+                targets.append(path)
+        webview = os.path.join(root, "wvbots")
+        if os.path.islink(webview):
+            continue
+        for dp, dirnames, _ in os.walk(webview, topdown=True):
+            for name in list(dirnames):
+                path = os.path.join(dp, name)
+                if os.path.islink(path):
+                    dirnames.remove(name)
+                elif name in CACHE_DIR_NAMES:
+                    targets.append(path)
+                    dirnames.remove(name)
     return targets
 
 def get_folder_size(path):

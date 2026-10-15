@@ -94,7 +94,8 @@ def _run_keeper_pass(interval_days, open_secs, respect_enabled=False):
 
         if days_since >= interval_days:
             _keeper_status["last_account"] = acc["name"]
-            ok, msg = server.open_account(acc["path"])
+            launched_process = {}
+            ok, msg = server.open_account(acc["path"], launched_process=launched_process)
             if not ok:
                 state._log.error("Keeper: failed to open %s: %s", acc["name"], msg)
                 continue
@@ -113,7 +114,10 @@ def _run_keeper_pass(interval_days, open_secs, respect_enabled=False):
             finally:
                 # Never leave a keeper-opened Telegram running, even if this
                 # thread is interrupted mid-sleep.
-                server.kill_account(acc["path"])
+                if launched_process:
+                    server.kill_account(acc['path'], client='Telegram',
+                                        expected_pid=launched_process['pid'],
+                                        expected_executable=launched_process['executable'])
             time.sleep(5)   # brief pause between accounts
 
 

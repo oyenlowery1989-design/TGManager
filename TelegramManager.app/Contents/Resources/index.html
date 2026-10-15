@@ -482,6 +482,7 @@
   /* Card actions */
   .card-actions {
     display: flex;
+    flex-wrap: wrap;
     gap: 5px;
     padding-top: 10px;
     border-top: 1px solid var(--border);
@@ -494,6 +495,8 @@
     padding: 5px 8px;
     font-size: 11px;
   }
+
+  .card-actions .ayugram-open { flex-basis: 100%; }
 
   /* Toast */
   .toast-container {
@@ -606,6 +609,8 @@
   }
 
   .modal h2 { font-size: 17px; margin-bottom: 18px; }
+
+  #settings-modal .modal { max-height: 90vh; overflow-y: auto; }
 
   .modal label {
     display: block;
@@ -1069,7 +1074,7 @@
 
 <div class="toolbar">
   <button class="btn primary" onclick="openAll()" id="btn-open-all" data-tip="Launch Telegram for all ready accounts">▶ Open All</button>
-  <button class="btn danger" onclick="closeAll()" id="btn-close-all" data-tip="Kill all running Telegram instances">■ Close All</button>
+  <button class="btn danger" onclick="closeAll()" id="btn-close-all" data-tip="Close all managed Telegram and AyuGram instances">■ Close All</button>
   <button class="btn success" onclick="showNewAccountModal()" data-tip="Create a new account folder and log in">＋ New</button>
 
   <div class="toolbar-spacer"></div>
@@ -1087,14 +1092,20 @@
 <div class="toolbar-expanded">
   <button class="btn" onclick="openPinned()" id="btn-open-pinned" data-tip="Launch only pinned accounts">Open Pinned</button>
   <button class="btn" onclick="setupAll()" data-tip="Copy Telegram.app into accounts that are missing it">Setup</button>
-  <button class="btn" onclick="updateAll()" data-tip="Choose a clean Telegram.app, verify it, then refresh account clones safely">Update Telegram</button>
+  <button class="btn" onclick="showClientUpdates()" data-tip="Check official releases and update Telegram or AyuGram without editing sessions">Client Updates</button>
   <div class="toolbar-sep"></div>
   <button class="btn" onclick="backupAll()" data-tip="Save a backup of every account's session data (tdata)">Backup All</button>
   <button class="btn" onclick="showBackupBrowser()" data-tip="View saved backups and restore one to an account">Browse Backups</button>
-  <button class="btn" onclick="clearAllCaches()" data-tip="Delete regenerable media + mini-app cache from every closed account. Sessions untouched.">🧹 Clear Caches</button>
+  <button class="btn" onclick="clearAllCaches()" data-tip="Clear Telegram media and mini-app caches, including recovery copies. Keep all sessions, backup versions and AyuGram history.">🧹 Clear Caches</button>
   <button class="btn" onclick="fixDockNames()" data-tip="Rename each account's app bundle so it shows the account name in the Dock">Fix Dock Names</button>
   <div class="toolbar-sep"></div>
   <button class="btn" onclick="toggleSelectMode()" id="btn-select" data-tip="Select multiple accounts to open together or save as a workspace">Select Mode</button>
+</div>
+
+<div id="client-update-notice" role="status" style="display:none;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 20px;border-bottom:1px solid var(--accent);background:var(--card-bg)">
+  <span id="client-update-notice-text" style="flex:1"></span>
+  <button class="btn" onclick="showClientUpdates()">Review Updates</button>
+  <button class="btn" id="client-update-notice-dismiss" onclick="dismissClientUpdateNotice()">Dismiss</button>
 </div>
 
 <div class="workspace-bar" id="workspace-bar" style="display:none"></div>
@@ -1168,6 +1179,35 @@
     <div class="modal-actions">
       <button class="btn" onclick="hideMoveAccountModal()">Cancel</button>
       <button class="btn primary" id="btn-move-account" onclick="confirmMoveAccount()">Move</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="client-updates-modal">
+  <div class="modal" style="width:560px;max-width:94vw;max-height:88vh;overflow-y:auto">
+    <h2>Telegram and AyuGram Updates</h2>
+    <p style="color:var(--text-dim)">Official stable macOS releases. Automatic updates are disabled for managed instances. Quit all managed clients before installing.</p>
+    <div id="client-update-monitor" style="font-size:12px;line-height:1.5;margin:12px 0;color:var(--text-dim)" aria-live="polite"></div>
+    <div id="client-update-list" aria-live="polite"></div>
+    <p id="client-update-warning" style="color:var(--yellow);white-space:pre-wrap"></p>
+    <p style="color:var(--text-dim)">Version checks do not certify session compatibility. Test session imports on a separate copy. Your session data and preferences are not changed by installation.</p>
+    <div class="modal-actions" style="flex-wrap:wrap">
+      <button class="btn" id="client-update-close" onclick="hideClientUpdates()">Close</button>
+      <button class="btn" id="client-update-check" onclick="checkClientUpdates()">Check Again</button>
+      <button class="btn" id="client-update-local" onclick="hideClientUpdates(); updateAll()">Choose Local Telegram App</button>
+      <button class="btn primary" id="client-update-confirm" style="display:none" onclick="confirmClientUpdate()">Install Anyway</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="telegram-update-warning-modal">
+  <div class="modal" style="width:460px">
+    <h2>Telegram and AyuGram</h2>
+    <p id="telegram-update-warning-text" style="white-space:pre-wrap"></p>
+    <p style="color:var(--text-dim)">This checks versions, not session format compatibility. Continuing installs the selected Telegram app. Sessions are not converted and downgrades are refused.</p>
+    <div class="modal-actions">
+      <button class="btn" onclick="cancelTelegramUpdate()">Cancel</button>
+      <button class="btn primary" id="btn-confirm-telegram-update" onclick="confirmTelegramUpdate()">Continue Telegram Update</button>
     </div>
   </div>
 </div>
@@ -1364,7 +1404,8 @@
       <div class="backup-list" id="backup-list"><div style="padding:20px;text-align:center;color:var(--text-dim)">Loading backups…</div></div>
     </div>
     <p style="font-size:11px;color:var(--text-dim);line-height:1.6;margin-bottom:14px">
-      Click <strong>Restore</strong> on any backup to replace that account's current tdata.<br>
+      New backups include both client profiles when present, including AyuGram saved history.<br>
+      Restore one client at a time; the other profile stays unchanged.<br>
       The existing tdata is kept as a <code>.bak</code> folder — nothing is permanently deleted.
     </p>
     <div class="modal-actions">
@@ -1379,9 +1420,11 @@
     <h2>♻ Restore Backup</h2>
     <p style="font-size:13px;margin-bottom:12px">Restore <strong id="restore-backup-label"></strong> to account:</p>
     <select class="account-select" id="restore-account-select"></select>
+    <label for="restore-client-select">Client profile to restore:</label>
+    <select class="account-select" id="restore-client-select"></select>
     <p style="font-size:11px;color:var(--yellow);margin-bottom:14px;line-height:1.6">
       ⚠ The account's current tdata will be moved to a .bak folder first.<br>
-      Make sure Telegram is not running for that account before restoring.
+      Close Telegram and AyuGram for that account before restoring.
     </p>
     <div class="modal-actions">
       <button class="btn" onclick="hideRestoreModal()">Cancel</button>
@@ -1473,7 +1516,7 @@
       </div>
       <p style="font-size:11px;color:var(--text-dim);margin-bottom:4px;line-height:1.5">Off = proxies are stored and shown on cards only; set the proxy inside Telegram itself.</p>
 
-      <p class="settings-section-title" style="margin-top:20px">Shared App (saves ~435 MB per account)</p>
+      <p class="settings-section-title" style="margin-top:20px">Shared Apps &amp; Storage</p>
       <div id="shared-app-status" style="font-size:12px;color:var(--text-dim);background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:7px;padding:9px 12px;margin-bottom:10px;line-height:1.7">Loading…</div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:4px">
         <button class="btn primary" style="font-size:11px;padding:5px 12px" onclick="setupSharedAppPick()" data-tip="Pick a clean Telegram.app, verify it, and use it as the shared master">📂 Choose Shared App…</button>
@@ -1648,7 +1691,8 @@ function esc(s) {
 function pathKey(p) { return btoa(unescape(encodeURIComponent(p))).replace(/=/g,""); }
 
 function statusLabel(acc) {
-  if (acc.running) return "running";
+  if (acc.telegram_running && acc.ayugram_running) return "Telegram + AyuGram running";
+  if (acc.running) return acc.running_client === "AyuGram" ? "AyuGram running" : "running";
   return acc.status.replace(/_/g, " ");
 }
 
@@ -1873,9 +1917,9 @@ function buildCard(acc, pinnedCopy = false) {
 
   const actions = [];
   if (acc.status === "ready") {
-    if (acc.running) {
-      actions.push(`<button class="btn success" disabled data-tip="Telegram is running for this account">▶ Running</button>`);
-      actions.push(`<button class="btn danger" onclick="event.stopPropagation(); closeAccount(${esc(JSON.stringify(acc.path))})" data-tip="Kill this Telegram instance">■ Close</button>`);
+    if (acc.telegram_running ?? (acc.running && acc.running_client !== "AyuGram")) {
+      actions.push(`<button class="btn success" disabled data-tip="This account is running">▶ Telegram</button>`);
+      actions.push(`<button class="btn danger" onclick="event.stopPropagation(); closeAccount(${esc(JSON.stringify(acc.path))})" data-tip="Request normal Quit; force only if the app does not exit">■ Close Telegram</button>`);
     } else {
       actions.push(`<button class="btn primary" onclick="event.stopPropagation(); openAccount(${esc(JSON.stringify(acc.path))})" data-tip="Launch Telegram for this account">▶ Open</button>`);
     }
@@ -1890,6 +1934,16 @@ function buildCard(acc, pinnedCopy = false) {
   }
   if (!acc.running) {
     actions.push(`<button class="btn" onclick="event.stopPropagation(); showDuplicateAccountModal(${esc(JSON.stringify(acc.path))},${esc(JSON.stringify(acc.name))})" data-tip="Create an empty portable folder for a separate Telegram login">Duplicate</button>`);
+  }
+  if (acc.status === "ready") {
+    if (acc.ayugram_running) {
+      actions.push(`<button class="btn danger ayugram-open" onclick="event.stopPropagation(); closeAccount(${esc(JSON.stringify(acc.path))},'AyuGram')">■ Close AyuGram</button>`);
+    } else {
+      actions.push(`<button class="btn ayugram-open" onclick="event.stopPropagation(); openAccount(${esc(JSON.stringify(acc.path))},'AyuGram')" data-tip="Open the separate AyuGram profile">Open with AyuGram</button>`);
+      if (!acc.ayugram_has_profile) {
+        actions.push(`<button class="btn ayugram-open" onclick="event.stopPropagation(); openAccount(${esc(JSON.stringify(acc.path))},'AyuGram',true)" data-tip="Create a separate login; existing profiles are never reset">New AyuGram Login</button>`);
+      }
+    }
   }
 
   const healthTip = health.issues.length ? health.issues.join(", ") : "Healthy";
@@ -2004,10 +2058,19 @@ function updateStats() {
     if (_statsData.total_disk_human)  breakdown.push(`accounts ${_statsData.total_disk_human}`);
     if (_statsData.cache_total_human) breakdown.push(`cache ${_statsData.cache_total_human}`);
     if (_statsData.backup_size_human) breakdown.push(`backups ${_statsData.backup_size_human}`);
+    if (_statsData.master_size_human) breakdown.push(`shared apps ${_statsData.master_size_human}`);
     const sizeChip = document.createElement("span");
     sizeChip.className = "stat-chip stat-chip-static";
-    sizeChip.textContent = `${_statsData.grand_total_human} (${breakdown.join(" · ")})`;
+    sizeChip.textContent = `${_statsData.grand_total_human} logical (${breakdown.join(" · ")})`;
+    sizeChip.title = "File sizes may include shared APFS blocks. This is not the space that deletion would free.";
     chips.push(sizeChip);
+  }
+  if (_statsData.volume_free_human) {
+    const freeChip = document.createElement("span");
+    freeChip.className = "stat-chip stat-chip-static";
+    freeChip.textContent = `Manager volume free: ${_statsData.volume_free_human}`;
+    freeChip.title = "Free space on the volume containing the manager data folder. Account folders on other volumes are not included.";
+    chips.push(freeChip);
   }
   document.getElementById("stats").replaceChildren(...chips);
 
@@ -2285,12 +2348,12 @@ document.addEventListener("keydown", e => {
 function filterAccounts(val) { searchFilter = val; renderAccounts(); }
 
 const _openingPaths = new Set();
-async function openAccount(path) {
+async function openAccount(path, client = "Telegram", newLogin = false) {
   if (_openingPaths.has(path)) return;   // ignore double-click; server also serializes
   _openingPaths.add(path);
   let r;
   try {
-    r = await api("/api/open", "POST", { path });
+    r = await api(client === "AyuGram" ? (newLogin ? "/api/new-ayugram-login" : "/api/open-ayugram") : "/api/open", "POST", { path });
   } finally {
     _openingPaths.delete(path);
   }
@@ -2298,13 +2361,13 @@ async function openAccount(path) {
     toast(r.message || "Failed to open account", "error");
     return;
   }
-  toast("Opening…", "info");
+  toast(r.message || `Opening ${client}…`, "info");
   setTimeout(async () => {
     await refresh();
     // Post-open liveness check: if still not running after refresh, warn
     const acc = accounts.find(a => a.path === path);
     if (acc && !acc.running) {
-      toast("Telegram launched but isn't running yet — it may have failed to start. Check the log for details.", "warning", 8000);
+      toast(`${client} launched but isn't running yet — it may have failed to start. Check the log for details.`, "warning", 8000);
     }
   }, 3000);
 }
@@ -2352,10 +2415,10 @@ async function closeAll() {
   setTimeout(refresh, 1200);
 }
 
-async function closeAccount(path) {
-  const r = await api("/api/close-account", "POST", { path });
+async function closeAccount(path, client = "Telegram") {
+  const r = await api("/api/close-account", "POST", { path, client });
   if (r.success) {
-    toast("Closed", "success");
+    toast(`Closing ${client}…`, "info");
     setTimeout(refresh, 900);
   } else {
     toast("Could not close — process not found", "warning");
@@ -2380,6 +2443,165 @@ async function setupAll() {
   await refresh();
 }
 
+let clientUpdateBusy = false;
+let pendingClientUpdate = null;
+let clientReleaseRows = [];
+let clientUpdateMonitorStatus = null;
+let clientUpdateMonitorRequest = 0;
+function safeClientUpdateLink(value) {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:") return "";
+    if (url.hostname === "raw.githubusercontent.com" && url.pathname.startsWith("/AyuGram/AyuGramDesktop/")) return url.href;
+    if (url.hostname === "github.com" && ["/AyuGram/AyuGramDesktop/", "/telegramdesktop/tdesktop/"].some(prefix => url.pathname.startsWith(prefix))) return url.href;
+    if (url.hostname === "t.me" && /^\/(?:s\/)?AyuGramReleases(?:\/\d+)?$/.test(url.pathname)) return url.href;
+  } catch (_) {}
+  return "";
+}
+function clientUpdateEvidenceHtml(evidence) {
+  if (!evidence) return "";
+  if (typeof evidence === "string") return esc(evidence);
+  const parts = [];
+  if (Number.isFinite(evidence.app_version)) parts.push(`Source AppVersion: ${evidence.app_version}`);
+  if (evidence.reader_rejects_newer) parts.push("Session reader rejects newer TDF versions");
+  const source = safeClientUpdateLink(evidence.source_url);
+  const reader = safeClientUpdateLink(evidence.reader_url);
+  return parts.map(esc).join(". ") + (source ? ` <a style="color:var(--accent)" href="${esc(source)}" target="_blank" rel="noopener noreferrer">Version source</a>` : "")
+    + (reader ? ` <a style="color:var(--accent)" href="${esc(reader)}" target="_blank" rel="noopener noreferrer">Session reader source</a>` : "");
+}
+function renderClientUpdateMonitor(status) {
+  clientUpdateMonitorStatus = status;
+  const format = seconds => seconds ? new Date(seconds * 1000).toLocaleString("en-US", {timeZone:"America/New_York"}) + " New York" : "Not yet checked";
+  const notices = Array.isArray(status.notices) ? status.notices : [];
+  const panel = document.getElementById("client-update-monitor");
+  panel.innerHTML = `<strong>Weekly checks: Mondays at 10:00 AM, New York</strong><br>
+    Last completed check: ${esc(format(status.last_checked))}<br>
+    Next scheduled check: ${esc(format(status.next_check))}<br>
+    ${status.checking ? "Checking official sources now. " : ""}Missed checks run when Manager starts. No automatic downloads or installation.
+    ${status.error ? `<p style="color:var(--yellow)">${esc(status.error)}</p>` : ""}
+    ${status.error || status.source_errors?.length ? "<p>Incomplete check. Manager retries after an hour while it is open.</p>" : ""}
+    ${(status.source_errors || []).map(error => `<p style="color:var(--yellow)">${esc(error)}</p>`).join("")}
+    ${notices.map(notice => {
+      const link = safeClientUpdateLink(notice.url);
+      return `<p>${esc(notice.message)}${notice.evidence ? `<br>${clientUpdateEvidenceHtml(notice.evidence)}` : ""}${link ? `<br><a style="color:var(--accent)" href="${esc(link)}" target="_blank" rel="noopener noreferrer">Official source</a>` : ""}</p>`;
+    }).join("")}`;
+  const visible = notices.length > 0 && !status.dismissed;
+  document.getElementById("client-update-notice-text").textContent = visible ? notices.map(notice => notice.message).join(" ") : "";
+  document.getElementById("client-update-notice").style.display = visible ? "flex" : "none";
+}
+async function loadClientUpdateStatus() {
+  const request = ++clientUpdateMonitorRequest;
+  try {
+    const result = await api("/api/client-update-status");
+    if (request !== clientUpdateMonitorRequest || !result || result._networkError || result.locked || result.success === false) return;
+    renderClientUpdateMonitor(result);
+  } catch (_) {
+    if (request === clientUpdateMonitorRequest) document.getElementById("client-update-monitor").textContent = "Weekly check status is temporarily unavailable.";
+  }
+}
+async function dismissClientUpdateNotice() {
+  const fingerprint = clientUpdateMonitorStatus?.notification_fingerprint;
+  if (!fingerprint) return;
+  ++clientUpdateMonitorRequest;
+  const button = document.getElementById("client-update-notice-dismiss");
+  button.disabled = true;
+  try {
+    const result = await api("/api/client-update-dismiss", "POST", {fingerprint});
+    if (!result?.success) toast(result?.message || "Could not dismiss notification", "error");
+    await loadClientUpdateStatus();
+  } finally { button.disabled = false; }
+}
+
+function setClientUpdateBusy(busy) {
+  clientUpdateBusy = busy;
+  for (const id of ["client-update-check", "client-update-close", "client-update-local", "client-update-confirm"])
+    document.getElementById(id).disabled = busy;
+  document.querySelectorAll(".client-release-install").forEach(button => button.disabled = busy || button.dataset.available !== "true");
+}
+function hideClientUpdates() {
+  if (clientUpdateBusy) return;
+  pendingClientUpdate = null;
+  document.getElementById("client-updates-modal").classList.remove("active");
+}
+async function showClientUpdates() {
+  document.getElementById("client-updates-modal").classList.add("active");
+  await Promise.all([checkClientUpdates(), loadClientUpdateStatus()]);
+}
+function renderClientUpdateRows() {
+    document.getElementById("client-update-list").innerHTML = clientReleaseRows.map(row => `
+      <div style="padding:12px 0;border-bottom:1px solid var(--border)">
+        <strong>${esc(row.client)}</strong> — Installed: ${esc(row.installed_version || "Not installed")}
+        ${row.installed_variant ? `<div style="margin:8px 0;color:var(--accent)">${esc(row.installed_variant)}</div>` : ""}
+        <div style="margin:8px 0">${row.error ? esc(row.error) : `Latest official release: ${esc(row.version)} · ${esc(row.update_available ? "Update available" : "Up to date")}`}</div>
+        ${row.release_url ? `<a href="${esc(row.release_url)}" target="_blank" rel="noopener noreferrer">Official release notes</a>` : ""}
+        <button class="btn primary client-release-install" data-available="${!!row.update_available}" ${row.update_available ? "" : "disabled"} onclick="installClientUpdate('${row.client}')">${row.update_available ? "Download and Install" : row.error ? "Unavailable" : "No Update"}</button>
+      </div>`).join("");
+}
+async function checkClientUpdates() {
+  if (clientUpdateBusy) return;
+  pendingClientUpdate = null;
+  document.getElementById("client-update-confirm").style.display = "none";
+  document.getElementById("client-update-warning").textContent = "";
+  document.getElementById("client-update-list").textContent = "Checking official releases…";
+  setClientUpdateBusy(true);
+  try {
+    const result = await api("/api/check-client-updates", "POST", {});
+    if (!result.success) { document.getElementById("client-update-list").textContent = result.message || "Could not check releases"; return; }
+    clientReleaseRows = result.clients;
+    renderClientUpdateRows();
+    document.getElementById("client-update-warning").textContent = result.warning || "No version mismatch detected; session compatibility still requires testing.";
+  } finally { setClientUpdateBusy(false); }
+}
+async function installClientUpdate(client, acknowledgement = null) {
+  if (clientUpdateBusy) return;
+  const row = clientReleaseRows.find(item => item.client === client);
+  if (!row?.update_available) return;
+  pendingClientUpdate = null;
+  document.getElementById("client-update-confirm").style.display = "none";
+  document.getElementById("client-update-warning").textContent = "Downloading and verifying the official package. This may take a few minutes…";
+  setClientUpdateBusy(true);
+  try {
+    const result = await api("/api/install-client-update", "POST", {client, version:row.version, acknowledgement});
+    if (result.confirmation_required) {
+      pendingClientUpdate = {client, acknowledgement:result.acknowledgement};
+      document.getElementById("client-update-warning").textContent = result.warning;
+      document.getElementById("client-update-confirm").style.display = "";
+      return;
+    }
+    document.getElementById("client-update-warning").textContent = result.message || "Update failed";
+    toastResult(result, "Update installed", "Update failed", 8000);
+    if (result.success || result.installed) { row.installed_version = row.version; row.installed_variant = null; row.update_available = false; renderClientUpdateRows(); loadSharedAppStatus(); await refresh(); }
+  } finally { setClientUpdateBusy(false); }
+}
+async function confirmClientUpdate() {
+  if (!pendingClientUpdate || clientUpdateBusy) return;
+  const request = pendingClientUpdate;
+  await installClientUpdate(request.client, request.acknowledgement);
+}
+
+let pendingTelegramUpdate = null;
+function cancelTelegramUpdate() {
+  pendingTelegramUpdate = null;
+  document.getElementById("telegram-update-warning-modal").classList.remove("active");
+}
+async function confirmTelegramUpdate() {
+  if (!pendingTelegramUpdate) return;
+  const request = pendingTelegramUpdate;
+  cancelTelegramUpdate();
+  await installTelegramUpdate(request);
+}
+async function installTelegramUpdate(request) {
+  toast("Checking accounts, signature, and updater state…", "info", 9000);
+  const r = await api("/api/update-all", "POST", request);
+  if (r.confirmation_required) {
+    pendingTelegramUpdate = {source: request.source, acknowledgement: r.acknowledgement};
+    document.getElementById("telegram-update-warning-text").textContent = r.warning;
+    document.getElementById("telegram-update-warning-modal").classList.add("active");
+    return;
+  }
+  toastResult(r, "Done", "Failed");
+  if (r.success) { loadSharedAppStatus(); await refresh(); }
+}
 async function updateAll() {
   toast("Choose a freshly downloaded Telegram.app to verify and install…", "info", 7000);
   const picked = await api("/api/pick-app");
@@ -2387,13 +2609,15 @@ async function updateAll() {
     if (picked.message !== "canceled") toast(picked.message || "Could not choose Telegram.app", "error");
     return;
   }
-  toast("Checking accounts, signature, and updater state…", "info", 9000);
-  const r = await api("/api/update-all", "POST", { source: picked.path });
-  toastResult(r, "Done", "Failed");
-  if (r.success) {
-    loadSharedAppStatus();
-    await refresh();
+  const check = await api("/api/check-telegram-update", "POST", {source: picked.path});
+  if (!check.success) { toast(check.message || "Version check failed", "error"); return; }
+  if (check.warning) {
+    pendingTelegramUpdate = {source: picked.path, acknowledgement: check.acknowledgement};
+    document.getElementById("telegram-update-warning-text").textContent = check.warning;
+    document.getElementById("telegram-update-warning-modal").classList.add("active");
+    return;
   }
+  await installTelegramUpdate({source: picked.path});
 }
 
 async function backupAccount(path, name) {
@@ -2405,10 +2629,10 @@ async function backupAccount(path, name) {
 
 async function clearAccountCache(path, name, running) {
   if (running) {
-    toast("Close Telegram for this account before clearing its cache", "warning");
+    toast("Close Telegram and AyuGram for this account before clearing its cache", "warning");
     return;
   }
-  toast(`Clearing cache for ${name}… (sessions and messages are untouched)`, "info");
+  toast(`Clearing Telegram cache for ${name}… (sessions and AyuGram history are preserved)`, "info");
   const r = await api("/api/clear-cache", "POST", { path });
   toastResult(r, "Cache cleared", "Failed");
   if (r.success) refresh();
@@ -2792,6 +3016,7 @@ async function loadKeeperStatus() {
 // ── Session Expiry Alerts ──────────────────────────────────────────────────
 
 async function loadAlerts() {
+  loadClientUpdateStatus();
   const alerts = await api("/api/alerts");
   const bannerId = "alert-banner-zone";
   let zone = document.getElementById(bannerId);
@@ -3008,7 +3233,7 @@ function renderBackupList() {
     <div class="backup-item">
       <div class="backup-item-info">
         <div class="backup-item-name">📁 ${esc(b.account)}</div>
-        <div class="backup-item-date">🕐 ${esc(b.date.replace(/_/g, " "))}</div>
+        <div class="backup-item-date">🕐 ${esc(b.date.replace(/_/g, " "))} · ${esc((b.clients || ["Telegram"]).join(" + "))}</div>
       </div>
       <div class="backup-item-size">${esc(b.size_human)}</div>
       <button class="btn primary" style="font-size:11px;padding:5px 10px"
@@ -3044,6 +3269,8 @@ function hideBackupBrowser() {
 function showRestoreModal(backupPath, account, date) {
   restoreTarget = { backup_path: backupPath, label: `${account} (${date})` };
   document.getElementById("restore-backup-label").textContent = restoreTarget.label;
+  const backup = allBackups.find(item => item.backup_path === backupPath);
+  document.getElementById("restore-client-select").innerHTML = (backup?.clients || ["Telegram"]).map(client => `<option value="${esc(client)}">${esc(client)}</option>`).join("");
   // Populate account selector
   const sel = document.getElementById("restore-account-select");
   sel.innerHTML = accounts.map(a =>
@@ -3064,10 +3291,11 @@ async function confirmRestore() {
   if (!restoreTarget) return;
   const { backup_path, label } = restoreTarget;
   const account_path = document.getElementById("restore-account-select").value;
+  const client = document.getElementById("restore-client-select").value;
   hideRestoreModal();
   hideBackupBrowser();
-  toast(`Restoring ${label}…`, "info");
-  const r = await api("/api/restore", "POST", { backup_path, account_path });
+  toast(`Restoring ${client}: ${label}…`, "info");
+  const r = await api("/api/restore", "POST", { backup_path, account_path, client });
   toastResult(r, "Restored!", "Restore failed");
   if (r.success) await refresh();
 }
@@ -3254,31 +3482,20 @@ async function loadSharedAppStatus() {
   el.dataset.sharedExists = r.shared_exists ? "1" : "";
   if (r.shared_exists) {
     const savings = r.own_count > 0
-      ? ` · ${r.own_count} account${r.own_count !== 1 ? "s" : ""} still have own copy (${esc(r.total_size_human)} recoverable)`
-      : ` · All accounts use shared app — no duplicates`;
+      ? ` · ${r.own_count} temporary Telegram copies (${esc(r.total_size_human)} logical)`
+      : ` · No per-account Telegram apps stored`;
     const pathLine = `<br><span style="color:var(--text-dim);font-size:11px">Path: ${esc(r.shared_path)}</span>`;
     const howLine  = `<br><span style="color:var(--text-dim);font-size:11px">Each account clones this app when opened (the clone is deleted after it quits). Replace it with “Choose App…” — accounts pick up the new version on their next open.</span>`;
     el.innerHTML =
       `<span style="color:var(--green)">✓ Shared Telegram.app active</span>${savings}${pathLine}${howLine}`;
   } else {
-    const count  = accounts.length;
-    const approxGB = ((count * 435) / 1024).toFixed(1);
-    let sourceHint = "";
-    if (r.setup_source_type === "sibling" || r.setup_source_type === "config" || r.setup_source_type === "account") {
-      const label = r.setup_source_type === "config" ? "Source configured in Settings"
-                  : r.setup_source_type === "sibling" ? "Found Telegram.app next to manager"
-                  : "Will copy from an existing account app";
-      sourceHint = `<br><span style="color:var(--green)">✓ ${esc(label)} — ready to set up.</span>`;
-    } else {
-      sourceHint = `<br><span style="color:var(--red)">✗ No Telegram.app source found.</span> `
-        + `Place <strong>Telegram.app</strong> next to <strong>TelegramManager.app</strong>:<br>`
-        + `<code style="font-size:10px;opacity:0.7">${esc(r.sibling_path)}</code>`;
-    }
     el.innerHTML =
-      `<span style="color:var(--yellow)">⚠ No shared app yet.</span> ` +
-      `${count} accounts × ~435 MB ≈ <strong>${approxGB} GB</strong> in duplicate Telegram.app copies.` +
-      sourceHint;
+      `<span style="color:var(--yellow)">⚠ No shared Telegram app yet.</span> ` +
+      `${r.own_count || 0} account copies: <strong>${esc(r.total_size_human || "0 B")} logical</strong>.` +
+      `<br>Choose an official Telegram Desktop app before removing account copies.`;
   }
+  el.innerHTML += `<br>AyuGram: ${r.ayugram_own_count || 0} temporary app copies (${esc(r.ayugram_size_human || "0 B")} logical).` +
+    `<br><span style="font-size:11px">Closed client apps are removed when their shared master is verified. Sessions and AyuGram history stay in their profiles. APFS copies may share disk space; logical size is not guaranteed savings.</span>`;
 }
 
 async function setupSharedApp() {
@@ -3310,15 +3527,11 @@ async function setupSharedAppPick() {
 }
 
 async function removeAllAccountApps() {
-  const owned = accounts.filter(a => a.has_app);
-  if (!owned.length) { toast("No per-account apps to remove", "info"); return; }
-  const gbStr = ((owned.length * 435) / 1024).toFixed(1);
-  toast(`Removing ${owned.length} app${owned.length !== 1 ? "s" : ""} (${gbStr} GB)…`, "info", 8000);
   toast("Removing per-account apps after a safe shared-app check…", "info", 8000);
   const r = await api("/api/shared-app/remove-all-account-apps", "POST", {});
   if (r.success) {
-    const skippedMsg = r.skipped ? `, skipped ${r.skipped} running` : "";
-    toast(`Removed ${r.removed} app${r.removed !== 1 ? "s" : ""}, freed ${r.freed_human}${skippedMsg} ✓`, "success", 6000);
+    const skippedMsg = r.skipped ? `; kept ${r.skipped} active or unverified` : "";
+    toast(`Removed ${r.removed} app${r.removed !== 1 ? "s" : ""} (${r.removed_logical_human} logical)${skippedMsg}. Manager volume free-space change: ${r.disk_free_change_human}. Other activity on that volume can affect this measurement.`, "success", 8000);
     loadSharedAppStatus();
     await refresh();
   } else {
@@ -3923,6 +4136,11 @@ setInterval(async () => {
     _refreshing = false;
   }
 }, 5000);
+
+setInterval(() => {
+  const lock = document.getElementById("lock-screen");
+  if (!lock?.classList.contains("visible")) loadClientUpdateStatus();
+}, 30000);
 
 // ── Dock name fix ──────────────────────────────────────────────────────────
 
