@@ -236,9 +236,11 @@ class UpdateTests(unittest.TestCase):
         responses=[]
         class Handler:
             def send_json(self,body):responses.append(body)
-        with mock.patch.object(updates,'check_releases',return_value={'success':True}) as check:
+        with mock.patch.object(updates,'check_releases',return_value={'success':True, 'clients':[]}) as check, \
+             mock.patch.object(server.managed_releases, 'run_scheduled_check', return_value=[{'client':'Manager'}]):
             server.RequestHandler._post_api_check_client_updates(Handler(),{})
             check.assert_called_once()
+            self.assertEqual(responses[-1]['clients'], [{'client':'Manager'}])
         with mock.patch.object(updates,'install_release',return_value={'success':False}) as install:
             server.RequestHandler._post_api_install_client_update(Handler(),{'client':'AyuGram','version':'7.3.1','acknowledgement':{'Telegram':'7.3.1'}})
             install.assert_called_once_with('AyuGram','7.3.1',{'Telegram':'7.3.1'})

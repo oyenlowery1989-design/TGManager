@@ -15,6 +15,12 @@ SWIFT_BIN="$MACOS_DIR/launcher_swift"
 SERVER_PY="$RESOURCES/server.py"
 PARENT="$(cd "$MACOS_DIR/../.." && pwd)"
 
+# Serialize launch against app replacement before cleanup or compilation.
+export PYTHONDONTWRITEBYTECODE=1
+if [ "${TG_RELEASE_LAUNCH_GUARD:-}" != "1" ]; then
+    exec python3 "$RESOURCES/release_runtime.py" launch "$PARENT" "$0" "$@"
+fi
+
 # ── Read port from manager_config.json (default 8477) ────────────────────────
 PORT=8477
 _CONFIG="$MACOS_DIR/../../manager_config.json"

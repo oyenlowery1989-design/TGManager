@@ -1,6 +1,32 @@
 import Cocoa
 import WebKit
 import Foundation
+import Darwin
+
+// Keep direct native launches serialized with the external update helper too.
+var releaseLifetimeFD: Int32 = -1
+func holdReleaseLease() -> Bool {
+    let parent = Bundle.main.bundleURL.deletingLastPathComponent().resolvingSymlinksInPath()
+    let data = parent.appendingPathComponent("data")
+    let base = FileManager.default.fileExists(atPath: data.path) ? data : parent
+    let root = base.appendingPathComponent("ReleaseUpdates")
+    do {
+        if (try? base.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true ||
+           (try? root.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true { return false }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false,
+                                               attributes: [.posixPermissions: 0o700])
+        let fd = open(root.appendingPathComponent("lifecycle.lock").path, O_RDWR | O_CREAT | O_NOFOLLOW, 0o600)
+        guard fd >= 0 else { return false }
+        var info = stat()
+        guard fstat(fd, &info) == 0, info.st_nlink == 1, flock(fd, LOCK_SH) == 0 else { close(fd); return false }
+        if FileManager.default.fileExists(atPath: root.appendingPathComponent("transaction.json").path) {
+            close(fd)
+            return false
+        }
+        releaseLifetimeFD = fd
+        return true
+    } catch { return false }
+}
 
 func readSessionToken() -> String {
     if let envToken = ProcessInfo.processInfo.environment["TG_SESSION_TOKEN"], !envToken.isEmpty {
@@ -305,6 +331,13 @@ if CommandLine.arguments.dropFirst().first == "--quit-pid" {
     exit(target.terminate() ? 0 : 1)
 }
 let app = NSApplication.shared
+guard holdReleaseLease() else {
+    let alert = NSAlert()
+    alert.messageText = "Update recovery required"
+    alert.informativeText = "Close Telegram and AyuGram, then open Telegram Manager through its application icon to finish update recovery."
+    alert.runModal()
+    exit(1)
+}
 let del = AppDelegate()
 app.delegate = del
 app.run()

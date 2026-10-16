@@ -32,6 +32,9 @@ def guard_client_launch(function):
         if not INSTALL_LOCK.acquire(blocking=False):
             return False, 'Another client launch or update is in progress; try again shortly'
         try:
+            if function.__module__ == 'ayugram':
+                import release_runtime
+                release_runtime.mark_ayugram_launch(state.APP_BUNDLE)
             return function(*args, **kwargs)
         finally:
             INSTALL_LOCK.release()
@@ -202,6 +205,11 @@ def recover_ayugram_update():
 
 def _replace_ayugram(source, release):
     import ayugram
+    import release_runtime
+    release_root = release_runtime.state_dir(state.APP_BUNDLE)
+    if (release_runtime.read(release_root / 'job.json').get('status') == 'queued'
+            or release_runtime.read(release_root / 'transaction.json')):
+        raise ValueError('Finish or cancel the scheduled managed update before replacing AyuGram')
     server = _server()
     recover_ayugram_update()
     master, staging, previous, manifest, journal = _ayu_paths()
@@ -294,6 +302,11 @@ def install_release(client, requested_version, acknowledgement=None):
     installed = False
     try:
         if client == 'AyuGram':
+            import release_runtime
+            release_root = release_runtime.state_dir(state.APP_BUNDLE)
+            if (release_runtime.read(release_root / 'job.json').get('status') == 'queued'
+                    or release_runtime.read(release_root / 'transaction.json')):
+                raise ValueError('Finish or cancel the scheduled managed update first')
             recover_ayugram_update()
         release = official_release(client)
         if release['version'] != requested_version:
@@ -692,4 +705,10 @@ def run_weekly_check(now=None):
 def run_weekly_monitor():
     while not _MONITOR_STOP.is_set():
         run_weekly_check()
+        try:
+            import managed_releases
+            managed_releases.run_scheduled_check()
+            managed_releases.ensure_worker()
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            state._log.warning('Managed release check failed: %s', error)
         _MONITOR_STOP.wait(60)

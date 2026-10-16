@@ -1,5 +1,9 @@
 #!/bin/bash
 DIR="$(cd "$(dirname "$0")/../Resources" && pwd)"
+export PYTHONDONTWRITEBYTECODE=1
+if [ "${TG_RELEASE_LAUNCH_GUARD:-}" != "1" ]; then
+    exec python3 "$DIR/release_runtime.py" launch "$(cd "$DIR/../.." && pwd)" "$0" "$@"
+fi
 PORT=8477
 SESSION_TOKEN="${TG_SESSION_TOKEN:-}"
 if [ -z "$SESSION_TOKEN" ]; then

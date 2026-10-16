@@ -29,11 +29,20 @@ from urllib.parse import urlparse, parse_qs
 # generate a different SESSION_TOKEN, and create a parallel set of caches and
 # locks). Under unittest (which imports "server" normally) this is a no-op.
 import sys
+sys.dont_write_bytecode = True
+if __name__ == "__main__":
+    import release_runtime
+    _release_lifetime_lease = release_runtime.lease(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    if release_runtime.read(release_runtime.paths(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))[2]):
+        raise RuntimeError('Finish update recovery through the application launcher before starting the server')
 sys.modules.setdefault("server", sys.modules[__name__])
 
 import state
 import ayugram
 import updates
+import managed_releases
 from state import (
     ROOT_DIR, DATA_DIR, PATH_WARNINGS,
     METADATA_FILE, WORKSPACES_FILE,
@@ -2953,7 +2962,18 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.send_json({"success": ok, "message": msg})
 
     def _post_api_check_client_updates(self, data):
-        self.send_json(updates.check_releases())
+        result = updates.check_releases()
+        result['clients'].extend(managed_releases.run_scheduled_check(force=True))
+        self.send_json(result)
+
+    def _get_api_managed_release_status(self):
+        self.send_json(managed_releases.status())
+
+    def _post_api_schedule_managed_release(self, data):
+        self.send_json(managed_releases.schedule(data.get('component'), data.get('version'), data.get('rollback', False)))
+
+    def _post_api_cancel_managed_release(self, data):
+        self.send_json(managed_releases.cancel())
 
     def _post_api_install_client_update(self, data):
         self.send_json(updates.install_release(data.get("client"), data.get("version"), data.get("acknowledgement")))
@@ -3617,6 +3637,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         '/api/keeper/status': '_get_api_keeper_status',
         '/api/alerts': '_get_api_alerts',
         '/api/client-update-status': '_get_api_client_update_status',
+        '/api/managed-release-status': '_get_api_managed_release_status',
         '/api/stats': '_get_api_stats',
         '/api/groups': '_get_api_groups',
         '/api/pick-app': '_get_api_pick_app',
@@ -3630,6 +3651,8 @@ class RequestHandler(BaseHTTPRequestHandler):
         '/api/check-client-updates': '_post_api_check_client_updates',
         '/api/client-update-dismiss': '_post_api_client_update_dismiss',
         '/api/install-client-update': '_post_api_install_client_update',
+        '/api/schedule-managed-release': '_post_api_schedule_managed_release',
+        '/api/cancel-managed-release': '_post_api_cancel_managed_release',
         '/api/check-telegram-update': '_post_api_check_telegram_update',
         '/api/open': '_post_api_open',
         '/api/open-ayugram': '_post_api_open_ayugram',
@@ -3752,6 +3775,7 @@ def _remove_ready_file(path):
 
 
 if __name__ == "__main__":
+    managed_releases.ensure_worker()
     threading.Thread(target=run_keeper_loop, daemon=True).start()
     threading.Thread(target=_app_watcher_loop, daemon=True).start()
     threading.Thread(target=_recover_stale_proxy, daemon=True).start()

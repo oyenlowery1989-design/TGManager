@@ -1108,6 +1108,11 @@
   <button class="btn" id="client-update-notice-dismiss" onclick="dismissClientUpdateNotice()">Dismiss</button>
 </div>
 
+<div id="managed-release-notice" role="status" style="display:none;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 20px;border-bottom:1px solid var(--accent);background:var(--card-bg)">
+  <span id="managed-release-notice-text" style="flex:1"></span>
+  <button class="btn" onclick="showClientUpdates()">Review Updates</button>
+</div>
+
 <div class="workspace-bar" id="workspace-bar" style="display:none"></div>
 
 <div id="select-banner" style="display:none;background:rgba(82,136,193,0.1);border-bottom:1px solid var(--accent);padding:8px 20px;font-size:12px;color:var(--accent);display:none;align-items:center;gap:10px">
@@ -1185,9 +1190,20 @@
 
 <div class="modal-overlay" id="client-updates-modal">
   <div class="modal" style="width:560px;max-width:94vw;max-height:88vh;overflow-y:auto">
-    <h2>Telegram and AyuGram Updates</h2>
-    <p style="color:var(--text-dim)">Official stable macOS releases. Automatic updates are disabled for managed instances. Quit all managed clients before installing.</p>
+    <h2>Manager, Telegram and AyuGram Updates</h2>
+    <p style="color:var(--text-dim)">Weekly checks fetch release information only. Downloads require your button click. Official client updates install separately.</p>
     <div id="client-update-monitor" style="font-size:12px;line-height:1.5;margin:12px 0;color:var(--text-dim)" aria-live="polite"></div>
+    <div style="padding:12px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border);font-size:12px;line-height:1.5">
+      <strong>Manager and Custom AyuGram</strong>
+      <p>Download and Schedule queues one update at a time. Quit Manager AND all Telegram/AyuGram clients normally before installation. Nothing is force-closed or automatically relaunched.</p>
+      <p id="managed-release-status" role="status" style="margin:8px 0;white-space:pre-wrap">Loading scheduled update status…</p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn" id="managed-release-cancel" disabled onclick="cancelManagedRelease()">Cancel Scheduled Update</button>
+        <button class="btn" id="managed-release-rollback-manager" disabled onclick="scheduleManagedRelease('manager', true)">Roll Back Manager</button>
+        <button class="btn" id="managed-release-rollback-custom" disabled onclick="scheduleManagedRelease('ayugram-custom', true)">Roll Back Custom AyuGram</button>
+      </div>
+      <p style="margin-top:8px;color:var(--text-dim)">Rollback replaces the app only; profiles and sessions are never restored. Manager rollback requires the same state compatibility. Custom AyuGram rollback ends after its first new-version launch.</p>
+    </div>
     <div id="client-update-list" aria-live="polite"></div>
     <p id="client-update-warning" style="color:var(--yellow);white-space:pre-wrap"></p>
     <p style="color:var(--text-dim)">Version checks do not certify session compatibility. Test session imports on a separate copy. Your session data and preferences are not changed by installation.</p>
@@ -2448,12 +2464,14 @@ let pendingClientUpdate = null;
 let clientReleaseRows = [];
 let clientUpdateMonitorStatus = null;
 let clientUpdateMonitorRequest = 0;
+let managedReleaseStatus = null;
+let managedReleaseStatusRequest = 0;
 function safeClientUpdateLink(value) {
   try {
     const url = new URL(value);
-    if (url.protocol !== "https:") return "";
+    if (url.protocol !== "https:" || url.username || url.password || url.port) return "";
     if (url.hostname === "raw.githubusercontent.com" && url.pathname.startsWith("/AyuGram/AyuGramDesktop/")) return url.href;
-    if (url.hostname === "github.com" && ["/AyuGram/AyuGramDesktop/", "/telegramdesktop/tdesktop/"].some(prefix => url.pathname.startsWith(prefix))) return url.href;
+    if (url.hostname === "github.com" && ["/AyuGram/AyuGramDesktop/", "/telegramdesktop/tdesktop/", "/oyenlowery1989-design/TGManager/"].some(prefix => url.pathname === prefix.slice(0, -1) || url.pathname.startsWith(prefix))) return url.href;
     if (url.hostname === "t.me" && /^\/(?:s\/)?AyuGramReleases(?:\/\d+)?$/.test(url.pathname)) return url.href;
   } catch (_) {}
   return "";
@@ -2512,11 +2530,91 @@ async function dismissClientUpdateNotice() {
   } finally { button.disabled = false; }
 }
 
+function managedReleaseQueued() {
+  return managedReleaseStatus?.job?.status === "queued";
+}
+function updateManagedReleaseControls() {
+  const unavailable = clientUpdateBusy || !managedReleaseStatus;
+  const queued = managedReleaseQueued();
+  document.getElementById("managed-release-cancel").disabled = unavailable || !queued;
+  for (const [component, suffix] of [["manager", "manager"], ["ayugram-custom", "custom"]])
+    document.getElementById(`managed-release-rollback-${suffix}`).disabled = unavailable || queued || managedReleaseStatus?.rollback?.[component] !== true;
+  document.querySelectorAll(".managed-release-schedule").forEach(button => {
+    button.disabled = unavailable || queued || button.dataset.available !== "true";
+  });
+}
+function renderManagedReleaseStatus(status) {
+  managedReleaseStatus = status;
+  const job = status.job || {};
+  const label = {manager:"Manager", "ayugram-custom":"Custom AyuGram"}[job.component] || "Managed release";
+  const lines = [job.status ? `${label}: ${job.status}. ${job.message || ""}` : "No managed update scheduled."];
+  if (status.last_checked) lines.push(`Managed releases last checked: ${new Date(status.last_checked * 1000).toLocaleString("en-US")}`);
+  if (status.error) lines.push(`Release check: ${status.error}`);
+  document.getElementById("managed-release-status").textContent = lines.join("\n");
+  if (Array.isArray(status.clients)) {
+    const rows = status.clients.filter(row => row.managed_release === true);
+    clientReleaseRows = [...clientReleaseRows.filter(row => !row.managed_release), ...rows];
+    renderClientUpdateRows();
+    const available = rows.filter(row => row.update_available && !row.error);
+    document.getElementById("managed-release-notice-text").textContent = available.map(row => `${row.client} ${row.version} available.`).join(" ");
+    document.getElementById("managed-release-notice").style.display = available.length && !managedReleaseQueued() ? "flex" : "none";
+  }
+  updateManagedReleaseControls();
+}
+async function loadManagedReleaseStatus() {
+  const request = ++managedReleaseStatusRequest;
+  try {
+    const result = await api("/api/managed-release-status");
+    if (request !== managedReleaseStatusRequest || result?.locked) return;
+    if (!result || result._networkError || result.success === false) throw new Error(result?.message || "Scheduled update status is temporarily unavailable.");
+    renderManagedReleaseStatus(result);
+  } catch (error) {
+    if (request !== managedReleaseStatusRequest) return;
+    managedReleaseStatus = null;
+    document.getElementById("managed-release-status").textContent = error.message || "Scheduled update status is temporarily unavailable.";
+    updateManagedReleaseControls();
+  }
+}
+async function scheduleManagedRelease(component, rollback = false) {
+  if (clientUpdateBusy || !managedReleaseStatus || managedReleaseQueued() || !["manager", "ayugram-custom"].includes(component)) return;
+  const row = clientReleaseRows.find(item => item.managed_release && item.component === component);
+  if (rollback ? managedReleaseStatus.rollback?.[component] !== true : !row?.update_available || row.error) return;
+  ++managedReleaseStatusRequest;
+  setClientUpdateBusy(true);
+  document.getElementById("managed-release-status").textContent = rollback ? "Preparing app-only rollback…" : "Downloading and verifying the selected release before scheduling…";
+  try {
+    const payload = rollback ? {component, rollback:true} : {component, version:row.version};
+    const result = await api("/api/schedule-managed-release", "POST", payload);
+    if (!result?.success || !result.scheduled) throw new Error(result?.message || "Could not schedule release");
+    renderManagedReleaseStatus({...managedReleaseStatus, job:{status:"queued", component, message:result.message || "Scheduled. Quit Manager and all Telegram/AyuGram clients normally."}});
+    toast(result.message || "Update scheduled", "success", 8000);
+    await loadManagedReleaseStatus();
+  } catch (error) {
+    document.getElementById("managed-release-status").textContent = error.message || "Could not schedule release";
+    toast(error.message || "Could not schedule release", "error");
+  } finally { setClientUpdateBusy(false); }
+}
+async function cancelManagedRelease() {
+  if (clientUpdateBusy || !managedReleaseQueued()) return;
+  ++managedReleaseStatusRequest;
+  setClientUpdateBusy(true);
+  try {
+    const result = await api("/api/cancel-managed-release", "POST", {});
+    if (!result?.success) throw new Error(result?.message || "Could not cancel scheduled update");
+    renderManagedReleaseStatus({...managedReleaseStatus, job:{status:"cancelled", message:result.message || "Scheduled update cancelled."}});
+    toast(result.message || "Scheduled update cancelled", "success");
+    await loadManagedReleaseStatus();
+  } catch (error) {
+    document.getElementById("managed-release-status").textContent = error.message || "Could not cancel scheduled update";
+    toast(error.message || "Could not cancel scheduled update", "error");
+  } finally { setClientUpdateBusy(false); }
+}
 function setClientUpdateBusy(busy) {
   clientUpdateBusy = busy;
   for (const id of ["client-update-check", "client-update-close", "client-update-local", "client-update-confirm"])
     document.getElementById(id).disabled = busy;
   document.querySelectorAll(".client-release-install").forEach(button => button.disabled = busy || button.dataset.available !== "true");
+  updateManagedReleaseControls();
 }
 function hideClientUpdates() {
   if (clientUpdateBusy) return;
@@ -2525,28 +2623,33 @@ function hideClientUpdates() {
 }
 async function showClientUpdates() {
   document.getElementById("client-updates-modal").classList.add("active");
-  await Promise.all([checkClientUpdates(), loadClientUpdateStatus()]);
+  await Promise.all([checkClientUpdates(), loadClientUpdateStatus(), loadManagedReleaseStatus()]);
 }
 function renderClientUpdateRows() {
-    document.getElementById("client-update-list").innerHTML = clientReleaseRows.map(row => `
-      <div style="padding:12px 0;border-bottom:1px solid var(--border)">
-        <strong>${esc(row.client)}</strong> — Installed: ${esc(row.installed_version || "Not installed")}
-        ${row.installed_variant ? `<div style="margin:8px 0;color:var(--accent)">${esc(row.installed_variant)}</div>` : ""}
-        <div style="margin:8px 0">${row.error ? esc(row.error) : `Latest official release: ${esc(row.version)} · ${esc(row.update_available ? "Update available" : "Up to date")}`}</div>
-        ${row.release_url ? `<a href="${esc(row.release_url)}" target="_blank" rel="noopener noreferrer">Official release notes</a>` : ""}
-        <button class="btn primary client-release-install" data-available="${!!row.update_available}" ${row.update_available ? "" : "disabled"} onclick="installClientUpdate('${row.client}')">${row.update_available ? "Download and Install" : row.error ? "Unavailable" : "No Update"}</button>
-      </div>`).join("");
+  document.getElementById("client-update-list").innerHTML = clientReleaseRows.map((row, index) => {
+    const managed = row.managed_release === true;
+    const link = safeClientUpdateLink(row.release_url);
+    const available = !!row.update_available && !row.error;
+    return `<div style="padding:12px 0;border-bottom:1px solid var(--border)">
+      <strong>${esc(row.client)}</strong> — Installed: ${esc(row.installed_version || "Not installed")}
+      ${row.installed_variant ? `<div style="margin:8px 0;color:var(--accent)">${esc(row.installed_variant)}</div>` : ""}
+      <div style="margin:8px 0">${row.error ? esc(row.error) : `Latest ${managed ? "managed" : "official"} release: ${esc(row.version || "Unavailable")} · ${esc(available ? "Update available" : "Up to date")}`}</div>
+      ${row.note ? `<p style="font-size:12px;color:var(--text-dim)">${esc(row.note)}</p>` : ""}
+      ${link ? `<a style="color:var(--accent)" href="${esc(link)}" target="_blank" rel="noopener noreferrer">${managed ? "Release notes" : "Official release notes"}</a>` : ""}
+      <button class="btn primary ${managed ? "managed-release-schedule" : "client-release-install"}" data-available="${available}" ${available && !clientUpdateBusy && (!managed || managedReleaseStatus && !managedReleaseQueued()) ? "" : "disabled"} onclick="${managed ? `scheduleManagedRelease(clientReleaseRows[${index}].component)` : `installClientUpdate(clientReleaseRows[${index}].client)`}">${available ? managed ? "Download and Schedule" : "Download and Install" : row.error ? "Unavailable" : "No Update"}</button>
+    </div>`;
+  }).join("");
 }
 async function checkClientUpdates() {
   if (clientUpdateBusy) return;
   pendingClientUpdate = null;
   document.getElementById("client-update-confirm").style.display = "none";
   document.getElementById("client-update-warning").textContent = "";
-  document.getElementById("client-update-list").textContent = "Checking official releases…";
+  document.getElementById("client-update-list").textContent = "Checking Manager, Telegram and AyuGram releases…";
   setClientUpdateBusy(true);
   try {
     const result = await api("/api/check-client-updates", "POST", {});
-    if (!result.success) { document.getElementById("client-update-list").textContent = result.message || "Could not check releases"; return; }
+    if (!result?.success || !Array.isArray(result.clients)) { document.getElementById("client-update-list").textContent = result?.message || "Could not check releases"; return; }
     clientReleaseRows = result.clients;
     renderClientUpdateRows();
     document.getElementById("client-update-warning").textContent = result.warning || "No version mismatch detected; session compatibility still requires testing.";
@@ -2555,7 +2658,7 @@ async function checkClientUpdates() {
 async function installClientUpdate(client, acknowledgement = null) {
   if (clientUpdateBusy) return;
   const row = clientReleaseRows.find(item => item.client === client);
-  if (!row?.update_available) return;
+  if (!row?.update_available || row.managed_release) return;
   pendingClientUpdate = null;
   document.getElementById("client-update-confirm").style.display = "none";
   document.getElementById("client-update-warning").textContent = "Downloading and verifying the official package. This may take a few minutes…";
@@ -3017,6 +3120,7 @@ async function loadKeeperStatus() {
 
 async function loadAlerts() {
   loadClientUpdateStatus();
+  loadManagedReleaseStatus();
   const alerts = await api("/api/alerts");
   const bannerId = "alert-banner-zone";
   let zone = document.getElementById(bannerId);
@@ -4139,7 +4243,7 @@ setInterval(async () => {
 
 setInterval(() => {
   const lock = document.getElementById("lock-screen");
-  if (!lock?.classList.contains("visible")) loadClientUpdateStatus();
+  if (!lock?.classList.contains("visible") && !clientUpdateBusy) { loadClientUpdateStatus(); loadManagedReleaseStatus(); }
 }, 30000);
 
 // ── Dock name fix ──────────────────────────────────────────────────────────
