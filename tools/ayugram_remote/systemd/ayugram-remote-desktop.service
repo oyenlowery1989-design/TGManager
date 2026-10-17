@@ -1,0 +1,22 @@
+[Unit]
+Description=AyuGram window manager
+Requires=ayugram-remote-display.service
+After=ayugram-remote-display.service
+PartOf=ayugram-remote.target
+
+StartLimitIntervalSec=10min
+StartLimitBurst=3
+
+[Service]
+User=ayugram-remote
+Group=ayugram-remote
+Slice=ayugram-remote.slice
+Environment=HOME=/var/lib/ayugram-remote/profile DISPLAY=:95 XAUTHORITY=/var/lib/ayugram-remote/Xauthority
+ExecStart=/usr/bin/openbox --sm-disable
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/ayugram-remote /tmp
+UMask=0077

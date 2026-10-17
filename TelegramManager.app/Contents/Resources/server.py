@@ -43,6 +43,7 @@ import state
 import ayugram
 import updates
 import managed_releases
+import remote_ayugram
 from state import (
     ROOT_DIR, DATA_DIR, PATH_WARNINGS,
     METADATA_FILE, WORKSPACES_FILE,
@@ -2969,6 +2970,18 @@ class RequestHandler(BaseHTTPRequestHandler):
     def _get_api_managed_release_status(self):
         self.send_json(managed_releases.status())
 
+    def _get_api_remote_ayugram_status(self):
+        self.send_json(remote_ayugram.request())
+
+    def _post_api_remote_ayugram_connect(self, data):
+        self.send_json(remote_ayugram.request('connect'))
+
+    def _post_api_remote_ayugram_disconnect(self, data):
+        self.send_json(remote_ayugram.request('disconnect'))
+
+    def _post_api_remote_ayugram_backup(self, data):
+        self.send_json(remote_ayugram.request('backup'))
+
     def _post_api_schedule_managed_release(self, data):
         self.send_json(managed_releases.schedule(data.get('component'), data.get('version'), data.get('rollback', False)))
 
@@ -3638,6 +3651,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         '/api/alerts': '_get_api_alerts',
         '/api/client-update-status': '_get_api_client_update_status',
         '/api/managed-release-status': '_get_api_managed_release_status',
+        '/api/remote-ayugram/status': '_get_api_remote_ayugram_status',
         '/api/stats': '_get_api_stats',
         '/api/groups': '_get_api_groups',
         '/api/pick-app': '_get_api_pick_app',
@@ -3648,6 +3662,9 @@ class RequestHandler(BaseHTTPRequestHandler):
     }
 
     POST_ROUTES = {
+        '/api/remote-ayugram/connect': '_post_api_remote_ayugram_connect',
+        '/api/remote-ayugram/disconnect': '_post_api_remote_ayugram_disconnect',
+        '/api/remote-ayugram/backup': '_post_api_remote_ayugram_backup',
         '/api/check-client-updates': '_post_api_check_client_updates',
         '/api/client-update-dismiss': '_post_api_client_update_dismiss',
         '/api/install-client-update': '_post_api_install_client_update',

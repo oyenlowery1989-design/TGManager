@@ -44,6 +44,10 @@ class HTTPLayerTests(unittest.TestCase):
         cls.thread.join(timeout=5)
 
     def setUp(self):
+        for name, result in [('scan_accounts_cached', []), ('_last_backup_map', {})]:
+            patch = mock.patch.object(server, name, return_value=result)
+            patch.start()
+            self.addCleanup(patch.stop)
         # The real manager_config.json on this machine may have the password
         # lock configured — force it off by default so non-lock tests see a
         # deterministic unlocked server; lock-specific tests opt back in.

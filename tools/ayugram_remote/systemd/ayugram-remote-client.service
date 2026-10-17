@@ -1,0 +1,27 @@
+[Unit]
+Description=AyuGram Inline Test isolated login
+Requires=ayugram-remote-desktop.service
+After=ayugram-remote-desktop.service
+PartOf=ayugram-remote.target
+
+StartLimitIntervalSec=10min
+StartLimitBurst=3
+
+[Service]
+User=ayugram-remote
+Group=ayugram-remote
+Slice=ayugram-remote.slice
+Environment=HOME=/var/lib/ayugram-remote/profile DISPLAY=:95 XAUTHORITY=/var/lib/ayugram-remote/Xauthority
+Environment=QT_QPA_PLATFORM=xcb QT_X11_NO_MITSHM=1 LANG=C.UTF-8
+WorkingDirectory=/var/lib/ayugram-remote
+ExecStart=/usr/bin/dbus-run-session -- /usr/bin/python3 -I /opt/ayugram-remote/runtime.py launch
+Restart=always
+RestartSec=30
+TimeoutStopSec=30
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/ayugram-remote /tmp
+UMask=0077
+StandardOutput=null
+StandardError=null

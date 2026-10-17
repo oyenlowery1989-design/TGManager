@@ -1,0 +1,8 @@
+[Unit]
+Description=Private remote AyuGram desktop
+Wants=ayugram-remote-client.service ayugram-remote-vnc.service ayugram-remote-display.service ayugram-remote-desktop.service
+Upholds=ayugram-remote-client.service ayugram-remote-vnc.service ayugram-remote-display.service ayugram-remote-desktop.service
+After=ayugram-remote-client.service ayugram-remote-vnc.service
+
+[Install]
+WantedBy=multi-user.target

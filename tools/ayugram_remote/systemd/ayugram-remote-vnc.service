@@ -1,0 +1,24 @@
+[Unit]
+Description=AyuGram loopback-only VNC
+Requires=ayugram-remote-display.service
+After=ayugram-remote-display.service
+PartOf=ayugram-remote.target
+
+StartLimitIntervalSec=10min
+StartLimitBurst=3
+
+[Service]
+User=ayugram-remote
+Group=ayugram-remote
+Slice=ayugram-remote.slice
+Environment=HOME=/var/lib/ayugram-remote/profile DISPLAY=:95 XAUTHORITY=/var/lib/ayugram-remote/Xauthority
+ExecStart=/usr/bin/x11vnc -display :95 -auth /var/lib/ayugram-remote/Xauthority -rfbauth /etc/ayugram-remote/vnc-password -listen 127.0.0.1 -localhost -no6 -rfbport 5905 -forever -shared -noxdamage
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/ayugram-remote /tmp
+UMask=0077
+StandardOutput=null
+StandardError=null

@@ -1,0 +1,9 @@
+[Unit]
+Description=Isolated AyuGram resource budget
+
+[Slice]
+CPUQuota=50%
+MemoryHigh=560M
+MemoryMax=640M
+MemorySwapMax=0
+TasksMax=128

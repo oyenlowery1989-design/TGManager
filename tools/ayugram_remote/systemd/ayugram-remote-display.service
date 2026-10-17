@@ -1,0 +1,22 @@
+[Unit]
+Description=AyuGram private virtual display
+PartOf=ayugram-remote.target
+
+StartLimitIntervalSec=10min
+StartLimitBurst=3
+
+[Service]
+User=ayugram-remote
+Group=ayugram-remote
+Slice=ayugram-remote.slice
+Environment=HOME=/var/lib/ayugram-remote/profile
+ExecStartPre=/usr/bin/python3 -I /opt/ayugram-remote/runtime.py verify
+ExecStart=/usr/bin/Xvfb :95 -screen 0 1280x800x24 -nolisten tcp -auth /var/lib/ayugram-remote/Xauthority
+ExecStartPost=/opt/ayugram-remote/wait-display.sh
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/ayugram-remote /tmp
+UMask=0077

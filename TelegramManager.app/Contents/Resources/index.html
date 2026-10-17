@@ -1093,6 +1093,7 @@
   <button class="btn" onclick="openPinned()" id="btn-open-pinned" data-tip="Launch only pinned accounts">Open Pinned</button>
   <button class="btn" onclick="setupAll()" data-tip="Copy Telegram.app into accounts that are missing it">Setup</button>
   <button class="btn" onclick="showClientUpdates()" data-tip="Check official releases and update Telegram or AyuGram without editing sessions">Client Updates</button>
+  <button class="btn" id="remote-ayugram-button" onclick="showRemoteAyuGram()" data-tip="View the independent AyuGram desktop on your VPS">Remote AyuGram</button>
   <div class="toolbar-sep"></div>
   <button class="btn" onclick="backupAll()" data-tip="Save a backup of every account's session data (tdata)">Backup All</button>
   <button class="btn" onclick="showBackupBrowser()" data-tip="View saved backups and restore one to an account">Browse Backups</button>
@@ -1184,6 +1185,21 @@
     <div class="modal-actions">
       <button class="btn" onclick="hideMoveAccountModal()">Cancel</button>
       <button class="btn primary" id="btn-move-account" onclick="confirmMoveAccount()">Move</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="remote-ayugram-modal" onkeydown="remoteAyuGramKey(event)">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="remote-ayugram-title" style="width:520px">
+    <h2 id="remote-ayugram-title">Remote AyuGram</h2>
+    <p class="modal-info">This independent profile stores its history on the VPS. Daily encrypted backups require VPS setup; check the last backup result below. Sign in there yourself. Closing Screen Sharing or this Mac leaves AyuGram running on the VPS. History is viewed remotely; it is not merged with Mac profiles.</p>
+    <p id="remote-ayugram-status" role="status" style="white-space:pre-wrap;margin-bottom:16px">Checking VPS…</p>
+    <div class="modal-actions" style="flex-wrap:wrap">
+      <button class="btn" id="remote-ayugram-close" onclick="hideRemoteAyuGram()">Close</button>
+      <button class="btn" id="remote-ayugram-refresh" onclick="remoteAyuGramAction('status')">Refresh</button>
+      <button class="btn" id="remote-ayugram-backup" disabled onclick="remoteAyuGramAction('backup')">Back Up Now</button>
+      <button class="btn" id="remote-ayugram-disconnect" disabled onclick="remoteAyuGramAction('disconnect')">Disconnect Viewer</button>
+      <button class="btn primary" id="remote-ayugram-connect" disabled onclick="remoteAyuGramAction('connect')">Open Remote Desktop</button>
     </div>
   </div>
 </div>
@@ -2461,6 +2477,56 @@ async function setupAll() {
 
 let clientUpdateBusy = false;
 let pendingClientUpdate = null;
+let remoteAyuGramBusy = false;
+let remoteAyuGramStatus = null;
+function updateRemoteAyuGramControls() {
+  document.getElementById('remote-ayugram-refresh').disabled = remoteAyuGramBusy;
+  document.getElementById('remote-ayugram-connect').disabled = remoteAyuGramBusy || !remoteAyuGramStatus?.ready;
+  document.getElementById('remote-ayugram-backup').disabled = remoteAyuGramBusy || !remoteAyuGramStatus?.configured || remoteAyuGramStatus?.backup_active;
+  document.getElementById('remote-ayugram-disconnect').disabled = remoteAyuGramBusy || !remoteAyuGramStatus?.connected;
+}
+async function showRemoteAyuGram() {
+  document.getElementById('remote-ayugram-modal').classList.add('active');
+  document.getElementById('remote-ayugram-close').focus();
+  await remoteAyuGramAction('status');
+}
+function hideRemoteAyuGram() {
+  document.getElementById('remote-ayugram-modal').classList.remove('active');
+  document.getElementById('remote-ayugram-button').focus();
+}
+function remoteAyuGramKey(event) {
+  if (event.key === 'Escape') { event.stopPropagation(); hideRemoteAyuGram(); }
+  if (event.key !== 'Tab') return;
+  const buttons = [...document.querySelectorAll('#remote-ayugram-modal button:not(:disabled)')];
+  const target = event.shiftKey && document.activeElement === buttons[0] ? buttons.at(-1)
+    : !event.shiftKey && document.activeElement === buttons.at(-1) ? buttons[0] : null;
+  if (target) { event.preventDefault(); target.focus(); }
+}
+async function remoteAyuGramAction(action) {
+  if (remoteAyuGramBusy || !['status', 'connect', 'disconnect', 'backup'].includes(action)) return;
+  remoteAyuGramBusy = true;
+  updateRemoteAyuGramControls();
+  const panel = document.getElementById('remote-ayugram-status');
+  panel.textContent = action === 'status' ? 'Checking VPS…' : 'Working…';
+  try {
+    const result = await api('/api/remote-ayugram/' + action, action === 'status' ? 'GET' : 'POST', action === 'status' ? null : {});
+    if (!result?.success) throw new Error(result?.message || 'Remote AyuGram is unavailable.');
+    if (action === 'status' || action === 'connect') remoteAyuGramStatus = result;
+    if (action === 'disconnect' && remoteAyuGramStatus) remoteAyuGramStatus.connected = false;
+    if (action === 'backup' && remoteAyuGramStatus) remoteAyuGramStatus.backup_active = true;
+    const lines = [result.message];
+    if (result.configured) lines.push(`Server: ${result.instance}`, `AyuGram: ${result.client_active ? 'running' : 'stopped'}`,
+      `Backup: ${result.backup_active ? 'running' : result.backup_last_result}`, `Last backup finished: ${result.backup_last_finished}`);
+    panel.textContent = lines.filter(Boolean).join('\n');
+  } catch (error) {
+    if (remoteAyuGramStatus) remoteAyuGramStatus = {...remoteAyuGramStatus, ready:false, configured:false};
+    panel.textContent = error.message || 'Remote AyuGram is unavailable.';
+  } finally {
+    remoteAyuGramBusy = false;
+    updateRemoteAyuGramControls();
+  }
+}
+
 let clientReleaseRows = [];
 let clientUpdateMonitorStatus = null;
 let clientUpdateMonitorRequest = 0;
