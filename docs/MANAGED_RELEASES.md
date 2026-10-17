@@ -26,7 +26,11 @@ commit into temporary staging. The selected commit must contain both
 `release_runtime.py` and `managed_releases.py`; untracked files and current working-tree edits
 are excluded. It compiles the staged Swift launcher for the selected architecture
 and macOS 12, writes both plist version fields and a small installed-release
-marker, then ad-hoc signs the staged app. It never signs or edits the live app.
+marker, then ad-hoc signs the staged app. The optional developer alternate
+`Contents/MacOS/launcher_chrome.sh` is omitted from staging: its nested script
+signature depends on extended attributes that tar does not preserve. The main
+`launcher.sh` already includes the browser fallback. The original alternate
+launcher remains in the repository. The packager never signs or edits the live app.
 
 ```sh
 python3 tools/build_managed_release.py manager \

@@ -92,6 +92,9 @@ def stage_manager(repo, commit, app, version, architecture):
         relative = Path(name).relative_to(prefix)
         if '..' in relative.parts or kind != 'blob' or mode not in ('100644', '100755', '120000'):
             raise ValueError(f'Unsupported tracked entry: {name}')
+        if relative == Path('Contents/MacOS/launcher_chrome.sh'):
+            # Its nested script signature uses xattrs lost by tar; launcher.sh includes the same fallback.
+            continue
         destination = app / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         content = run(['git', '-C', str(repo), 'cat-file', 'blob', oid])

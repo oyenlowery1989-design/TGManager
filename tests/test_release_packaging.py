@@ -189,6 +189,7 @@ class PackagingTests(unittest.TestCase):
             'Contents/Resources/release_runtime.py': b'# synthetic runtime',
             'Contents/Resources/managed_releases.py': b'# synthetic backend',
             'Contents/MacOS/launcher.sh': b'#!/bin/sh\n',
+            'Contents/MacOS/launcher_chrome.sh': b'#!/bin/sh\n# developer alternate\n',
         }
         objects = {str(index): content for index, content in enumerate(files.values())}
         tree = b'\0'.join(f'{"100755" if name.endswith("launcher.sh") else "100644"} blob {index}\tTelegramManager.app/{name}'.encode() for index, name in enumerate(files)) + b'\0'
@@ -200,6 +201,8 @@ class PackagingTests(unittest.TestCase):
                     self.assertIn(COMMIT, args)
                     return tree
                 return objects[args[-1]]
+            if args[0] == 'codesign' and '--sign' in args:
+                self.assertFalse((Path(args[-1]) / 'Contents/MacOS/launcher_chrome.sh').exists())
             return self.fake_run(args, **kwargs)
         with mock.patch.object(packaging, 'run', side_effect=git_runner):
             manifest = packaging.package_release('manager', '2.3.4', COMMIT, 'arm64', self.root / 'manager-out')
@@ -212,6 +215,8 @@ class PackagingTests(unittest.TestCase):
             marker = json.load(tar.extractfile('TelegramManager.app/Contents/Resources/managed-release.json'))
             self.assertEqual(marker['version'], '2.3.4')
             self.assertIsNotNone(tar.extractfile('TelegramManager.app/Contents/MacOS/launcher_swift'))
+            self.assertNotIn('TelegramManager.app/Contents/MacOS/launcher_chrome.sh', tar.getnames())
+            self.assertIsNotNone(tar.extractfile('TelegramManager.app/Contents/MacOS/launcher.sh'))
         self.assertTrue(any(command[0] == 'swiftc' for command in self.commands))
         self.assertTrue(any('--sign' in command for command in self.commands))
         self.assertEqual(self.info['CFBundleShortVersionString'], '7.2.9')
