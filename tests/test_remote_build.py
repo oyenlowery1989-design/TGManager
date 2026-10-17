@@ -40,7 +40,7 @@ class RemoteBuildTests(unittest.TestCase):
             stub('git', '''
 if [[ "$1" == init ]]; then
   mkdir -p source/Telegram/build/docker/centos_env
-  echo 'print("FROM scratch")' > source/Telegram/build/docker/centos_env/gen_dockerfile.py
+  echo 'print("FROM rockylinux:8\\nRUN <<EOF\\ndnf -y install epel-release\\nEOF")' > source/Telegram/build/docker/centos_env/gen_dockerfile.py
   echo 'synthetic license' > source/LICENSE
 elif [[ "$3" == rev-parse ]]; then
   echo d4b7546e77f93ac4c9bb53a3fcf7e9ffbbecf1b5
@@ -62,6 +62,11 @@ fi
                                     env=env,capture_output=True,text=True)
             self.assertEqual(result.returncode,0,(work/'build.log').read_text() if (work/'build.log').exists() else result.stderr)
             self.assertNotIn('a'*32,result.stdout+result.stderr)
+            recipe = (work/'dependencies.Dockerfile').read_text()
+            self.assertIn('baseurl=https://dl.rockylinux.org/pub/rocky/8/', recipe)
+            self.assertLess(recipe.index('for mapping'), recipe.index('dnf -y install'))
+            self.assertNotIn('gpgcheck=0', recipe)
+            self.assertNotIn('sslverify=0', recipe)
             manifest = json.loads((work/'release/release.json').read_text())
             self.assertEqual(manifest['binary_sha256'],hashlib.sha256((work/'release/AyuGram Inline Test').read_bytes()).hexdigest())
             self.assertEqual(manifest['patch_sha256'],hashlib.sha256((context/'ayugram-inline.patch').read_bytes()).hexdigest())

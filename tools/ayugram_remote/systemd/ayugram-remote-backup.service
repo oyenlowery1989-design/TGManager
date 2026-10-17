@@ -7,6 +7,7 @@ ConditionPathExists=/etc/ayugram-remote/backup.env
 [Service]
 Type=oneshot
 Slice=ayugram-remote.slice
+OOMScoreAdjust=1000
 EnvironmentFile=/etc/ayugram-remote/backup.env
 Environment=GOGC=20 GOMAXPROCS=1
 ExecStart=/opt/ayugram-remote/backup.sh

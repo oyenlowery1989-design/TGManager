@@ -106,7 +106,8 @@ def install(candidate, expected_sha):
     units = list((HERE / 'systemd').iterdir())
     code_files = [base / name for name in ('runtime.py', 'backup.sh', 'wait-display.sh',
                                           'preferences.json', 'trusted.json')]
-    code_files += [release / NAME, release / 'release.json',
+    resolver = config / 'runtime-resolv.conf'
+    code_files += [resolver, release / NAME, release / 'release.json',
                    Path('/usr/local/sbin/ayugram-remote-control')]
     code_files += [Path('/etc/systemd/system') / source.name for source in units]
     for path in code_files:
@@ -165,6 +166,7 @@ def install(candidate, expected_sha):
         verify_release(release, expected_sha, patch_sha)
     for name in ('runtime.py', 'backup.sh', 'wait-display.sh'):
         root_copy(HERE / name, base / name, 0o755)
+    root_write(resolver, 'nameserver 8.8.8.8\nnameserver 8.8.4.4\noptions timeout:2 attempts:2\n')
     root_write(base / 'preferences.json', json.dumps(preferences) + '\n')
     root_write(temporary, json.dumps(dict(binary_sha256=expected_sha, patch_sha256=patch_sha)) + '\n')
     os.replace(temporary, base / 'trusted.json')

@@ -44,6 +44,27 @@ docker buildx create --name "$builder" --driver docker-container \
   --buildkitd-config "$work/buildkit.toml"
 cd source/Telegram/build/docker/centos_env
 DEBUG= LTO= JOBS=8 python3 gen_dockerfile.py > "$work/dependencies.Dockerfile"
+# Some Rocky mirrors return stale metadata; keep GPG checks and use its primary HTTPS repository.
+python3 - "$work/dependencies.Dockerfile" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+source = path.read_text()
+needle = 'dnf -y install epel-release\n'
+if source.count(needle) != 1:
+    raise ValueError('Pinned dependency recipe changed; review repository setup')
+setup = r'''for mapping in BaseOS:BaseOS AppStream:AppStream PowerTools:PowerTools Extras:extras; do
+    repo_file="/etc/yum.repos.d/Rocky-${mapping%%:*}.repo"
+    repo_path="${mapping#*:}"
+    test -f "$repo_file"
+    sed -i -e '/^mirrorlist=/s/^/#/' \
+        -e "s|^#baseurl=.*|baseurl=https://dl.rockylinux.org/pub/rocky/8/$repo_path/\$basearch/os/|" \
+        -e "s|^baseurl=.*|baseurl=https://dl.rockylinux.org/pub/rocky/8/$repo_path/\$basearch/os/|" "$repo_file"
+done
+dnf clean metadata
+'''
+path.write_text(source.replace(needle, setup + needle))
+PY
 docker buildx build --builder "$builder" --load -t ayugram-pinned:linux \
   -f "$work/dependencies.Dockerfile" .
 cd "$work/source"

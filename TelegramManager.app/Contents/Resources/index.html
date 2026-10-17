@@ -2481,7 +2481,7 @@ let remoteAyuGramBusy = false;
 let remoteAyuGramStatus = null;
 function updateRemoteAyuGramControls() {
   document.getElementById('remote-ayugram-refresh').disabled = remoteAyuGramBusy;
-  document.getElementById('remote-ayugram-connect').disabled = remoteAyuGramBusy || !remoteAyuGramStatus?.ready;
+  document.getElementById('remote-ayugram-connect').disabled = remoteAyuGramBusy || !(remoteAyuGramStatus?.viewer_ready ?? remoteAyuGramStatus?.ready);
   document.getElementById('remote-ayugram-backup').disabled = remoteAyuGramBusy || !remoteAyuGramStatus?.configured || remoteAyuGramStatus?.backup_active;
   document.getElementById('remote-ayugram-disconnect').disabled = remoteAyuGramBusy || !remoteAyuGramStatus?.connected;
 }
@@ -2519,7 +2519,7 @@ async function remoteAyuGramAction(action) {
       `Backup: ${result.backup_active ? 'running' : result.backup_last_result}`, `Last backup finished: ${result.backup_last_finished}`);
     panel.textContent = lines.filter(Boolean).join('\n');
   } catch (error) {
-    if (remoteAyuGramStatus) remoteAyuGramStatus = {...remoteAyuGramStatus, ready:false, configured:false};
+    if (remoteAyuGramStatus) remoteAyuGramStatus = {...remoteAyuGramStatus, ready:false, viewer_ready:false, configured:false};
     panel.textContent = error.message || 'Remote AyuGram is unavailable.';
   } finally {
     remoteAyuGramBusy = false;

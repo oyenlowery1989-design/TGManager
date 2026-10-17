@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -97,6 +98,26 @@ class RemoteAyuGramTests(unittest.TestCase):
             self.assertTrue(remote.request('connect')['connected'])
         self.assertEqual(launch.call_args.args[0], ['/usr/bin/open', 'vnc://127.0.0.1:54321'])
 
+    def test_first_launch_keeps_viewer_access_and_warns_against_login(self):
+        fixture = {**self.fixture, 'ready':True, 'viewer_ready':True, 'needs_initialization':True}
+        with mock.patch.object(remote, '_remote', return_value=fixture), \
+                mock.patch.object(remote, '_connect', return_value=54321) as connect, \
+                mock.patch.object(remote.subprocess, 'run', return_value=mock.Mock(returncode=0)):
+            status = remote.request('status')
+            self.assertFalse(status['ready'])
+            self.assertTrue(status['needs_initialization'])
+            self.assertTrue(status['viewer_ready'])
+            self.assertIn('do not sign in', status['message'])
+            connect.assert_not_called()
+            opened = remote.request('connect')
+            self.assertTrue(opened['success'])
+            self.assertTrue(opened['connected'])
+            self.assertFalse(opened['ready'])
+            self.assertIn('do not sign in', opened['message'])
+            self.assertIn('Quit AyuGram normally', opened['message'])
+            self.assertIn('Refresh before signing in', opened['message'])
+            connect.assert_called_once_with(self.config)
+
     def test_failed_viewer_closes_tunnel(self):
         with mock.patch.object(remote, '_remote', return_value=self.fixture), \
                 mock.patch.object(remote, '_connect', return_value=54321), \
@@ -161,6 +182,26 @@ class RemoteAyuGramTests(unittest.TestCase):
             self.assertIsNone(remote._tunnel)
         stop.assert_called_once_with(999999, signal.SIGTERM)
 
+    def test_vnc_probe_accepts_delayed_banner_but_rejects_other_protocols(self):
+        for banner, expected in ((b'RFB 003.008\n', True), (b'HTTP/1.1 200', False)):
+            with self.subTest(banner=banner), socket.socket() as listener:
+                listener.bind(('127.0.0.1', 0))
+                listener.listen(1)
+                listener.settimeout(5)
+
+                def serve():
+                    with listener.accept()[0] as connection:
+                        threading.Event().wait(0.75)
+                        connection.sendall(banner)
+
+                thread = threading.Thread(target=serve, daemon=True)
+                thread.start()
+                try:
+                    self.assertEqual(remote._rfb_ready(listener.getsockname()[1]), expected)
+                finally:
+                    thread.join(timeout=5)
+                self.assertFalse(thread.is_alive())
+
     def test_port_collision_rejects_listener_outside_owned_ssh_group(self):
         process = mock.Mock(pid=400)
         with mock.patch.object(remote.subprocess, 'run', return_value=mock.Mock(stdout='p500\n')), \
@@ -215,7 +256,10 @@ eval(source.slice(source.indexOf('let remoteAyuGramBusy'), source.indexOf('let c
   await remoteAyuGramAction('status');
   assert.equal(document.getElementById('remote-ayugram-connect').disabled, true);
   assert.equal(document.getElementById('remote-ayugram-backup').disabled, true);
-  response = {success:true,configured:true,ready:true,connected:true};
+  response = {success:true,configured:true,ready:false,viewer_ready:true,needs_initialization:true};
+  await remoteAyuGramAction('status');
+  assert.equal(document.getElementById('remote-ayugram-connect').disabled, false);
+  response = {success:true,configured:true,ready:true,viewer_ready:true,connected:true};
   await remoteAyuGramAction('status');
   assert.equal(document.getElementById('remote-ayugram-connect').disabled, false);
   response = {success:false,message:'Offline'};

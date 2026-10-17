@@ -110,7 +110,8 @@ def _disconnect():
 
 def _rfb_ready(port):
     try:
-        with socket.create_connection(('127.0.0.1', port), timeout=0.5) as connection:
+        # SSH forwarding and consecutive VNC probes can exceed one round trip.
+        with socket.create_connection(('127.0.0.1', port), timeout=3) as connection:
             data = b''
             while len(data) < 12:
                 part = connection.recv(12 - len(data))
@@ -177,16 +178,23 @@ def request(action='status'):
                 if remote.get('queued') is not True:
                     raise ValueError('The remote backup was not queued.')
                 return {'success': True, 'message': 'Remote backup queued. Refresh status to check the result.'}
-            ready = remote.get('ready') is True and remote.get('vnc_port') == VNC_PORT
+            needs_initialization = remote.get('needs_initialization') is True
+            viewer_ready = (remote.get('viewer_ready', remote.get('ready')) is True
+                            and remote.get('vnc_port') == VNC_PORT)
+            ready = remote.get('ready') is True and viewer_ready and not needs_initialization
+            initialization_message = ('First launch: do not sign in. Quit AyuGram normally, wait for its '
+                                      'automatic restart, then Refresh before signing in.')
             result = {'success': True, 'configured': True, 'ready': ready,
+                      'viewer_ready': viewer_ready, 'needs_initialization': needs_initialization,
                       'instance': config['instance'], 'client_active': remote.get('client_active') is True,
                       'backup_active': remote.get('backup_active') is True,
                       'backup_last_result': str(remote.get('backup_last_result') or 'Not run')[:80],
                       'backup_last_finished': str(remote.get('backup_last_finished') or 'Not yet')[:80],
                       'connected': _tunnel is not None and _tunnel.poll() is None,
-                      'message': 'Remote desktop is ready. Sign in there yourself.' if ready else 'Remote desktop is not ready.'}
+                      'message': initialization_message if viewer_ready and needs_initialization else
+                                 'Remote desktop is ready. Sign in there yourself.' if ready else 'Remote desktop is not ready.'}
             if action == 'connect':
-                if not ready:
+                if not viewer_ready:
                     raise ValueError('Remote desktop is not ready. Finish VPS setup first.')
                 port = _connect(config)
                 opened = subprocess.run(['/usr/bin/open', f'vnc://127.0.0.1:{port}'],
@@ -194,7 +202,9 @@ def request(action='status'):
                                         stderr=subprocess.DEVNULL, timeout=10)
                 if opened.returncode:
                     raise ValueError('Could not open macOS Screen Sharing.')
-                result.update(connected=True, message='Screen Sharing opened. Enter the VNC password set during VPS setup, then sign in to AyuGram.')
+                message = 'Screen Sharing opened. Enter the VNC password set during VPS setup. '
+                message += initialization_message if needs_initialization else 'Sign in to AyuGram there yourself.'
+                result.update(connected=True, message=message)
             return result
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             if action == 'connect':

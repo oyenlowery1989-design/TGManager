@@ -70,6 +70,30 @@ class RemoteDeploymentTests(unittest.TestCase):
             installer.safe_file(target, uid=os.getuid(), modes={0o640})
         self.assertEqual(external.read_text(), 'unchanged')
 
+    def test_private_resolver_destination_cannot_follow_links_or_modify_other_files(self):
+        resolver = self.root / 'runtime-resolv.conf'
+        external = self.root / 'host-resolv.conf'
+        external.write_text('nameserver 169.254.169.254\n')
+        resolver.symlink_to(external)
+        with self.assertRaises(ValueError):
+            installer.root_write(resolver, 'nameserver 8.8.8.8\n')
+        resolver.unlink()
+        os.link(external, resolver)
+        with self.assertRaises(ValueError):
+            installer.root_write(resolver, 'nameserver 8.8.8.8\n')
+        self.assertEqual(external.read_text(), 'nameserver 169.254.169.254\n')
+
+    def test_runtime_metadata_filter_and_private_dns_leave_backup_adc_untouched(self):
+        units = TOOLS / 'systemd'
+        for name in ('client', 'display', 'desktop', 'vnc'):
+            source = (units / ('ayugram-remote-' + name + '.service')).read_text()
+            self.assertIn('IPAddressDeny=169.254.169.254/32 fd20:ce::254/128', source)
+            self.assertIn('BindReadOnlyPaths=/etc/ayugram-remote/runtime-resolv.conf:/etc/resolv.conf', source)
+        for name in ('ayugram-remote-backup.service', 'ayugram-remote.slice'):
+            source = (units / name).read_text()
+            self.assertNotIn('IPAddressDeny=', source)
+            self.assertNotIn('runtime-resolv.conf', source)
+
     def test_installer_refuses_live_transitional_or_unreachable_services(self):
         for state in ('active', 'activating', 'deactivating', 'reloading', ''):
             with self.subTest(state=state), patch.object(installer.subprocess, 'run',
@@ -182,6 +206,24 @@ class RemoteDeploymentTests(unittest.TestCase):
                 patch.object(remote, 'systemctl', side_effect=command):
             self.assertFalse(remote.control('status')['ready'])
         self.assertFalse(any('password' in key for key in status))
+
+    def test_pending_bootstrap_allows_viewer_but_never_reports_ready_for_login(self):
+        profile = self.root / 'profile'
+        remote.seed_profile(profile, preferences())
+        command = lambda *args: subprocess.CompletedProcess(args, 0, 'active\n' if args[0] == 'is-active' else '')
+        with patch.object(remote, 'PROFILE', profile), patch.object(remote, 'installed_binary'), \
+                patch.object(remote, 'backup_configuration_safe', return_value=True), \
+                patch.object(remote, 'systemctl', side_effect=command):
+            first = remote.control('status')
+            self.assertTrue(first['viewer_ready'])
+            self.assertTrue(first['needs_initialization'])
+            self.assertFalse(first['ready'])
+            (profile / 'tdata/settingss').write_bytes(b'synthetic-native-settings')
+            remote.launch_preferences(profile, preferences())
+            initialized = remote.control('status')
+            self.assertTrue(initialized['viewer_ready'])
+            self.assertTrue(initialized['ready'])
+            self.assertFalse(initialized['needs_initialization'])
 
     def test_shell_syntax_and_static_resource_authentication_guards(self):
         for path in [TOOLS / 'backup.sh', TOOLS / 'wait-display.sh', TOOLS / 'ayugram-remote-control']:

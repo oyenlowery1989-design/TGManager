@@ -1,15 +1,15 @@
 # Remote AyuGram on the existing VPS
 
-This is deployment preparation, not a deployed or validated remote client. No
-cloud resources, SSH changes, accounts, sessions or running applications were
-touched by these tools. The production build and authenticated Linux UI still
-require verification. A paid build machine is not authorized by this preparation.
+The remote client uses a new independent Linux profile. The deployment tools
+do not import Mac sessions or authenticate a Telegram account; the user signs
+in through the private remote desktop. Production validation is recorded below.
 
 The intended host is `openclaw-gateway`, project
 `project-64666d6d-e266-44ea-bfd`, zone `us-central1-a`, Debian 12 x86_64.
-Its 4 GB RAM currently has approximately 876 MB available and approximately
-14 GB disk available. Do not build AyuGram there. Measure available memory again
-before deployment; the initial figures are not a capacity guarantee.
+It has 4 GB RAM. The deployed unauthenticated desktop used approximately
+305 MiB for the complete AyuGram slice, with a 398 MiB measured peak and around
+700 MiB host memory available. These are pre-login measurements, not an account
+capacity guarantee. Do not build AyuGram on this shared host.
 
 ## Linux build preparation
 
@@ -30,7 +30,11 @@ The script fetches the exact upstream commit, applies only the complete custom
 patch, and builds the dependency image from that commit's Dockerfile generator.
 It disables dependency debug/LTO and app LTO, bounds BuildKit parallel stages,
 and limits compiler containers to eight CPUs and 24 GB. It does not use a moving
-upstream dependency image. Build output, which can contain API arguments, stays
+upstream dependency image. The generated recipe selects Rocky Linux's primary
+HTTPS repository for BaseOS, AppStream, PowerTools and extras because a selected
+mirror returned stale metadata and stalled the real build. Package GPG/TLS
+verification remains enabled; the OS repository is still a changing repository,
+not a package snapshot. Build output, which can contain API arguments, stays
 in the private workspace's `build.log`; do not publish that log. A successful
 build produces `ayugram-linux-x86_64.tar.gz`, a checksum, and a `release/` folder
 with the executable, manifest, source reference, patch and upstream license.
@@ -38,10 +42,64 @@ with the executable, manifest, source reference, patch and upstream license.
 No paid job or build timeout is configured by this script. Before submitting a
 cloud build, agree its spending limit and enforce a corresponding provider-side
 timeout with margin for disk/transfer costs. The recipe has been exercised with
-synthetic tools, and the complete patch passes `git apply --check` against a
-fresh checkout of the pinned upstream commit. A real Linux compile, dependency
-availability and ELF runtime compatibility remain unverified. See the pinned upstream
+synthetic tools and a complete Linux build. The full patch applied to the pinned
+commit, and the resulting ELF started successfully on Debian 12 after installing
+the runtime dependencies listed below. See the pinned upstream
 [Linux build instructions](https://github.com/AyuGram/AyuGramDesktop/blob/d4b7546e77f93ac4c9bb53a3fcf7e9ffbbecf1b5/docs/building-linux.md).
+
+## Deployment record — 2026-10-17
+
+The user approved a temporary build capped at USD 10 and installation on the
+existing Clawdbot VPS. The pinned Linux build completed and the new independent
+profile is running, ready for the user's login. The temporary `e2-standard-8`
+builder and its 200 GB boot disk were deleted after delivery; both absences were
+verified. Runtime was approximately 3.5 hours, about USD 1.10 for compute, disk
+and IPv4 at the planning rates, before transfer costs. This is an estimate, not
+a billing invoice. There is no remaining paid builder.
+
+Release provenance:
+
+- Upstream commit: `d4b7546e77f93ac4c9bb53a3fcf7e9ffbbecf1b5`.
+- Complete custom patch SHA-256: `8e6cd050250be6a2b2f7517c36266e166db286181759a457e9734950abee827a`.
+- Linux binary SHA-256: `d2f296215dddf663afb7a47de1a72e6613edc3acbd37b1f6a962ea56eb435b5e`.
+- Archive SHA-256: `b433b5fe13db290f4e0fa9b8cf096e0d2c2b4cad29f3a3e1e389f9ff9ed229d8`.
+
+Completed deployment checks:
+
+- All 393 Manager regression tests passed, along with Python and shell syntax
+  checks and an independent review of the deployment changes.
+- Normal Quit exited with status 0; automatic restart preserved all common
+  preferences. Extra default fields added by AyuGram are allowed; every configured
+  Ghost, history, translation, peer ID and transparency value was verified.
+- Reinstallation preserved all 44 then-existing regular profile files byte for
+  byte. The first-launch pending marker is gone. GTK 3 and PulseAudio runtime
+  placement issues found on the actual host were corrected without weakening
+  the profile validation.
+- The real production backup service completed. Its encrypted offhost snapshot
+  was restored into an empty disposable directory; a synthetic SQLite record
+  still in WAL survived, and database integrity and `restic check --read-data`
+  passed. Staging was removed and the client thawed.
+- A real cgroup test killed only a synthetic backup worker with SIGKILL and
+  confirmed that systemd cleanup automatically thawed the running client.
+- The real Manager SSH tunnel bound loopback only, required VNC password
+  authentication, reused its existing port/process and disconnected cleanly
+  while AyuGram continued running. A 0.5-second VNC probe timeout caused false
+  failures on the real connection; it is now 3 seconds with a regression test.
+- All runtime units passed Debian `systemd-analyze verify`. VNC listens only on
+  `127.0.0.1:5905`, and X11 has no TCP listener. No OOM events occurred during
+  the blank-profile startup, restart and backup checks.
+- A dedicated private GCS repository uses restic encryption and the existing
+  VPS identity, with bucket-scoped object permissions and no new service-account
+  key. A real isolation probe denied IPv4 metadata access while public DNS and
+  HTTPS worked. The official IPv6 metadata address is denied by the unit rules;
+  IPv6 enforcement was not separately exercised.
+- Clawdbot remained active with zero service restarts and HTTP 200 health checks.
+  Its service and host resolver were unchanged.
+
+Authenticated message collection, memory use after login, native macOS Screen
+Sharing interaction and a full host reboot are reserved for the user. No Mac
+account or AUS 3 was opened. The daily backup timer and remote target are enabled
+for boot; a live host reboot was deliberately avoided on the shared Clawdbot VPS.
 
 ## Boundaries and files
 
@@ -78,12 +136,16 @@ that the app can run on Debian or stays within the memory budget.
 
 Copy this repository's reviewed deployment files, common preference source,
 patch and the verified Linux release to the VPS. Do not copy account directories.
-Deployment to the existing VPS is authorized; the remaining prerequisite is a
-verified Linux binary. A paid build machine still requires budget approval.
-Once the binary exists, review these commands before executing:
+The deployment record above identifies the verified binary already installed.
+For another installation, review the release and these commands first. Creating
+another paid builder requires budget approval; deployment scripts do not create
+one automatically:
 
 ```sh
-sudo apt-get install --no-install-recommends xvfb openbox x11vnc xauth x11-utils dbus-x11 restic rsync
+sudo apt-get install --no-install-recommends xvfb openbox x11vnc xauth x11-utils dbus-x11 restic rsync \
+  libgtk-3-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+  libxcb-render-util0 libxcb-xinerama0 libxcb-xkb1 libxkbcommon-x11-0 \
+  libegl1 libgl1 libpulse0 libasound2 libfontconfig1
 sudo install -d -m 755 /etc/ayugram-remote
 sudo x11vnc -storepasswd /etc/ayugram-remote/vnc-password
 sudo chmod 600 /etc/ayugram-remote/vnc-password
@@ -109,18 +171,58 @@ start, the runtime. Missing/bad binaries fail explicitly. No auto-updater is
 installed; launches always include `-noupdate -ghost`. Dependency packages and
 shared libraries required by the actual binary must also be checked on Debian
 12 before starting. Do not run `ldd` against an untrusted binary.
+GTK 3 is required even when `ldd` reports no missing libraries: this build loads
+`libgdk-3.so.0` dynamically and aborts before showing a window when it is absent.
 
 All runtime components and the backup service share `ayugram-remote.slice`:
 `MemoryHigh=560M`, `MemoryMax=640M`, `MemorySwapMax=0`, `CPUQuota=50%`, and
 `TasksMax=128`. Existing Clawdbot units and its project are not modified. Resource
-limits can kill AyuGram or its backup when exceeded; this has not been measured
-on the VPS. Do not increase limits on the shared host without reviewing Clawdbot
-headroom. Staging requires room for another copy of the non-cache profile.
+limits can kill AyuGram or its backup when exceeded. The blank-profile checks
+fit below the limit; authenticated load is not yet measured. Do not increase
+limits on the shared host without reviewing Clawdbot headroom. Staging requires room for another copy of the non-cache profile.
+
+The backup service uses `OOMScoreAdjust=1000` to prefer stopping a backup over
+the collector during kernel memory pressure. This does not guarantee client
+survival or control systemd-oomd; cleanup processes inherit the same adjustment.
+The existing independent thaw cleanup still runs after a killed backup worker.
+
+The pinned client defaults to 1 GiB / 31 days for each ordinary and media cache
+(approximately 2 GiB combined targets). Automatic media downloads are enabled
+by default; after the user's independent login, review Storage Usage and
+Automatic Media Download in the client. These are native account settings, not
+supported keys in the common AyuGram JSON profile. Do not edit encrypted session
+settings to seed them. Cache targets are not a filesystem quota: saved history,
+manual downloads and backup staging can still consume the shared root disk.
+Monitor disk headroom before expanding beyond the initial account. See the
+[pinned cache defaults](https://github.com/desktop-app/lib_storage/blob/ccdc72548a5065b5991b4e06e610d76bc4f6023e/storage/cache/storage_cache_types.h),
+[cache initialization](https://github.com/AyuGram/AyuGramDesktop/blob/d4b7546e77f93ac4c9bb53a3fcf7e9ffbbecf1b5/Telegram/SourceFiles/storage/storage_account.cpp),
+and [download defaults](https://github.com/AyuGram/AyuGramDesktop/blob/d4b7546e77f93ac4c9bb53a3fcf7e9ffbbecf1b5/Telegram/SourceFiles/data/data_auto_download.cpp).
 
 Xvfb uses display `:95`, Xauthority authentication and no TCP listener. The
 window manager and client use the same private display; the client has its own
 D-Bus session. VNC binds only `127.0.0.1:5905`, requires the dedicated password,
 and disables IPv6 listening. Do not add firewall rules opening VNC publicly.
+
+The client uses a private systemd `RuntimeDirectory=ayugram-remote-client`
+(mode `0700`) and `PULSE_RUNTIME_PATH=/run/ayugram-remote-client`. This keeps
+PulseAudio's ephemeral runtime directory outside the backed-up profile; otherwise
+its legacy runtime symlink makes the strict profile guard reject the profile.
+No links are followed or allowed by the guard. See the pinned
+[PulseAudio runtime path implementation](https://github.com/pulseaudio/pulseaudio/blob/v16.1/src/pulsecore/core-util.c#L1678).
+
+The four runtime services deny traffic to metadata addresses
+`169.254.169.254/32` and `fd20:ce::254/128`, preventing them from obtaining the
+VM identity used by root restic. GCP also uses the IPv4 metadata address for DNS,
+so these services bind a private root-owned `0644`
+`/etc/ayugram-remote/runtime-resolv.conf` over their view of `/etc/resolv.conf`,
+with Google public resolvers `8.8.8.8` and `8.8.4.4` and
+`options timeout:2 attempts:2`. Host DNS is unchanged. The
+installer validates the resolver destination before any writes and rejects
+linked, incorrectly owned or writable destinations. The backup service and
+shared slice have neither restriction, preserving ADC. Systemd 252 IP filtering
+requires working cgroup eBPF support: verify actual metadata denial, public DNS
+resolution, loopback VNC and root backup access on the host before relying on it;
+a parsed unit directive alone is not proof of enforcement.
 
 ## Encrypted daily offhost backups
 
@@ -218,13 +320,20 @@ Configure and start the backup timer before declaring the desktop ready:
 sudo systemctl start ayugram-remote.target
 ```
 
+The deployed profile has already completed the initial normal Quit/restart; the
+user may sign in directly. The following first-start instructions apply to a new
+installation.
+
 Common Ghost/history preferences come from the literal `COMMON_PROFILE` in
 Manager's `ayugram.py`, plus `semiTransparentDeletedMessages=true`. The installer
 reads this literal with Python AST, without importing Manager or reading account
 state. The upstream first unauthenticated run may overwrite Ayu settings before
 native core settings exist. **On the first display, do not log in. Quit AyuGram
 normally using its menu, wait for the automatic restart (up to 30 seconds),
-and log in only on this second launch.** The
+and log in only on this second launch. Refresh Manager and confirm its first-launch
+warning has cleared before signing in.** While the pending marker exists, status
+reports `needs_initialization:true` and `ready:false`; `viewer_ready:true` still
+allows Screen Sharing for the required normal Quit. The
 launcher reapplies the initial preferences once native settings exist, removes
 the pending marker, and subsequently preserves custom preferences. It only
 repairs a missing global Ghost entry when Global Ghost is enabled. Verify Ghost
@@ -285,8 +394,14 @@ At actual deployment time, create Manager's machine-local
 
 This file contains no password or SSH command. Do not install it before the
 remote service is reviewed and ready. The repository ignores `data/`.
+The deployed Mac now has this private connection file. Reopen Manager to load
+the updated code, then choose **Remote AyuGram → Open Remote Desktop**. The VNC
+password and separate backup recovery password are in the local private
+`data/Remote AyuGram Recovery.txt`; keep that file out of Git and shared logs.
+The verified compressed Linux release is retained in
+`data/Remote AyuGram Release/` for recovery.
 
-## Focused verification and remaining deployment gate
+## Focused verification and remaining checks
 
 ```sh
 python3 -m unittest discover -s tests -p test_remote_deployment.py -q
@@ -298,15 +413,14 @@ Fixtures prove profile preservation/isolation, release rejection, fixed helper
 commands, pending preference repair, resource/listen directives, SQLite WAL
 snapshot recovery, safe inactive-client copying, startup-lock exclusion, and thaw/cleanup on freeze
 failure, thaw failure, copy timeout and upload
-failure. They do not execute systemd on macOS. Before enabling on the real VPS,
-validate units with Debian `systemd-analyze verify`, inspect listeners with
-`ss -lntp`, and measure the full slice under login, history and backup load with
-`systemd-cgtop`/`systemctl show ayugram-remote.slice -p MemoryCurrent -p MemoryPeak`.
-Check whether Qt creates local IPC sockets inside the workdir: the strict
-profile guard rejects non-regular entries, and must not be relaxed without
-checking their precise location and isolation. Exercise a timed-out/killed backup to confirm real cgroup thaw, reboot
-persistence, native Screen Sharing, and actual offhost snapshot/isolated restore.
-Confirm Clawdbot health before and after. If the 640 MB budget is insufficient,
+failure. They do not execute systemd on macOS. Actual unit validation, listener
+inspection, killed-worker thaw and offhost restore passed on the VPS as recorded
+above. After user login, measure the full slice under history and backup load
+with `systemd-cgtop`/`systemctl show ayugram-remote.slice -p MemoryCurrent -p MemoryPeak`.
+The strict profile guard rejects non-regular entries and must not be relaxed for
+new account-generated files without checking their precise location and isolation.
+Native Screen Sharing and host reboot persistence still require user validation
+or a coordinated maintenance window. Continue checking Clawdbot health. If the 640 MB budget is insufficient,
 stop this deployment and reassess capacity; do not raise it silently.
 
 References: systemd documents freezer and failure cleanup behavior in

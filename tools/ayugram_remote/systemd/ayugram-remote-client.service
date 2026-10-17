@@ -11,13 +11,18 @@ StartLimitBurst=3
 User=ayugram-remote
 Group=ayugram-remote
 Slice=ayugram-remote.slice
+RuntimeDirectory=ayugram-remote-client
+RuntimeDirectoryMode=0700
 Environment=HOME=/var/lib/ayugram-remote/profile DISPLAY=:95 XAUTHORITY=/var/lib/ayugram-remote/Xauthority
+Environment=PULSE_RUNTIME_PATH=/run/ayugram-remote-client
 Environment=QT_QPA_PLATFORM=xcb QT_X11_NO_MITSHM=1 LANG=C.UTF-8
 WorkingDirectory=/var/lib/ayugram-remote
 ExecStart=/usr/bin/dbus-run-session -- /usr/bin/python3 -I /opt/ayugram-remote/runtime.py launch
 Restart=always
 RestartSec=30
 TimeoutStopSec=30
+IPAddressDeny=169.254.169.254/32 fd20:ce::254/128
+BindReadOnlyPaths=/etc/ayugram-remote/runtime-resolv.conf:/etc/resolv.conf
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true

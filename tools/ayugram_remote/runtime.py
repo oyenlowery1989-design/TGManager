@@ -177,7 +177,10 @@ def control(action):
     configured = backup_configuration_safe() and timer_active
     finished = fields.get('ExecMainExitTimestamp', '')
     result = fields.get('Result', 'unknown') if finished else 'never'
-    return dict(schema=1, ok=True, ready=verified and all(active) and configured,
+    viewer_ready = verified and all(active) and configured
+    needs_initialization = (PROFILE / '.remote-preferences-pending').exists()
+    return dict(schema=1, ok=True, ready=viewer_ready and not needs_initialization,
+                viewer_ready=viewer_ready, needs_initialization=needs_initialization,
                 backup_configured=configured,
                 client_active=active[0], vnc_port=5905,
                 backup_active=fields.get('ActiveState') == 'activating',
