@@ -104,7 +104,7 @@ def install(candidate, expected_sha):
     for directory in directories:
         safe_directory(directory)
     units = list((HERE / 'systemd').iterdir())
-    code_files = [base / name for name in ('runtime.py', 'backup.sh', 'wait-display.sh',
+    code_files = [base / name for name in ('runtime.py', 'history_archive.py', 'backup.sh', 'wait-display.sh',
                                           'preferences.json', 'trusted.json')]
     resolver = config / 'runtime-resolv.conf'
     code_files += [resolver, release / NAME, release / 'release.json',
@@ -166,6 +166,8 @@ def install(candidate, expected_sha):
         verify_release(release, expected_sha, patch_sha)
     for name in ('runtime.py', 'backup.sh', 'wait-display.sh'):
         root_copy(HERE / name, base / name, 0o755)
+    root_copy(ROOT / 'TelegramManager.app/Contents/Resources/history_archive.py',
+              base / 'history_archive.py', 0o644)
     root_write(resolver, 'nameserver 8.8.8.8\nnameserver 8.8.4.4\noptions timeout:2 attempts:2\n')
     root_write(base / 'preferences.json', json.dumps(preferences) + '\n')
     root_write(temporary, json.dumps(dict(binary_sha256=expected_sha, patch_sha256=patch_sha)) + '\n')

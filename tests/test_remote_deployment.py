@@ -3,6 +3,7 @@ import ast
 import fcntl
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -42,6 +43,41 @@ class RemoteDeploymentTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name).resolve()
         self.addCleanup(self.temp.cleanup)
+
+    def test_history_helper_only_exports_fixed_archive_with_bounded_fields(self):
+        profile = self.root / 'profile'
+        profile.mkdir(); (profile / 'tdata').mkdir()
+        (profile / '.ayugram-inline-test').write_bytes(remote.MARKER)
+        archive = profile / 'tdata/ayudata.db'; archive.write_bytes(b'synthetic')
+        auth = profile / 'tdata/key_datas'; auth.write_bytes(b'untouched')
+        from unittest.mock import Mock
+        module = Mock()
+        module.catalog.return_value = {'accounts': []}
+        module.export_archive.return_value = {'user_id': '123'}
+        with patch.object(remote, 'PROFILE', profile), patch.object(remote, '_history_module', return_value=module), \
+                patch.object(remote.os, 'geteuid', return_value=1000):
+            result = remote.history_control('history-catalog', io.BytesIO(b'{}'))
+            self.assertEqual(result['archive'], {'accounts': []})
+            module.catalog.assert_called_once_with(archive)
+            remote.history_control('history-export', io.BytesIO(b'{"user_id":"123","known_digest":""}'))
+            module.export_archive.assert_called_once_with(archive, '123', '')
+            for action, payload in [('delete',b'{}'), ('history-catalog',b'{"path":"/etc/passwd"}'),
+                                    ('history-export',b'{}'), ('history-catalog',b'x'*1025)]:
+                with self.subTest(action=action), self.assertRaises(ValueError):
+                    remote.history_control(action, io.BytesIO(payload))
+        self.assertEqual(auth.read_bytes(), b'untouched')
+
+    def test_history_catalog_before_login_is_empty_without_creating_database(self):
+        profile = self.root / 'empty-profile'
+        profile.mkdir(); (profile / 'tdata').mkdir()
+        (profile / '.ayugram-inline-test').write_bytes(remote.MARKER)
+        from unittest.mock import Mock
+        module = Mock()
+        with patch.object(remote, 'PROFILE', profile), patch.object(remote, '_history_module', return_value=module), \
+                patch.object(remote.os, 'geteuid', return_value=1000):
+            self.assertEqual(remote.history_control('history-catalog', io.BytesIO(b'{}'))['archive']['accounts'], [])
+        module.catalog.assert_not_called()
+        self.assertEqual(list((profile / 'tdata').iterdir()), [])
 
     def test_installer_rejects_linked_mutable_or_wrong_owner_destinations(self):
         target = self.root / 'destination'

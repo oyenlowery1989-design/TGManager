@@ -1093,7 +1093,7 @@
   <button class="btn" onclick="openPinned()" id="btn-open-pinned" data-tip="Launch only pinned accounts">Open Pinned</button>
   <button class="btn" onclick="setupAll()" data-tip="Copy Telegram.app into accounts that are missing it">Setup</button>
   <button class="btn" onclick="showClientUpdates()" data-tip="Check official releases and update Telegram or AyuGram without editing sessions">Client Updates</button>
-  <button class="btn" id="remote-ayugram-button" onclick="showRemoteAyuGram()" data-tip="View the independent AyuGram desktop on your VPS">Remote AyuGram</button>
+  <button class="btn" id="remote-ayugram-button" onclick="showRemoteAyuGram()" data-tip="Check the VPS collector and sync saved history to local AyuGram">Remote AyuGram</button>
   <div class="toolbar-sep"></div>
   <button class="btn" onclick="backupAll()" data-tip="Save a backup of every account's session data (tdata)">Backup All</button>
   <button class="btn" onclick="showBackupBrowser()" data-tip="View saved backups and restore one to an account">Browse Backups</button>
@@ -1106,6 +1106,11 @@
 <div id="remote-ayugram-notice" role="status" style="display:none;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 20px;border-bottom:1px solid var(--yellow);background:var(--card-bg)">
   <span id="remote-ayugram-notice-text" style="flex:1;white-space:pre-wrap"></span>
   <button class="btn" onclick="showRemoteAyuGram()">Review Remote AyuGram</button>
+</div>
+
+<div id="remote-history-notice" role="status" style="display:none;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 20px;border-bottom:1px solid var(--yellow);background:var(--card-bg)">
+  <span id="remote-history-notice-text" style="flex:1;white-space:pre-wrap"></span>
+  <button class="btn" onclick="showRemoteAyuGram()">Review History Sync</button>
 </div>
 
 <div id="client-update-notice" role="status" style="display:none;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 20px;border-bottom:1px solid var(--accent);background:var(--card-bg)">
@@ -1196,12 +1201,30 @@
 
 <div class="modal-overlay" id="remote-ayugram-modal" onkeydown="remoteAyuGramKey(event)">
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="remote-ayugram-title" style="width:520px;max-width:94vw;max-height:88vh;overflow-y:auto">
+    <button class="btn" id="remote-ayugram-close" style="float:right" onclick="hideRemoteAyuGram()">Close</button>
     <h2 id="remote-ayugram-title">Remote AyuGram</h2>
-    <p class="modal-info">This independent profile stores its history on the VPS. Daily encrypted backups require VPS setup; check the last backup result below. Sign in there yourself. Closing Screen Sharing or this Mac leaves AyuGram running on the VPS. History is viewed remotely; it is not merged with Mac profiles.</p>
+    <p class="modal-info">This independent profile stores its history on the VPS. Daily encrypted backups require VPS setup; check the last backup result below. Sign in there yourself. Closing Screen Sharing or this Mac leaves AyuGram running on the VPS. Enable History Sync below to view saved VPS history in your local custom AyuGram. Each device keeps its own login session.</p>
     <p id="remote-ayugram-status" role="status" style="white-space:pre-wrap;margin-bottom:16px">Checking VPS…</p>
     <p class="modal-info">Status is checked every 5 minutes while Manager is open and unlocked, and when you return after a missed check. Alerts appear below the toolbar. Low space means less than 2 GB or 10% free. Process status does not confirm Telegram login or message delivery.</p>
+    <section aria-labelledby="remote-history-title" style="padding:16px 0;margin:16px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border)">
+      <h3 id="remote-history-title" style="font-size:15px;margin-bottom:8px">History Sync · VPS → Local</h3>
+      <p class="modal-info">Sync saved deleted text and edit history every 5 minutes while Manager is open and unlocked, and before opening local AyuGram. The local client must be closed; it is never closed for you. Sessions, settings and local read markers stay separate.</p>
+      <label for="remote-history-account">Local AyuGram profile</label>
+      <select id="remote-history-account" style="width:100%;margin:6px 0 12px;padding:10px;border:1px solid var(--border);border-radius:8px;background:var(--card-bg);color:var(--text)" onchange="selectRemoteHistory()"><option value="">Choose a profile…</option></select>
+      <button class="btn" id="remote-history-catalog" disabled onclick="remoteHistoryAction('catalog')">Check Archive IDs</button>
+      <p id="remote-history-catalog-status" class="modal-info" style="white-space:pre-wrap;margin:8px 0">Choose a profile, then check which account IDs appear in both archives.</p>
+      <label for="remote-history-user">Numeric Telegram account ID</label>
+      <input id="remote-history-user" type="text" inputmode="numeric" autocomplete="off" placeholder="Account ID, not a phone number" style="width:100%;margin:6px 0 10px" oninput="renderRemoteHistory()">
+      <label style="display:flex;align-items:flex-start;gap:8px;font-size:12px;line-height:1.5"><input id="remote-history-confirm" type="checkbox" onchange="renderRemoteHistory()"><span>I confirm this is the same Telegram account in both independent AyuGram logins. Archive IDs alone do not verify the current login.</span></label>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin:12px 0">
+        <button class="btn primary" id="remote-history-configure" disabled onclick="remoteHistoryAction('configure')">Enable Sync</button>
+        <button class="btn" id="remote-history-sync" disabled onclick="remoteHistoryAction('sync')">Sync Now</button>
+        <button class="btn" id="remote-history-disable" disabled onclick="remoteHistoryAction('disable')">Disable Sync</button>
+      </div>
+      <p id="remote-history-status" role="status" style="white-space:pre-wrap;font-size:12px;line-height:1.5">History sync is off until you enable a profile.</p>
+      <p class="modal-info">Only existing, initialized custom AyuGram profiles are supported. Media files and unsaved messages are not transferred. One private archive-only recovery copy is kept before each changed import. Local content wins conflicts; ambiguous edit ordering is reported.</p>
+    </section>
     <div class="modal-actions" style="flex-wrap:wrap">
-      <button class="btn" id="remote-ayugram-close" onclick="hideRemoteAyuGram()">Close</button>
       <button class="btn" id="remote-ayugram-refresh" onclick="remoteAyuGramAction('status')">Refresh</button>
       <button class="btn" id="remote-ayugram-backup" disabled onclick="remoteAyuGramAction('backup')">Back Up Now</button>
       <button class="btn" id="remote-ayugram-disconnect" disabled onclick="remoteAyuGramAction('disconnect')">Disconnect Viewer</button>
@@ -2481,6 +2504,106 @@ async function setupAll() {
   await refresh();
 }
 
+
+let remoteHistoryBusy = false;
+let remoteHistoryLoading = false;
+let remoteHistoryTimer = null;
+let remoteHistoryBindings = [];
+let remoteHistoryCatalog = null;
+let remoteHistoryFailure = '';
+function historyElement(name) { return document.getElementById('remote-history-' + name); }
+function historyBinding() { return remoteHistoryBindings.find(item => item.path === historyElement('account').value); }
+function updateHistoryOptions() {
+  const select = historyElement('account'), previous = select.value;
+  const paths = new Map(accounts.map(item => [item.path, item.name]));
+  for (const item of remoteHistoryBindings) if (!paths.has(item.path)) paths.set(item.path, item.path.split('/').pop() + ' (unavailable)');
+  select.replaceChildren();
+  const placeholder = document.createElement('option');
+  placeholder.value = ''; placeholder.textContent = 'Choose a profile…'; select.appendChild(placeholder);
+  for (const [path, name] of paths) {
+    const option = document.createElement('option');
+    option.value = path; option.textContent = name; select.appendChild(option);
+  }
+  select.value = paths.has(previous) ? previous : '';
+}
+function selectRemoteHistory() {
+  remoteHistoryCatalog = null;
+  historyElement('confirm').checked = false;
+  historyElement('user').value = historyBinding()?.user_id || '';
+  historyElement('catalog-status').textContent = 'Check archive IDs before enabling sync. Close the local AyuGram profile first.';
+  renderRemoteHistory();
+}
+function renderRemoteHistory(message = '') {
+  const path = historyElement('account').value, binding = historyBinding();
+  const unavailable = remoteHistoryBusy || !!remoteHistoryFailure;
+  for (const name of ['account', 'user', 'confirm']) historyElement(name).disabled = remoteHistoryBusy;
+  historyElement('catalog').disabled = unavailable || !path;
+  const user = historyElement('user').value.trim();
+  const matching = remoteHistoryCatalog?.path === path && ['local', 'remote'].every(side => remoteHistoryCatalog[side].some(item => item.user_id === user));
+  historyElement('configure').disabled = unavailable || !path || !matching || !historyElement('confirm').checked;
+  historyElement('sync').disabled = unavailable || !binding?.enabled;
+  historyElement('disable').disabled = unavailable || !binding?.enabled;
+  const lines = [message || remoteHistoryFailure || binding?.message || 'History sync is off until you enable a profile.'];
+  if (binding) {
+    lines.push(`Account ID: ${binding.user_id} · ${binding.enabled ? 'Enabled' : 'Disabled'}`);
+    lines.push('Last successful sync: ' + (binding.last_success ? new Date(binding.last_success * 1000).toLocaleString() : 'Not yet'));
+    const counts = binding.counts;
+    if (counts) lines.push(`Last import: ${counts.imported.deleted} deleted messages · ${counts.imported.edited} edit revisions`,
+      `Already present or previously handled: ${counts.skipped.deleted + counts.skipped.edited}`,
+      `Content conflicts: ${counts.conflicts} · Ambiguous edit sequences: ${counts.ambiguities}`);
+  }
+  historyElement('status').textContent = lines.join('\n');
+  const alerts = remoteHistoryBindings.filter(item => item.enabled && ['error', 'warning'].includes(item.state))
+    .map(item => `${item.path.split('/').pop()}: ${item.message}`);
+  if (remoteHistoryFailure) alerts.unshift(remoteHistoryFailure);
+  historyElement('notice-text').textContent = alerts.join('\n');
+  historyElement('notice').style.display = alerts.length ? 'flex' : 'none';
+}
+async function loadRemoteHistory() {
+  if (remoteHistoryLoading || document.getElementById('lock-screen').classList.contains('visible')) return;
+  remoteHistoryLoading = true;
+  try {
+    const result = await api('/api/remote-history/status', 'GET');
+    if (result?.locked) return;
+    if (!result?.success) throw new Error(result?.message || 'History sync status is unavailable.');
+    remoteHistoryBindings = result.bindings;
+    remoteHistoryFailure = '';
+    updateHistoryOptions();
+  } catch (error) { remoteHistoryFailure = error.message || 'History sync status is unavailable.'; }
+  finally { remoteHistoryLoading = false; renderRemoteHistory(); }
+}
+function startRemoteHistoryMonitor() {
+  if (remoteHistoryTimer === null) {
+    remoteHistoryTimer = setInterval(loadRemoteHistory, 30000);
+    window.addEventListener('focus', loadRemoteHistory);
+  }
+  loadRemoteHistory();
+}
+async function remoteHistoryAction(action) {
+  if (remoteHistoryBusy || !['catalog', 'configure', 'sync', 'disable'].includes(action)) return;
+  const path = historyElement('account').value;
+  if (!path) return;
+  const body = {path};
+  if (action === 'configure') Object.assign(body, {user_id:historyElement('user').value.trim(), confirmed:historyElement('confirm').checked});
+  remoteHistoryBusy = true;
+  renderRemoteHistory(action === 'sync' ? 'Syncing saved VPS history…' : 'Checking history sync…');
+  let message = '';
+  try {
+    const result = await api('/api/remote-history/' + action, 'POST', body);
+    if (result?.locked) return;
+    if (!result?.success) throw new Error(result?.message || 'History sync failed safely.');
+    message = result.message;
+    if (action === 'catalog' && result.local && result.remote) {
+      remoteHistoryCatalog = {path, local:result.local, remote:result.remote};
+      const describe = items => items.length ? items.map(item => `${item.user_id} (${item.deleted} deleted, ${item.edited} edits)`).join('\n') : 'No saved message history yet';
+      historyElement('catalog-status').textContent = 'Local archive:\n' + describe(result.local) + '\nVPS archive:\n' + describe(result.remote);
+    }
+    if (action === 'configure' || action === 'disable') historyElement('confirm').checked = false;
+    await loadRemoteHistory();
+  } catch (error) { message = error.message || 'History sync failed safely.'; }
+  finally { remoteHistoryBusy = false; renderRemoteHistory(message); }
+}
+
 let clientUpdateBusy = false;
 let pendingClientUpdate = null;
 let remoteAyuGramBusy = false;
@@ -2542,7 +2665,7 @@ function startRemoteAyuGramMonitor() {
 async function showRemoteAyuGram() {
   document.getElementById('remote-ayugram-modal').classList.add('active');
   document.getElementById('remote-ayugram-close').focus();
-  await remoteAyuGramAction('status');
+  await Promise.all([remoteAyuGramAction('status'), loadRemoteHistory()]);
 }
 function hideRemoteAyuGram() {
   document.getElementById('remote-ayugram-modal').classList.remove('active');
@@ -2551,7 +2674,7 @@ function hideRemoteAyuGram() {
 function remoteAyuGramKey(event) {
   if (event.key === 'Escape') { event.stopPropagation(); hideRemoteAyuGram(); }
   if (event.key !== 'Tab') return;
-  const buttons = [...document.querySelectorAll('#remote-ayugram-modal button:not(:disabled)')];
+  const buttons = [...document.querySelectorAll('#remote-ayugram-modal button:not(:disabled), #remote-ayugram-modal input:not(:disabled), #remote-ayugram-modal select:not(:disabled)')];
   const target = event.shiftKey && document.activeElement === buttons[0] ? buttons.at(-1)
     : !event.shiftKey && document.activeElement === buttons.at(-1) ? buttons[0] : null;
   if (target) { event.preventDefault(); target.focus(); }
@@ -4133,6 +4256,7 @@ function resetIdleTimer() {
 // after overlay dismissal, or immediately when the lock is disabled.
 async function _loadPostUnlockConfig() {
   startRemoteAyuGramMonitor();
+  startRemoteHistoryMonitor();
   const cfg = await api("/api/config");
   if (cfg && !cfg._networkError && cfg.success !== false) {
     if (Array.isArray(cfg.reserved_names) && cfg.reserved_names.length) {

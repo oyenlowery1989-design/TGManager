@@ -2,11 +2,14 @@
 """Fixed-path remote runtime: no session import or arbitrary command execution."""
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
+import pwd
 import re
 from pathlib import Path
 import stat
+import sqlite3
 import struct
 import subprocess
 import sys
@@ -152,6 +155,51 @@ def systemctl(*args):
                           text=True, timeout=15, check=False)
 
 
+def _history_module():
+    path = BASE / 'history_archive.py'
+    regular(path)
+    info = path.stat()
+    if (BASE.resolve() != BASE or BASE.stat().st_uid != 0 or BASE.stat().st_mode & 0o022
+            or info.st_uid != 0 or info.st_mode & 0o022):
+        raise ValueError('History helper must be installed as immutable root-owned code')
+    spec = importlib.util.spec_from_file_location('history_archive', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def history_control(action, stream):
+    """Read only this VPS archive; never accept a client-supplied file path."""
+    if action not in ('history-catalog', 'history-export'):
+        raise ValueError('Unsupported history action')
+    data = stream.read(1025)
+    if len(data) > 1024:
+        raise ValueError('History request exceeds its size limit')
+    request = json.loads(data)
+    fields = set() if action == 'history-catalog' else {'user_id', 'known_digest'}
+    if not isinstance(request, dict) or set(request) != fields:
+        raise ValueError('Invalid history request fields')
+    module = _history_module()
+    # SQLite may need its usual WAL shared-memory file. Use the client UID,
+    # never root, so a read snapshot cannot leave root-owned sidecars behind.
+    if os.geteuid() == 0:
+        account = pwd.getpwnam('ayugram-remote')
+        os.setgroups([])
+        os.setgid(account.pw_gid)
+        os.setuid(account.pw_uid)
+    marker = PROFILE / '.ayugram-inline-test'
+    regular(marker)
+    if PROFILE.resolve() != PROFILE or marker.read_bytes() != MARKER:
+        raise ValueError('Invalid isolated archive profile')
+    archive = PROFILE / 'tdata/ayudata.db'
+    if action == 'history-catalog':
+        result = (module.catalog(archive) if os.path.lexists(archive) else
+                  dict(protocol=1, schema_version=1, accounts=[]))
+    else:
+        result = module.export_archive(archive, request['user_id'], request['known_digest'])
+    return dict(schema=1, ok=True, archive=result)
+
+
 def control(action):
     if action == 'backup':
         if not backup_configuration_safe():
@@ -236,9 +284,11 @@ if __name__ == '__main__':
             validate_profile(PROFILE)
             if sys.argv[1] == 'verify-backup' and not backup_configuration_safe():
                 raise ValueError('Unsafe backup configuration')
+        elif sys.argv[1] in ('history-catalog', 'history-export'):
+            print(json.dumps(history_control(sys.argv[1], sys.stdin.buffer), separators=(',', ':')))
         else:
             print(json.dumps(control(sys.argv[1])))
-    except (OSError, ValueError, KeyError, subprocess.TimeoutExpired):
+    except (OSError, ValueError, KeyError, sqlite3.Error, subprocess.TimeoutExpired):
         # Do not include paths, credential values or subprocess output in helper replies.
         print(json.dumps(dict(schema=1, ok=False, error='Remote operation failed; inspect the service locally')))
         sys.exit(1)

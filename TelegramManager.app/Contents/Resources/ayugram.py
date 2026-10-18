@@ -505,6 +505,11 @@ def open_account(account_path, new_login=False):
         ghost_args = ['-ghost'] if preferences.get('useGlobalGhostMode') and all(
             ghost.get(key) is False for key in ('sendReadMessages', 'sendReadStories',
                                                'sendOnlinePackets', 'sendUploadProgress')) else []
+        import remote_history
+        sync_notice = remote_history.before_open(account_path)
+        output = server._get_ps_output(force=True, allow_stale=False)
+        if output is None or server._client_pid_from_ps_output(account_path, output, 'AyuGram'):
+            return False, 'Could not confirm AyuGram is still closed after history sync; try again'
         result = subprocess.run(['open', '-n', app, '--args', '-noupdate'] + ghost_args + workdir_args,
                                 capture_output=True, timeout=10)
         if result.returncode:
@@ -514,7 +519,8 @@ def open_account(account_path, new_login=False):
             if output and server._client_pid_from_ps_output(account_path, output, "AyuGram"):
                 server.invalidate_scan_cache()
                 return True, ('AyuGram opened using its separate login profile' if fresh_profile or new_login
-                              else 'AyuGram opened using its separate session copy')
+                              else 'AyuGram opened using its separate session copy') + (
+                                  '. ' + sync_notice if sync_notice else '')
             time.sleep(0.5)
         return False, 'AyuGram did not start within 10 seconds'
     except (OSError, ValueError, subprocess.TimeoutExpired) as e:

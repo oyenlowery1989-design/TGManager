@@ -510,16 +510,7 @@ eval(text.slice(text.indexOf('let pendingTelegramUpdate ='), text.indexOf('\nasy
             self.assertTrue(settings['streamerMode'])
             self.assertEqual(settings['ghostModeSettings']['123'], {'sendReadMessages': True})
             return mock.Mock(returncode=0, stderr=b'')
-        real_run = server.subprocess.run
-        def run(command, *args, **kwargs):
-            if command[0] == 'open':
-                return launched(command, **kwargs)
-            if command[0] in ('codesign', 'xattr'):
-                return mock.Mock(returncode=0, stderr=b'')
-            return real_run(command, *args, **kwargs)
-        with mock.patch.object(server.subprocess, 'run', side_effect=run), \
-             mock.patch.object(server, '_get_ps_output', side_effect=lambda **kw: '321 '+self.exe if ayugram.find_app(str(self.account)) else '1 /bin/sleep'):
-            self.assertTrue(ayugram.open_account(str(self.account))[0])
+        self.assertTrue(self.open(on_launch=launched)[0])
         self.assertEqual(before, {p.name: p.read_bytes() for p in self.original.iterdir()})
 
     def test_profile_is_not_reapplied_over_user_changes_on_reopen(self):

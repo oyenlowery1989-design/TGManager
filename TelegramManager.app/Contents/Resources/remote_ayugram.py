@@ -102,6 +102,61 @@ def _remote(config, action):
     return result
 
 
+def history_request(action, payload, expected_config=None):
+    """Bounded JSON over the fixed SSH helper; no caller-supplied paths or commands."""
+    if action not in ('history-catalog', 'history-export') or not isinstance(payload, dict):
+        raise ValueError('Unsupported history action.')
+    allowed = set() if action == 'history-catalog' else {'user_id', 'known_digest'}
+    if set(payload) != allowed:
+        raise ValueError('Invalid history request fields.')
+    data = json.dumps(payload, ensure_ascii=True).encode('ascii')
+    if len(data) > 1024:
+        raise ValueError('History request exceeds its size limit.')
+    config = _config()
+    if config is None or (expected_config is not None and config != expected_config):
+        raise ValueError('The VPS connection is missing or changed. Confirm the history binding again.')
+    command = _ssh(config) + ['--command=sudo -n ' + CONTROL + ' ' + action, '--', *_SSH_OPTIONS]
+    process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                               stderr=subprocess.DEVNULL, start_new_session=True)
+    limit = 256 * 1024 if action == 'history-catalog' else 32 * 1024 * 1024 + 4096
+    deadline = time.monotonic() + 60
+    output = bytearray()
+    try:
+        process.stdin.write(data)
+        process.stdin.close()
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ValueError('VPS history transfer timed out. Local history was preserved.')
+            ready, _, _ = select.select([process.stdout], [], [], min(remaining, 1))
+            if not ready:
+                continue
+            block = os.read(process.stdout.fileno(), min(65536, limit + 1 - len(output)))
+            if not block:
+                break
+            output.extend(block)
+            if len(output) > limit:
+                raise ValueError('VPS history exceeds the transfer limit. Nothing was imported.')
+        process.wait(timeout=max(0.01, deadline - time.monotonic()))
+        if process.returncode:
+            raise ValueError('VPS history is unavailable. Check the helper version, login and archive size.')
+        result = json.loads(output)
+        if (not isinstance(result, dict) or result.get('ok') is not True
+                or type(result.get('schema')) is not int or result['schema'] != 1
+                or not isinstance(result.get('archive'), dict)):
+            raise ValueError('VPS history helper returned an unsupported response.')
+        return result['archive']
+    except (UnicodeError, json.JSONDecodeError):
+        raise ValueError('VPS history helper returned invalid JSON.') from None
+    except subprocess.TimeoutExpired:
+        raise ValueError('VPS history transfer timed out. Local history was preserved.') from None
+    finally:
+        _stop(process)
+        process.stdout.close()
+        if not process.stdin.closed:
+            process.stdin.close()
+
+
 def _disconnect():
     global _tunnel, _tunnel_config, _local_port
     _stop(_tunnel)

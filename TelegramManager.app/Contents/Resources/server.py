@@ -44,6 +44,7 @@ import ayugram
 import updates
 import managed_releases
 import remote_ayugram
+import remote_history
 from state import (
     ROOT_DIR, DATA_DIR, PATH_WARNINGS,
     METADATA_FILE, WORKSPACES_FILE,
@@ -2573,7 +2574,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         # Automated remote health checks must not extend an unlocked session.
-        lock_check = _is_unlocked_no_touch if path == '/api/remote-ayugram/status' else _check_and_touch_unlocked
+        lock_check = (_is_unlocked_no_touch if path in ('/api/remote-ayugram/status', '/api/remote-history/status')
+                      else _check_and_touch_unlocked)
         if path.startswith("/api/") and path not in _LOCK_EXEMPT and not lock_check():
             self.send_json({"success": False, "locked": True, "message": "App is locked"}, 423)
             return
@@ -3643,7 +3645,23 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.send_json({"success": False, "message": str(e)})
 
 
+    def _get_api_remote_history_status(self):
+        self.send_json(remote_history.status())
+
+    def _post_api_remote_history_catalog(self, data):
+        self.send_json(remote_history.request('catalog', data))
+
+    def _post_api_remote_history_configure(self, data):
+        self.send_json(remote_history.request('configure', data))
+
+    def _post_api_remote_history_sync(self, data):
+        self.send_json(remote_history.request('sync', data))
+
+    def _post_api_remote_history_disable(self, data):
+        self.send_json(remote_history.request('disable', data))
+
     GET_ROUTES = {
+        '/api/remote-history/status': '_get_api_remote_history_status',
         '/api/accounts': '_get_api_accounts',
         '/api/config': '_get_api_config',
         '/api/lock-status': '_get_api_lock_status',
@@ -3664,6 +3682,10 @@ class RequestHandler(BaseHTTPRequestHandler):
     }
 
     POST_ROUTES = {
+        '/api/remote-history/catalog': '_post_api_remote_history_catalog',
+        '/api/remote-history/configure': '_post_api_remote_history_configure',
+        '/api/remote-history/sync': '_post_api_remote_history_sync',
+        '/api/remote-history/disable': '_post_api_remote_history_disable',
         '/api/remote-ayugram/connect': '_post_api_remote_ayugram_connect',
         '/api/remote-ayugram/disconnect': '_post_api_remote_ayugram_disconnect',
         '/api/remote-ayugram/backup': '_post_api_remote_ayugram_backup',
@@ -3815,6 +3837,7 @@ if __name__ == "__main__":
     server = ThreadedHTTPServer(("127.0.0.1", port), RequestHandler)
     _write_ready_file(ready_file, port, SESSION_TOKEN)
     threading.Thread(target=updates.run_weekly_monitor, daemon=True).start()
+    threading.Thread(target=remote_history.run_monitor, daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

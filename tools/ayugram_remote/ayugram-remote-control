@@ -1,5 +1,5 @@
 #!/bin/sh
 set -eu
 [ "$#" -eq 1 ] || exit 2
-case "$1" in status|backup) ;; *) exit 2 ;; esac
+case "$1" in status|backup|history-catalog|history-export) ;; *) exit 2 ;; esac
 exec /usr/bin/python3 -I /opt/ayugram-remote/runtime.py "$1"

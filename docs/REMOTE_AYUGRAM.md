@@ -362,16 +362,18 @@ running, subject to the resource limit and normal service state.
 ## Manager interface
 
 The root-owned `/usr/local/sbin/ayugram-remote-control` accepts exactly one
-argument, `status` or `backup`, and emits bounded JSON with `schema:1` and
+argument: `status`, `backup`, `history-catalog`, or `history-export`. It emits bounded JSON with `schema:1` and
 `ok:true` on success. Other actions, extra arguments and arbitrary paths are
 rejected. Manager uses fixed SSH commands:
 
 ```sh
 sudo -n /usr/local/sbin/ayugram-remote-control status
 sudo -n /usr/local/sbin/ayugram-remote-control backup
+sudo -n /usr/local/sbin/ayugram-remote-control history-catalog
+sudo -n /usr/local/sbin/ayugram-remote-control history-export
 ```
 
-If the SSH user requires sudo delegation, authorize **only those two exact
+If the SSH user requires sudo delegation, authorize **only those four exact
 commands** in a root-reviewed sudoers fragment (`visudo -cf`), never an arbitrary
 shell, Python, systemctl wildcard, argument wildcard, or another user. The helper
 and `/opt/ayugram-remote` scripts must remain root-owned and unwritable by that
@@ -383,7 +385,7 @@ verified release/profile, all four runtime units active, a running backup timer,
 and root-only backup configuration/password files. This verifies configuration,
 not bucket reachability or an existing offhost snapshot. `backup_last_result` is
 `never` before a completed run. `{ok:true,queued:true}` confirms queuing only.
-Neither helper response contains a password, session content or credential path.
+Status and backup responses contain no password, session content or credential path. History export contains only the selected owner's allowlisted saved message rows, never authentication files. History requests receive bounded JSON on stdin; they accept no filesystem paths or shell commands.
 
 ### Health status and alerts
 
@@ -429,6 +431,105 @@ password and separate backup recovery password are in the local private
 The verified compressed Linux release is retained in
 `data/Remote AyuGram Release/` for recovery.
 
+## History Sync: VPS to local custom AyuGram
+
+Manager can merge saved deleted-message text/captions and edit revisions into an
+existing local **custom** AyuGram profile. No new client build is needed. Remote
+and local clients keep independent logins. This is a one-way archive merge, not a
+`tdata` copy, session migration, complete Telegram conversation export, or media
+transfer. Only messages captured and saved by the VPS client can be imported.
+
+In **Remote AyuGram → History Sync · VPS → Local**:
+
+1. Quit the local AyuGram profile normally, leaving the VPS collector running.
+2. Select the local profile and choose **Check Archive IDs**. This reads only
+   archive metadata, not authentication files. An initialized custom profile
+   with existing saved history is required on both devices.
+3. Enter the same numeric Telegram account ID shown in both archives. Verify
+   the actual logged-in account yourself, then check the confirmation and use
+   **Enable Sync**. Folder names and historical archive IDs cannot establish
+   which login is currently active. No binding is created automatically.
+4. Use **Sync Now**, then open local AyuGram normally. Compatible deleted text
+   appears in the custom chat view and revisions appear in its History panel.
+   Unsupported topic/flag combinations may be available only in History.
+
+Enabled profiles synchronize every five minutes while Manager is running and
+unlocked, catching up after sleep/startup. They also synchronize before a
+user-requested local launch. A running or busy local client is deferred, never
+force-closed. A failed pre-launch transfer leaves existing local history usable
+and appears in the launch result and persistent History Sync notice. Imported
+history loads on the next normal client launch. The Mac need not stay on for
+VPS collection; it must be on for synchronization and local viewing.
+
+The private `data/remote_history.json` stores explicit bindings and last results.
+Changing the VPS connection requires confirming the binding again. Missing or
+moved profiles surface an error; they are not recreated. **Disable Sync** stops
+future imports and preserves all history and receipts. A moved profile can be
+reselected and explicitly bound again; disable the old path separately.
+
+### Preservation and replay behavior
+
+Only `.ayugram/TelegramForcePortable/tdata/ayudata.db` is modified locally.
+Authentication keys, Telegram sessions, AyuGram settings and custom local-read
+markers are neither copied nor merged. Unrelated database tables are retained.
+Imports hold the Manager account lock and a SQLite write transaction, check the
+local process/open-file state before and immediately before commit, and roll
+back on validation, backup, lock or integrity failures. Manager cannot prevent
+an independent Finder/Terminal launch in the tiny interval after its final
+process check; use Manager to launch a profile during synchronization.
+
+One rotating, private archive-only recovery snapshot per binding is stored at
+`data/History Sync Backups/<binding UUID>.db` before changed imports, using
+SQLite's online backup API. It includes only the local archive database, not
+session directories or media caches. A replay with the same snapshot digest
+does not rotate this backup. Recovery is an operator operation while the local
+client is fully closed; preserve the current archive and verify the snapshot's
+integrity before any replacement. Do not copy an archive over a running client.
+The existing encrypted VPS backups continue independently.
+
+Deleted messages are deduplicated by account/dialog/message ID; local content
+wins conflicts. Edits use semantic content plus true revision timestamps; mention access hashes
+and lookup contexts are normalized for comparison while original bytes remain
+stored. They preserve the greatest observed number of repeated occurrences. Receipts and
+snapshot digests are committed inside the destination database with the rows,
+so a config-file rollback cannot duplicate imports or hide a restored database.
+Previously imported rows deliberately removed locally are not resurrected by
+replaying the same revision. Source resets are handled by complete bounded
+snapshots rather than a fragile last-row cursor. This does not delete old local
+history when it disappears from a source snapshot.
+
+Same-second edit events can lack enough information for exact cross-device
+identity/ordering. Compatible order is merged; conflicting order retains local
+precedence and is reported. The UI shows imported, skipped, content-conflict
+and ambiguous-sequence counts. It retains the last changed import's counts and
+warnings when later checks find an unchanged snapshot.
+
+### Protocol and limits
+
+The standalone `history_archive.py` runs on both hosts against the pinned
+AyuGram archive schema version 1. The VPS helper exports a consistent read
+transaction while the collector stays running. JSON contains allowlisted rows
+for one numeric owner, string-encoded 64-bit IDs and validated base64 TL text
+entities. Unknown schema, unexpected uniqueness/FK behavior, triggers, linked
+files, malformed entities and unsupported media/reply blobs fail explicitly.
+Remote attachment paths are never followed.
+
+A database and each transfer are limited to **32 MiB**; SQLite journal/WAL/SHM
+files have a separate combined **64 MiB** ceiling because they duplicate pages.
+Final allocated database size is checked before commit. Snapshots/merged owner
+rows are limited to **100,000**, and catalog scanning also caps total rows.
+Limits produce a visible error, never partial/truncated history. Large archives
+need a future paginated protocol; Manager never prunes history to satisfy a
+limit. Only one history transfer runs at a time, with a 60-second SSH deadline.
+The helper drops to the existing AyuGram service user before opening SQLite so
+read snapshots cannot create root-owned WAL sidecars.
+
+The authenticated, password-lock-gated Manager routes are GET
+`/api/remote-history/status` and POST `/api/remote-history/catalog`, `/configure`,
+`/sync`, `/disable`. Status polling does not extend the idle unlock timer.
+The monitor rechecks the lock before committing. No route launches an account,
+sends a message, or authenticates a user.
+
 ## Focused verification and remaining checks
 
 ```sh
@@ -456,3 +557,25 @@ References: systemd documents freezer and failure cleanup behavior in
 and [service units](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html).
 Restic documents GCS authentication and repository setup in its
 [repository preparation guide](https://restic.readthedocs.io/en/stable/030_preparing_a_new_repo.html).
+
+### History helper deployment verification — 2026-10-18
+
+The reviewed helper/module/wrapper were installed atomically with a code-only
+rollback copy under `/opt/ayugram-remote/history-helper-rollback-20261018`. No
+client restart, profile import or authentication action was performed. The
+AyuGram PID remained 326766 with restart count 1; the existing Clawdbot PID 2715
+remained present and its loopback health endpoint returned HTTP 200. Encrypted
+backup configuration was active and the last backup result was success.
+
+The actual fixed SSH catalog transport passed under Manager's Python 3.9. The
+VPS catalog currently contains **zero archived account IDs/messages**. That
+observation does not establish whether a Telegram account is logged in. Real
+synchronization remains disabled until the user has saved history on both
+independent profiles and explicitly confirms the matching numeric ID. No local
+account was opened or bound during deployment.
+
+Validation: 462 complete regression tests passed, plus the archive/orchestration/
+transport tests passed under the installed Manager Python 3.9 runtime. Synthetic
+UI interaction, replay, offline catch-up, rollback, malformed schema, locks,
+limits and session/settings preservation were checked. Independent review
+findings were fixed and covered by regression tests. AUS 3 was never opened.
