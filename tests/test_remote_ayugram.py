@@ -32,7 +32,9 @@ class RemoteAyuGramTests(unittest.TestCase):
         self.path = self.base / 'remote_ayugram.json'
         self.write_config(self.config)
         self.fixture = dict(ok=True, schema=1, ready=True, vnc_port=5905, client_active=True,
-                            backup_active=False, backup_last_result='success', backup_last_finished='today')
+                            client_state='active', disk_total_bytes=20_000_000_000, disk_free_bytes=13_000_000_000,
+                            backup_configured=True, backup_active=False,
+                            backup_last_result='success', backup_last_finished='today')
         for key in ('_tunnel', '_tunnel_config', '_local_port'):
             patch = mock.patch.object(remote, key, None)
             patch.start(); self.addCleanup(patch.stop)
@@ -83,6 +85,40 @@ class RemoteAyuGramTests(unittest.TestCase):
         self.assertNotIn('password', status)
         launch.assert_not_called()
         call.assert_called_once_with(self.config, 'status')
+
+    def test_health_alerts_are_read_only_and_distinguish_unknown_states(self):
+        cases = [({}, set()),
+                 ({'client_state':'failed', 'client_active':False, 'ready':False}, {'client_stopped'}),
+                 ({'client_state':'unknown', 'client_active':False, 'ready':False}, {'client_unknown'}),
+                 ({'client_state':'activating', 'client_active':False, 'ready':False}, {'client_starting'}),
+                 ({'backup_last_result':'exit-code'}, {'backup_failed'}),
+                 ({'backup_last_result':'never'}, {'backup_never'}),
+                 ({'backup_last_result':'unknown'}, {'backup_unknown'}),
+                 ({'backup_active':True, 'backup_last_result':'unknown'}, set()),
+                 ({'backup_configured':False}, {'backup_unconfigured'}),
+                 ({'disk_free_bytes':0}, {'disk_low'}),
+                 ({'disk_free_bytes':1_999_999_999}, {'disk_low'}),
+                 ({'disk_free_bytes':2_000_000_000}, set()),
+                 ({'disk_total_bytes':100_000_000_000, 'disk_free_bytes':9_000_000_000}, {'disk_low'}),
+                 ({'disk_free_bytes':None}, {'disk_unknown'}),
+                 ({'viewer_ready':False}, {'runtime_not_ready'})]
+        for change, expected in cases:
+            with self.subTest(change=change), \
+                    mock.patch.object(remote, '_remote', return_value={**self.fixture, **change}) as cloud, \
+                    mock.patch.object(remote, '_connect') as connect:
+                status = remote.request()
+                self.assertEqual({a['code'] for a in status['alerts']}, expected)
+                cloud.assert_called_once_with(self.config, 'status')
+                connect.assert_not_called()
+
+    def test_invalid_disk_telemetry_never_becomes_healthy_storage(self):
+        for free, total in ((True, 10), ('5', 10), (-1, 10), (11, 10), (0, 0), (1, 2**53)):
+            with self.subTest(free=free, total=total), mock.patch.object(remote, '_remote', return_value={
+                    **self.fixture, 'disk_free_bytes':free, 'disk_total_bytes':total}):
+                status = remote.request()
+                self.assertIsNone(status['disk_free_bytes'])
+                self.assertIsNone(status['disk_total_bytes'])
+                self.assertIn('disk_unknown', [a['code'] for a in status['alerts']])
 
     def test_unready_remote_or_wrong_port_cannot_launch(self):
         for change in ({'ready':False}, {'vnc_port':22}):
@@ -243,29 +279,123 @@ class RemoteAyuGramTests(unittest.TestCase):
             process.wait(timeout=5)
             self.assertEqual(process.returncode, -signal.SIGTERM, process.stderr.read())
 
+    def test_health_poll_does_not_extend_password_unlock_and_still_expires(self):
+        httpd = server.ThreadedHTTPServer(('127.0.0.1', 0), server.RequestHandler)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        before = server.time.monotonic() - 30
+        with mock.patch.dict(state.config, {'lock_password_hash':'enabled', 'lock_timeout_minutes':5}), \
+                mock.patch.object(server, '_lock_unlocked_at', before), \
+                mock.patch.object(server, '_lock_last_activity', before), \
+                mock.patch.object(remote, '_remote', return_value=self.fixture) as cloud:
+            for expected in (200, 423):
+                conn = http.client.HTTPConnection('127.0.0.1', httpd.server_port, timeout=5)
+                try:
+                    conn.request('GET', server.ROUTE_PREFIX + '/api/remote-ayugram/status')
+                    response = conn.getresponse(); response.read()
+                    self.assertEqual(response.status, expected)
+                finally:
+                    conn.close()
+                if expected == 200:
+                    self.assertEqual(server._lock_last_activity, before)
+                    server._lock_last_activity = before - 400
+            cloud.assert_called_once_with(self.config, 'status')
+
     def test_frontend_unconfigured_and_failure_disable_remote_actions(self):
         script = r'''
 const fs = require('fs'), assert = require('assert');
 const source = fs.readFileSync(process.argv[1], 'utf8');
-const elements = new Map();
-const document = {getElementById: id => {if (!elements.has(id)) elements.set(id, {}); return elements.get(id)}};
-let response = {success:true,configured:false,ready:false,message:'Not deployed'};
-const api = async () => response;
+const elements = new Map(), intervals = [], windowEvents = {}, documentEvents = {}, calls = [];
+let now = 1700000000000;
+Date.now = () => now;
+const document = {hidden:false, addEventListener:(name,fn) => documentEvents[name] = fn,
+  getElementById: id => {
+    if (!elements.has(id)) {
+      const classes = new Set();
+      elements.set(id, {style:{}, focus:() => {}, classList:{contains:x => classes.has(x), add:x => classes.add(x), remove:x => classes.delete(x)}});
+    }
+    return elements.get(id);
+  }};
+const window = {addEventListener:(name,fn) => windowEvents[name] = fn};
+const setInterval = (fn,ms) => { intervals.push({fn,ms}); return intervals.length; };
+const flush = () => new Promise(resolve => setImmediate(resolve));
+const element = id => document.getElementById('remote-ayugram-' + id);
+let response = {success:true,configured:false,ready:false,message:'Not deployed'}, pending = null;
+const api = async (path,method) => { calls.push({path,method}); if (pending) await pending; return response; };
+const healthy = {success:true,configured:true,ready:true,viewer_ready:true,connected:true,instance:'test-vm',
+  client_active:true,client_state:'active',backup_active:false,backup_last_result:'success',backup_last_finished:'today',
+  disk_free_bytes:13000000000,disk_total_bytes:20000000000,alerts:[],message:'Ready'};
 eval(source.slice(source.indexOf('let remoteAyuGramBusy'), source.indexOf('let clientReleaseRows')) + `
 (async () => {
+  startRemoteAyuGramMonitor(); await flush();
+  assert.equal(calls.length, 1);
+  assert.equal(intervals.length, 1);
+  assert.equal(intervals[0].ms, 300000);
+  assert.equal(element('connect').disabled, true);
+  assert.equal(element('backup').disabled, true);
+  assert.equal(element('notice').style.display, 'none');
+  document.getElementById('lock-screen').classList.add('visible');
+  now += 300001; await intervals[0].fn();
+  assert.equal(calls.length, 1, 'Locked polling must not contact the VPS');
+  document.getElementById('lock-screen').classList.remove('visible');
+  response = healthy;
+  startRemoteAyuGramMonitor(); await flush();
+  assert.equal(intervals.length, 1, 'Unlock must not duplicate timers');
+  assert.equal(element('button').textContent, 'Remote AyuGram · Running');
+  assert.equal(element('connect').disabled, false);
+  assert(element('status').textContent.includes('13.00 GB free'));
+  let previous = calls.length;
+  await windowEvents.focus();
+  assert.equal(calls.length, previous, 'Focus before next check must not poll');
+  now += 300001; await windowEvents.focus();
+  assert.equal(calls.length, previous + 1, 'Return after sleep must catch up');
+  const issue = '<img src=x onerror=bad()> VPS storage is low';
+  response = {...healthy, alerts:[{code:'disk_low',message:issue}],disk_free_bytes:1000000000};
   await remoteAyuGramAction('status');
-  assert.equal(document.getElementById('remote-ayugram-connect').disabled, true);
-  assert.equal(document.getElementById('remote-ayugram-backup').disabled, true);
-  response = {success:true,configured:true,ready:false,viewer_ready:true,needs_initialization:true};
+  assert.equal(element('notice').style.display, 'flex');
+  assert.equal(element('notice-text').textContent, issue);
+  assert.equal(element('notice-text').innerHTML, undefined, 'Remote text must not be rendered as HTML');
+  hideRemoteAyuGram();
+  assert.equal(element('notice').style.display, 'flex', 'Closing modal must not dismiss health alerts');
   await remoteAyuGramAction('status');
-  assert.equal(document.getElementById('remote-ayugram-connect').disabled, false);
-  response = {success:true,configured:true,ready:true,viewer_ready:true,connected:true};
+  assert.equal(element('notice-text').textContent, issue, 'Repeated checks retain one notice');
+  response = healthy; await remoteAyuGramAction('status');
+  assert.equal(element('notice').style.display, 'none', 'Recovery clears alerts');
+  response = {success:false,message:'VPS connection timed out.'};
   await remoteAyuGramAction('status');
-  assert.equal(document.getElementById('remote-ayugram-connect').disabled, false);
-  response = {success:false,message:'Offline'};
+  assert.equal(element('button').textContent, 'Remote AyuGram · Unavailable');
+  assert(element('status').textContent.includes('Last confirmed status'));
+  assert(element('notice-text').textContent.includes('status unavailable'));
+  assert.equal(element('connect').disabled, true);
+  assert.equal(element('backup').disabled, true);
+  assert.equal(element('disconnect').disabled, false, 'Existing viewer can still be disconnected');
+  response = healthy; await remoteAyuGramAction('status');
+  now += 600001; renderRemoteAyuGram();
+  assert.equal(element('button').textContent, 'Remote AyuGram · Stale');
+  assert.equal(element('connect').disabled, true);
+  await intervals[0].fn();
+  assert.equal(element('button').textContent, 'Remote AyuGram · Running');
+  let release;
+  pending = new Promise(resolve => release = resolve);
+  const inFlight = remoteAyuGramAction('status');
+  previous = calls.length;
+  await pollRemoteAyuGram(true);
+  assert.equal(calls.length, previous, 'Health requests must not overlap');
+  release(); await inFlight; pending = null;
+  response = {...healthy,ready:false,needs_initialization:true};
   await remoteAyuGramAction('status');
-  assert.equal(document.getElementById('remote-ayugram-connect').disabled, true);
-  assert.equal(document.getElementById('remote-ayugram-disconnect').disabled, false);
+  assert.equal(element('connect').disabled, false, 'First-run Quit must stay accessible');
+  response = {success:true,message:'Backup queued'};
+  await remoteAyuGramAction('backup');
+  assert.equal(element('backup').disabled, true);
+  assert(element('status').textContent.includes('Backup: running'));
+  response = {...healthy,backup_last_result:'exit-code',alerts:[{code:'backup_failed',message:'The last backup failed.'}]};
+  await intervals[0].fn();
+  assert.equal(element('button').textContent, 'Remote AyuGram · Needs attention');
+  assert(element('notice-text').textContent.includes('backup failed'));
+  assert(calls.filter(c => c.path.endsWith('/status')).every(c => c.method === 'GET'));
+  assert(!calls.some(c => c.path.endsWith('/connect')), 'Monitoring must never open a viewer');
 })().catch(error => {console.error(error); process.exitCode = 1});`);
 '''
         result = subprocess.run(['node','-e',script,str(RESOURCES/'index.html')],capture_output=True,text=True)

@@ -11,6 +11,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -195,17 +196,111 @@ class RemoteDeploymentTests(unittest.TestCase):
         def command(*args):
             return subprocess.CompletedProcess(args, 0, 'active\n' if args[0] == 'is-active'
                                                else 'ActiveState=inactive\nResult=success\nExecMainExitTimestamp=now\n')
-        with patch.object(remote, 'installed_binary'), patch.object(remote, 'validate_profile'), \
+        with patch.object(remote, 'PROFILE', self.root), \
+                patch.object(remote, 'installed_binary'), patch.object(remote, 'validate_profile'), \
                 patch.object(remote, 'backup_configuration_safe', return_value=True), \
                 patch.object(remote, 'systemctl', side_effect=command):
             status = remote.control('status')
             self.assertTrue(status['ready'])
             self.assertEqual(status['schema'], 1)
             self.assertEqual(status['vnc_port'], 5905)
-        with patch.object(remote, 'installed_binary', side_effect=ValueError('invalid')), \
+            self.assertEqual(status['client_state'], 'active')
+        with patch.object(remote, 'PROFILE', self.root), \
+                patch.object(remote, 'installed_binary', side_effect=ValueError('invalid')), \
+                patch.object(remote, 'backup_configuration_safe', return_value=True), \
                 patch.object(remote, 'systemctl', side_effect=command):
             self.assertFalse(remote.control('status')['ready'])
         self.assertFalse(any('password' in key for key in status))
+
+    def health_status(self, client=None, backup=None, disk=None):
+        def command(*args):
+            if args[0] == 'show':
+                reply = backup or subprocess.CompletedProcess(args, 0,
+                    'ActiveState=inactive\nResult=success\nExecMainExitTimestamp=now\n')
+            elif args[1] == remote.UNITS[0] and client is not None:
+                reply = client
+            else:
+                reply = subprocess.CompletedProcess(args, 0, 'active\n')
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+        with patch.object(remote, 'PROFILE', self.root), \
+                patch.object(remote, 'installed_binary'), patch.object(remote, 'validate_profile'), \
+                patch.object(remote, 'backup_configuration_safe', return_value=True), \
+                patch.object(remote, 'systemctl', side_effect=command) as commands, \
+                patch.object(remote.os, 'statvfs') as statvfs:
+            if isinstance(disk, Exception):
+                statvfs.side_effect = disk
+            else:
+                statvfs.return_value = disk or SimpleNamespace(f_blocks=1000, f_frsize=4096,
+                                                              f_bavail=100, f_bfree=200)
+            status = remote.control('status')
+            statvfs.assert_called_once_with(self.root)
+            self.assertTrue(all(call.args[0] in ('is-active', 'show')
+                                for call in commands.call_args_list))
+            return status
+
+    def test_status_disk_reports_usable_space_including_low_and_zero(self):
+        for available in (100, 1, 0):
+            with self.subTest(available=available):
+                status = self.health_status(disk=SimpleNamespace(
+                    f_blocks=1000, f_frsize=4096, f_bavail=available, f_bfree=200))
+                self.assertEqual(status['disk_total_bytes'], 4096000)
+                self.assertEqual(status['disk_free_bytes'], available * 4096)
+                self.assertTrue(status['ready'])
+        status = self.health_status(disk=OSError('synthetic unavailable filesystem'))
+        self.assertIsNone(status['disk_total_bytes'])
+        self.assertIsNone(status['disk_free_bytes'])
+        self.assertTrue(status['ready'])
+
+    def test_status_client_distinguishes_failed_stopped_transitional_and_unknown(self):
+        for state, code in [('active', 0), ('inactive', 3), ('failed', 3),
+                            ('activating', 3), ('deactivating', 3), ('reloading', 0),
+                            ('maintenance', 3), ('refreshing', 0)]:
+            with self.subTest(state=state):
+                status = self.health_status(client=subprocess.CompletedProcess([], code, state + '\n'))
+                self.assertEqual(status['client_state'], state)
+                self.assertEqual(status['client_active'], state == 'active')
+                self.assertEqual(status['ready'], state == 'active')
+        for reply in (subprocess.CompletedProcess([], 1, 'inactive\n'),
+                      subprocess.CompletedProcess([], 0, 'unexpected\n'),
+                      subprocess.CompletedProcess([], 0, ''),
+                      OSError('synthetic missing systemctl'),
+                      subprocess.TimeoutExpired('systemctl', 15)):
+            with self.subTest(reply=reply):
+                status = self.health_status(client=reply)
+                self.assertEqual(status['client_state'], 'unknown')
+                self.assertFalse(status['client_active'])
+                self.assertFalse(status['ready'])
+
+    def test_status_backup_preserves_failures_and_query_uncertainty(self):
+        cases = [('inactive', 'success', '', 'never'),
+                 ('inactive', 'success', 'now', 'success'),
+                 ('failed', 'exit-code', '', 'exit-code'),
+                 ('failed', 'timeout', 'now', 'timeout'),
+                 ('failed', 'success', '', 'unknown'),
+                 ('failed', 'success', 'now', 'unknown'),
+                 ('unexpected', 'success', 'now', 'unknown'),
+                 ('activating', 'success', '', 'unknown'),
+                 ('active', 'success', '', 'unknown')]
+        for state, result, finished, expected in cases:
+            with self.subTest(state=state, result=result, finished=finished):
+                status = self.health_status(backup=subprocess.CompletedProcess([], 0,
+                    f'ActiveState={state}\nResult={result}\nExecMainExitTimestamp={finished}\n'))
+                self.assertEqual(status['backup_last_result'], expected)
+                self.assertEqual(status['backup_last_finished'], finished)
+                self.assertEqual(status['backup_active'], state in ('active', 'activating'))
+        for reply in (subprocess.CompletedProcess([], 1,
+                          'ActiveState=inactive\nResult=success\nExecMainExitTimestamp=now\n'),
+                      subprocess.CompletedProcess([], 0, ''),
+                      subprocess.CompletedProcess([], 0, 'ActiveState=inactive\n'),
+                      OSError('synthetic missing systemctl'),
+                      subprocess.TimeoutExpired('systemctl', 15)):
+            with self.subTest(reply=reply):
+                status = self.health_status(backup=reply)
+                self.assertEqual(status['backup_last_result'], 'unknown')
+                self.assertFalse(status['backup_active'])
+                self.assertEqual(status['backup_last_finished'], '')
 
     def test_pending_bootstrap_allows_viewer_but_never_reports_ready_for_login(self):
         profile = self.root / 'profile'

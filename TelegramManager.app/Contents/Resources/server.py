@@ -2572,7 +2572,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
             return
-        if path.startswith("/api/") and path not in _LOCK_EXEMPT and not _check_and_touch_unlocked():
+        # Automated remote health checks must not extend an unlocked session.
+        lock_check = _is_unlocked_no_touch if path == '/api/remote-ayugram/status' else _check_and_touch_unlocked
+        if path.startswith("/api/") and path not in _LOCK_EXEMPT and not lock_check():
             self.send_json({"success": False, "locked": True, "message": "App is locked"}, 423)
             return
         handler = self.GET_ROUTES.get(path)

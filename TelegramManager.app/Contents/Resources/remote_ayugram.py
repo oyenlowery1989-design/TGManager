@@ -160,6 +160,47 @@ def _connect(config):
     raise ValueError('Could not connect to the remote desktop. Check that the VPS services are running.')
 
 
+def _health(remote):
+    """Classify service telemetry; never infer Telegram login or message collection."""
+    client = remote.get('client_state')
+    if client is None:
+        client = 'active' if remote.get('client_active') is True else 'unknown'
+    if client not in ('active', 'reloading', 'inactive', 'failed', 'activating',
+                       'deactivating', 'maintenance', 'refreshing'):
+        client = 'unknown'
+    total, free = remote.get('disk_total_bytes'), remote.get('disk_free_bytes')
+    if not (type(total) is int and type(free) is int and 0 <= free <= total < 2**53 and total > 0):
+        total = free = None
+    alerts = []
+    def alert(code, message):
+        alerts.append({'code': code, 'message': message})
+    if client in ('inactive', 'failed', 'deactivating', 'maintenance'):
+        alert('client_stopped', 'AyuGram is not running on the VPS. Messages may be missed.')
+    elif client == 'unknown':
+        alert('client_unknown', 'The AyuGram process state could not be verified.')
+    elif client in ('activating', 'refreshing'):
+        alert('client_starting', 'AyuGram is starting on the VPS. Check again shortly.')
+    if remote.get('backup_configured') is not True:
+        alert('backup_unconfigured', 'Daily backups are not confirmed active. Check the backup timer and configuration.')
+    if remote.get('backup_active') is not True:
+        outcome = remote.get('backup_last_result')
+        if outcome == 'never':
+            alert('backup_never', 'No completed backup has been verified since the backup service started.')
+        elif outcome in (None, '', 'unknown'):
+            alert('backup_unknown', 'The last backup result could not be verified.')
+        elif outcome != 'success':
+            alert('backup_failed', 'The last backup failed. Check the VPS backup service before relying on recovery.')
+    if free is None:
+        alert('disk_unknown', 'VPS free space is unavailable. Check the remote status helper.')
+    elif free < max(2_000_000_000, total * 0.10):
+        alert('disk_low', f'VPS storage is low: {free / 1e9:.2f} GB free. Free space before history or backups stop saving.')
+    if (client == 'active' and remote.get('backup_configured') is True
+            and remote.get('viewer_ready', remote.get('ready')) is not True):
+        alert('runtime_not_ready', 'The remote desktop or profile validation is not ready. Check the VPS services.')
+    return dict(client_state=client, disk_total_bytes=total, disk_free_bytes=free,
+                alerts=alerts)
+
+
 def request(action='status'):
     """No client-supplied hosts, paths, account names, or shell commands."""
     with _lock:
@@ -185,6 +226,7 @@ def request(action='status'):
             initialization_message = ('First launch: do not sign in. Quit AyuGram normally, wait for its '
                                       'automatic restart, then Refresh before signing in.')
             result = {'success': True, 'configured': True, 'ready': ready,
+                      **_health(remote),
                       'viewer_ready': viewer_ready, 'needs_initialization': needs_initialization,
                       'instance': config['instance'], 'client_active': remote.get('client_active') is True,
                       'backup_active': remote.get('backup_active') is True,

@@ -385,6 +385,34 @@ not bucket reachability or an existing offhost snapshot. `backup_last_result` is
 `never` before a completed run. `{ok:true,queued:true}` confirms queuing only.
 Neither helper response contains a password, session content or credential path.
 
+### Health status and alerts
+
+Manager checks the existing read-only status helper after startup/unlock and
+every five minutes while the app is open and unlocked. Returning to the window
+after a missed check triggers a catch-up. Requests do not overlap, and the
+status endpoint checks the password lock without extending its idle timeout.
+No status check opens Screen Sharing, starts a client, or accesses Mac sessions.
+
+The toolbar shows the current health state. A persistent notice below it lists
+client shutdown/failure, an unsuccessful or unverified backup, a disabled backup
+timer/configuration, unavailable status, or low disk space. Closing the panel
+does not dismiss the notice; a successful check clears resolved conditions.
+Failed connections preserve the last confirmed values with an explicit stale
+label. Successful observations older than ten minutes are also marked stale.
+
+`client_state` distinguishes systemd states from an unknown query result.
+`disk_free_bytes` uses the profile filesystem's `f_bavail`, excluding blocks
+reserved for root, and `disk_total_bytes` reports its total capacity. The low
+space threshold is less than **2 GB or 10% free**, whichever warns first; no
+files are removed automatically. Missing or invalid telemetry is shown as
+unavailable, never as healthy or zero used space. The last backup time is the
+last **attempt** known to systemd, not necessarily a successful snapshot.
+
+These are in-app alerts, not notifications while Manager or the Mac is closed.
+Process health does not prove Telegram authentication, connectivity, or message
+collection. A live outage is detected at the next successful check; Manager
+does not restart services or change sessions in response to an alert.
+
 At actual deployment time, create Manager's machine-local
 `data/remote_ayugram.json` as a regular user-owned `0600` file with **exactly**:
 

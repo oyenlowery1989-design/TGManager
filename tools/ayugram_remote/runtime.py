@@ -18,6 +18,8 @@ BASE = Path('/opt/ayugram-remote')
 PROFILE = Path('/var/lib/ayugram-remote/profile')
 UNITS = ('ayugram-remote-client.service', 'ayugram-remote-display.service',
          'ayugram-remote-desktop.service', 'ayugram-remote-vnc.service')
+UNIT_STATES = ('active', 'reloading', 'inactive', 'failed', 'activating',
+               'deactivating', 'maintenance', 'refreshing')
 
 
 def regular(path):
@@ -169,21 +171,52 @@ def control(action):
         verified = True
     except (OSError, ValueError, KeyError):
         pass
-    active = [systemctl('is-active', unit).stdout.strip() == 'active' for unit in UNITS]
-    backup = systemctl('show', 'ayugram-remote-backup.service',
-                       '--property=ActiveState,Result,ExecMainExitTimestamp')
-    fields = dict(line.split('=', 1) for line in backup.stdout.splitlines() if '=' in line)
-    timer_active = systemctl('is-active', 'ayugram-remote-backup.timer').stdout.strip() == 'active'
+    def query(*args):
+        try:
+            return systemctl(*args)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+
+    def unit_state(unit):
+        reply = query('is-active', unit)
+        value = reply.stdout.strip() if reply is not None else ''
+        # is-active uses exit status 3 for known non-active states.
+        return value if (reply is not None and reply.returncode in (0, 3)
+                         and value in UNIT_STATES) else 'unknown'
+
+    states = [unit_state(unit) for unit in UNITS]
+    active = [value == 'active' for value in states]
+    backup = query('show', 'ayugram-remote-backup.service',
+                   '--property=ActiveState,Result,ExecMainExitTimestamp')
+    fields = (dict(line.split('=', 1) for line in backup.stdout.splitlines() if '=' in line)
+              if backup is not None and backup.returncode == 0 else {})
+    timer_active = unit_state('ayugram-remote-backup.timer') == 'active'
     configured = backup_configuration_safe() and timer_active
     finished = fields.get('ExecMainExitTimestamp', '')
-    result = fields.get('Result', 'unknown') if finished else 'never'
+    result = 'unknown'
+    if (fields.get('ActiveState') in UNIT_STATES and fields.get('Result')
+            and 'ExecMainExitTimestamp' in fields):
+        if fields['Result'] != 'success':
+            result = fields['Result']
+        elif finished and fields['ActiveState'] != 'failed':
+            result = 'success'
+        elif not finished and fields['ActiveState'] == 'inactive':
+            result = 'never'
+    disk_total = disk_free = None
+    try:
+        disk = os.statvfs(PROFILE)
+        disk_total = disk.f_blocks * disk.f_frsize
+        disk_free = disk.f_bavail * disk.f_frsize
+    except OSError:
+        pass
     viewer_ready = verified and all(active) and configured
     needs_initialization = (PROFILE / '.remote-preferences-pending').exists()
     return dict(schema=1, ok=True, ready=viewer_ready and not needs_initialization,
                 viewer_ready=viewer_ready, needs_initialization=needs_initialization,
                 backup_configured=configured,
-                client_active=active[0], vnc_port=5905,
-                backup_active=fields.get('ActiveState') == 'activating',
+                client_active=active[0], client_state=states[0], vnc_port=5905,
+                disk_total_bytes=disk_total, disk_free_bytes=disk_free,
+                backup_active=fields.get('ActiveState') in ('activating', 'active'),
                 backup_last_result=result, backup_last_finished=finished)
 
 
