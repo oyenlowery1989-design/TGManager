@@ -13,8 +13,13 @@ func holdReleaseLease() -> Bool {
     do {
         if (try? base.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true ||
            (try? root.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true { return false }
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false,
-                                               attributes: [.posixPermissions: 0o700])
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: root.path, isDirectory: &isDirectory) {
+            guard isDirectory.boolValue else { return false }
+        } else {
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false,
+                                                   attributes: [.posixPermissions: 0o700])
+        }
         let fd = open(root.appendingPathComponent("lifecycle.lock").path, O_RDWR | O_CREAT | O_NOFOLLOW, 0o600)
         guard fd >= 0 else { return false }
         var info = stat()

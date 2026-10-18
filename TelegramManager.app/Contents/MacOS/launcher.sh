@@ -56,8 +56,8 @@ elif [ "$SWIFT_SRC" -nt "$SWIFT_BIN" ]; then
     needs_compile=true
 fi
 
-COMPILE_LOG="$PARENT/data/launcher_compile.log"
-[ -d "$PARENT/data" ] || COMPILE_LOG="$PARENT/launcher_compile.log"
+COMPILE_LOG="$PARENT/../data/launcher_compile.log"
+[ -d "$PARENT/../data" ] || COMPILE_LOG="$PARENT/../launcher_compile.log"
 
 if $needs_compile && command -v swiftc &>/dev/null; then
     # Notify user (non-blocking)
