@@ -243,6 +243,71 @@ class RemoteHistoryTests(unittest.TestCase):
         self.assertEqual(len(backups), 1)
         self.assertEqual(backups[0].stat().st_mode & 0o777, 0o600)
 
+    def test_empty_vps_waits_for_matching_history_before_first_import(self):
+        import test_history_archive as fixtures
+        fixture = fixtures.ArchiveTests()
+        fixture.root = self.root
+        source = fixture.make_db('new-vps.db')
+        self.db.unlink(); fixture.make_db(str(self.db.relative_to(self.root)))
+        fixture.insert(self.db, 'DeletedMessage', fixture.row('local text', user=123, message=1))
+        original = self.db.read_bytes()
+        exported_ids = []
+
+        def exchange(action, payload, **kwargs):
+            if action == 'history-catalog':
+                return _REAL_CATALOG(source)
+            exported_ids.append(payload['user_id'])
+            return history.history_archive.export_archive(source, payload['user_id'], payload['known_digest'])
+
+        with mock.patch.object(history.history_archive, 'catalog', _REAL_CATALOG), \
+                mock.patch.object(history.history_archive, 'imported_digest', _REAL_DIGEST), \
+                mock.patch.object(history.history_archive, 'merge_archive', _REAL_MERGE), \
+                mock.patch.object(history.remote_ayugram, 'history_request', side_effect=exchange):
+            enabled = self.enable()
+            self.assertEqual(enabled['binding']['state'], 'waiting')
+            self.assertEqual(history.status()['bindings'][0]['last_success'], 0)
+            waiting = history.request('sync', {'path': self.path})
+            self.assertTrue(waiting['success'], waiting)
+            self.assertEqual(waiting['state'], 'waiting')
+            self.assertEqual(self.db.read_bytes(), original)
+            self.assertEqual(exported_ids, [])
+            self.assertFalse((self.data / 'History Sync Backups').exists())
+
+            history.request('disable', {'path': self.path})
+            history.run_pass()
+            self.assertFalse(history.status()['bindings'][0]['enabled'])
+            self.assertEqual(exported_ids, [])
+            self.enable()
+
+            fixture.insert(source, 'DeletedMessage', fixture.row('different owner', user=456, message=2))
+            wrong = history.request('sync', {'path': self.path})
+            self.assertFalse(wrong['success'], wrong)
+            self.assertEqual(history.status()['bindings'][0]['state'], 'error')
+            self.assertEqual(exported_ids, [])
+            self.assertEqual(self.db.read_bytes(), original)
+
+            self.assertFalse(history.request('configure', {
+                'path': self.path, 'user_id': '123', 'confirmed': True})['success'])
+
+            fixture.insert(source, 'DeletedMessage', fixture.row('matching owner', user=123, message=3))
+            imported = history.request('sync', {'path': self.path})
+            self.assertTrue(imported['success'], imported)
+            self.assertEqual(imported['imported']['deleted'], 1)
+            replay = history.request('sync', {'path': self.path})
+            self.assertTrue(replay['unchanged'])
+            self.assertGreater(history.status()['bindings'][0]['last_success'], 0)
+        with fixtures.connect(self.db) as db:
+            self.assertEqual(db.execute('SELECT userId,messageId FROM DeletedMessage ORDER BY messageId').fetchall(),
+                             [(123, 1), (123, 3)])
+        self.assertEqual(set(exported_ids), {'123'})
+
+    def test_empty_vps_still_requires_local_id_and_confirmation(self):
+        history.remote_ayugram.history_request.return_value = {**self.catalog, 'accounts': []}
+        for payload in ({'path': self.path, 'user_id': '123'},
+                        {'path': self.path, 'user_id': '456', 'confirmed': True}):
+            self.assertFalse(history.request('configure', payload)['success'])
+        self.assertEqual(history.status()['bindings'], [])
+
     def test_routes_require_token_lock_and_status_does_not_extend_idle_time(self):
         httpd = server.ThreadedHTTPServer(('127.0.0.1', 0), server.RequestHandler)
         threading.Thread(target=httpd.serve_forever, daemon=True).start()

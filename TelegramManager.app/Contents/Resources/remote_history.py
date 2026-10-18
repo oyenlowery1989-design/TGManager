@@ -21,6 +21,7 @@ _lock = threading.RLock()  # Configuration only; never held across network/accou
 _transfer = threading.Lock()
 _MARKER = b'ayugram-inline-isolated-profile-v1\n'
 _ERRORS = (ValueError, OSError, sqlite3.Error, subprocess.SubprocessError)
+_WAITING = 'Waiting for VPS history. Sync will start when saved history for the confirmed account ID appears.'
 
 
 class Deferred(ValueError):
@@ -64,6 +65,7 @@ def _load():
                 or not isinstance(binding.get('id'), str)
                 or str(uuid.UUID(binding['id'])) != binding['id']
                 or not _valid_id(binding.get('user_id')) or type(binding.get('enabled')) is not bool
+                or type(binding.get('awaiting_history', False)) is not bool
                 or not isinstance(binding.get('remote'), dict)):
             raise ValueError('Invalid history sync binding.')
         for field in ('last_attempt', 'last_success'):
@@ -188,6 +190,14 @@ def _sync(account, archive):
             raise Deferred('Another history transfer is in progress. This profile will retry automatically.')
         try:
             _record(account, identity, state='syncing', message='Fetching the saved VPS history.', last_attempt=time.time())
+            if binding.get('awaiting_history', False):
+                remote = _accounts(remote_ayugram.history_request(
+                    'history-catalog', {}, expected_config=binding['remote']))
+                if not remote:
+                    _record(account, identity, state='waiting', message=_WAITING)
+                    return {'success': True, 'state': 'waiting', 'message': _WAITING}
+                if binding['user_id'] not in {item['user_id'] for item in remote}:
+                    raise ValueError('The VPS history belongs to a different account ID. Nothing was imported.')
             known = history_archive.imported_digest(archive, identity, binding['user_id'])
             envelope = remote_ayugram.history_request('history-export',
                         {'user_id': binding['user_id'], 'known_digest': known}, expected_config=binding['remote'])
@@ -207,7 +217,7 @@ def _sync(account, archive):
         message = ('History synced. Existing local content was kept; review the conflict and ordering counts.' if warning
                    else 'History is up to date. Open local AyuGram normally to view it.')
         _record(account, identity, state='warning' if warning else 'ready', message=message,
-                last_success=time.time(), counts=counts)
+                last_success=time.time(), counts=counts, awaiting_history=False)
         return {'success': True, 'state': 'warning' if warning else 'ready', 'message': message, **result}
     except _ERRORS as error:
         deferred = isinstance(error, Deferred)
@@ -264,8 +274,10 @@ def request(action, payload=None):
                 return {'success': True, 'local': local, 'remote': remote,
                         'message': 'Archive IDs identify saved history, not the current login. Confirm the same account in both clients yourself.'}
             user_id = payload['user_id']
-            if any(user_id not in {item['user_id'] for item in accounts} for accounts in (local, remote)):
-                raise ValueError('That account ID must already appear in both history archives. No sessions were changed.')
+            if user_id not in {item['user_id'] for item in local}:
+                raise ValueError('That account ID must already appear in the local history archive. No sessions were changed.')
+            if remote and user_id not in {item['user_id'] for item in remote}:
+                raise ValueError('The VPS history belongs to a different account ID. Nothing was imported.')
             _check_closed(account, archive)
             with _lock:
                 config = _load()
@@ -273,7 +285,9 @@ def request(action, payload=None):
                 same = old and old['user_id'] == user_id and old['remote'] == remote_config
                 binding = copy.deepcopy(old) if same else {'id': str(uuid.uuid4()), 'user_id': user_id,
                     'remote': remote_config, 'last_attempt': 0, 'last_success': 0}
-                binding.update(enabled=True, state='idle', message='Enabled. History will sync while local AyuGram is closed.')
+                binding.update(enabled=True, awaiting_history=not remote,
+                               state='idle' if remote else 'waiting',
+                               message='Enabled. History will sync while local AyuGram is closed.' if remote else _WAITING)
                 config['bindings'][account] = binding
                 _save(config)
             return {'success': True, 'message': binding['message'], 'binding': _public(account, binding)}

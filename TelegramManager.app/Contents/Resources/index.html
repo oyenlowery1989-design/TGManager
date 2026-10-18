@@ -1212,7 +1212,7 @@
       <label for="remote-history-account">Local AyuGram profile</label>
       <select id="remote-history-account" style="width:100%;margin:6px 0 12px;padding:10px;border:1px solid var(--border);border-radius:8px;background:var(--card-bg);color:var(--text)" onchange="selectRemoteHistory()"><option value="">Choose a profile…</option></select>
       <button class="btn" id="remote-history-catalog" disabled onclick="remoteHistoryAction('catalog')">Check Archive IDs</button>
-      <p id="remote-history-catalog-status" class="modal-info" style="white-space:pre-wrap;margin:8px 0">Choose a profile, then check which account IDs appear in both archives.</p>
+      <p id="remote-history-catalog-status" class="modal-info" style="white-space:pre-wrap;margin:8px 0">Choose a profile, then check the local and VPS archive IDs.</p>
       <label for="remote-history-user">Numeric Telegram account ID</label>
       <input id="remote-history-user" type="text" inputmode="numeric" autocomplete="off" placeholder="Account ID, not a phone number" style="width:100%;margin:6px 0 10px" oninput="renderRemoteHistory()">
       <label style="display:flex;align-items:flex-start;gap:8px;font-size:12px;line-height:1.5"><input id="remote-history-confirm" type="checkbox" onchange="renderRemoteHistory()"><span>I confirm this is the same Telegram account in both independent AyuGram logins. Archive IDs alone do not verify the current login.</span></label>
@@ -2539,7 +2539,9 @@ function renderRemoteHistory(message = '') {
   for (const name of ['account', 'user', 'confirm']) historyElement(name).disabled = remoteHistoryBusy;
   historyElement('catalog').disabled = unavailable || !path;
   const user = historyElement('user').value.trim();
-  const matching = remoteHistoryCatalog?.path === path && ['local', 'remote'].every(side => remoteHistoryCatalog[side].some(item => item.user_id === user));
+  const matching = remoteHistoryCatalog?.path === path
+    && remoteHistoryCatalog.local.some(item => item.user_id === user)
+    && (!remoteHistoryCatalog.remote.length || remoteHistoryCatalog.remote.some(item => item.user_id === user));
   historyElement('configure').disabled = unavailable || !path || !matching || !historyElement('confirm').checked;
   historyElement('sync').disabled = unavailable || !binding?.enabled;
   historyElement('disable').disabled = unavailable || !binding?.enabled;
@@ -2597,6 +2599,7 @@ async function remoteHistoryAction(action) {
       remoteHistoryCatalog = {path, local:result.local, remote:result.remote};
       const describe = items => items.length ? items.map(item => `${item.user_id} (${item.deleted} deleted, ${item.edited} edits)`).join('\n') : 'No saved message history yet';
       historyElement('catalog-status').textContent = 'Local archive:\n' + describe(result.local) + '\nVPS archive:\n' + describe(result.remote);
+      if (!result.remote.length) historyElement('catalog-status').textContent += '\nYou can enable sync for a confirmed local account ID. It will wait for matching VPS history before importing.';
     }
     if (action === 'configure' || action === 'disable') historyElement('confirm').checked = false;
     await loadRemoteHistory();

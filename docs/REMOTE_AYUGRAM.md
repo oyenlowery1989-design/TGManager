@@ -444,14 +444,24 @@ In **Remote AyuGram → History Sync · VPS → Local**:
 1. Quit the local AyuGram profile normally, leaving the VPS collector running.
 2. Select the local profile and choose **Check Archive IDs**. This reads only
    archive metadata, not authentication files. An initialized custom profile
-   with existing saved history is required on both devices.
-3. Enter the same numeric Telegram account ID shown in both archives. Verify
+   with existing saved history is required locally.
+3. Enter the numeric Telegram account ID shown in the local archive. Verify
    the actual logged-in account yourself, then check the confirmation and use
    **Enable Sync**. Folder names and historical archive IDs cannot establish
-   which login is currently active. No binding is created automatically.
+   which login is currently active. If the VPS archive has history, the same
+   ID must appear there too. No binding is created automatically.
 4. Use **Sync Now**, then open local AyuGram normally. Compatible deleted text
    appears in the custom chat view and revisions appear in its History panel.
    Unsupported topic/flag combinations may be available only in History.
+
+A fresh VPS archive can be enabled in **Waiting for VPS history** state after
+the same explicit account confirmation. This persists the intended local ID,
+without exporting, importing or claiming a successful sync. The normal monitor
+checks the remote catalog until that ID has saved history. A nonempty remote
+catalog containing only different IDs produces an error and imports nothing.
+The first matching export follows all normal validation, backup and transaction
+checks; only a completed merge sets the first successful-sync time. Ordinary
+conversation loading does not populate the deleted-message/edit archive.
 
 Enabled profiles synchronize every five minutes while Manager is running and
 unlocked, catching up after sleep/startup. They also synchronize before a
