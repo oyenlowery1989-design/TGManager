@@ -1977,12 +1977,15 @@ function buildCard(acc, pinnedCopy = false) {
                       health.expiry === "stale"   ? "💤 Inactive 30d+"   : "";
 
   const actions = [];
+  const openingClient = _openingPaths.get(acc.path);
   if (acc.status === "ready") {
     if (acc.telegram_running ?? (acc.running && acc.running_client !== "AyuGram")) {
       actions.push(`<button class="btn success" disabled data-tip="This account is running">▶ Telegram</button>`);
       actions.push(`<button class="btn danger" onclick="event.stopPropagation(); closeAccount(${esc(JSON.stringify(acc.path))})" data-tip="Request normal Quit; force only if the app does not exit">■ Close Telegram</button>`);
+    } else if (openingClient === "Telegram") {
+      actions.push(`<button class="btn primary" disabled aria-busy="true">Opening Telegram…</button>`);
     } else {
-      actions.push(`<button class="btn primary" onclick="event.stopPropagation(); openAccount(${esc(JSON.stringify(acc.path))})" data-tip="Launch Telegram for this account">▶ Open</button>`);
+      actions.push(`<button class="btn primary" ${openingClient ? 'disabled' : ''} onclick="event.stopPropagation(); openAccount(${esc(JSON.stringify(acc.path))})" data-tip="Launch Telegram for this account">▶ Open</button>`);
     }
     actions.push(`<button class="btn" onclick="event.stopPropagation(); backupAccount(${esc(JSON.stringify(acc.path))},${esc(JSON.stringify(acc.name))})" data-tip="Save a backup of this account's session data">↓ Backup</button>`);
   } else if (acc.status === "needs_setup") {
@@ -1991,18 +1994,20 @@ function buildCard(acc, pinnedCopy = false) {
       actions.push(`<button class="btn" onclick="event.stopPropagation(); backupAccount(${esc(JSON.stringify(acc.path))},${esc(JSON.stringify(acc.name))})" data-tip="Save a backup of this account's session data">↓ Backup</button>`);
     }
   } else if (acc.status === "no_data") {
-    actions.push(`<button class="btn primary" onclick="event.stopPropagation(); openAccount(${esc(JSON.stringify(acc.path))})" data-tip="Open this empty portable folder and sign in as a new Telegram device">▶ Open & Log In</button>`);
+    actions.push(`<button class="btn primary" ${openingClient ? 'disabled aria-busy="true"' : ''} onclick="event.stopPropagation(); openAccount(${esc(JSON.stringify(acc.path))})" data-tip="Open this empty portable folder and sign in as a new Telegram device">${openingClient ? 'Opening Telegram…' : '▶ Open & Log In'}</button>`);
   }
   if (!acc.running) {
     actions.push(`<button class="btn" onclick="event.stopPropagation(); showDuplicateAccountModal(${esc(JSON.stringify(acc.path))},${esc(JSON.stringify(acc.name))})" data-tip="Create an empty portable folder for a separate Telegram login">Duplicate</button>`);
   }
   if (acc.status === "ready") {
-    if (acc.ayugram_running) {
+    if (openingClient === "AyuGram") {
+      actions.push(`<button class="btn ayugram-open" disabled aria-busy="true" data-tip="Preparing AyuGram and checking history sync. Please wait.">Opening AyuGram…</button>`);
+    } else if (acc.ayugram_running) {
       actions.push(`<button class="btn danger ayugram-open" onclick="event.stopPropagation(); closeAccount(${esc(JSON.stringify(acc.path))},'AyuGram')">■ Close AyuGram</button>`);
     } else {
-      actions.push(`<button class="btn ayugram-open" onclick="event.stopPropagation(); openAccount(${esc(JSON.stringify(acc.path))},'AyuGram')" data-tip="Open the separate AyuGram profile">Open with AyuGram</button>`);
+      actions.push(`<button class="btn ayugram-open" ${openingClient ? 'disabled' : ''} onclick="event.stopPropagation(); openAccount(${esc(JSON.stringify(acc.path))},'AyuGram')" data-tip="Open the separate AyuGram profile">Open with AyuGram</button>`);
       if (!acc.ayugram_has_profile) {
-        actions.push(`<button class="btn ayugram-open" onclick="event.stopPropagation(); openAccount(${esc(JSON.stringify(acc.path))},'AyuGram',true)" data-tip="Create a separate login; existing profiles are never reset">New AyuGram Login</button>`);
+        actions.push(`<button class="btn ayugram-open" ${openingClient ? 'disabled' : ''} onclick="event.stopPropagation(); openAccount(${esc(JSON.stringify(acc.path))},'AyuGram',true)" data-tip="Create a separate login; existing profiles are never reset">New AyuGram Login</button>`);
       }
     }
   }
@@ -2408,26 +2413,36 @@ document.addEventListener("keydown", e => {
 
 function filterAccounts(val) { searchFilter = val; renderAccounts(); }
 
-const _openingPaths = new Set();
+const _openingPaths = new Map();
 async function openAccount(path, client = "Telegram", newLogin = false) {
   if (_openingPaths.has(path)) return;   // ignore double-click; server also serializes
-  _openingPaths.add(path);
+  _openingPaths.set(path, client);
+  mergeLocalEdits(accounts);
+  renderAccounts();
+  toast(`Opening ${client}…`, "info");
   let r;
   try {
     r = await api(client === "AyuGram" ? (newLogin ? "/api/new-ayugram-login" : "/api/open-ayugram") : "/api/open", "POST", { path });
+    if (r?.success) await refresh();
+  } catch (error) {
+    r = { success: false, message: `Could not open ${client}: ${error.message || "Connection failed"}` };
   } finally {
     _openingPaths.delete(path);
+    mergeLocalEdits(accounts);
+    renderAccounts();
   }
-  if (!r.success) {
-    toast(r.message || "Failed to open account", "error");
+  if (!r?.success) {
+    toast(r?.message || "Failed to open account", "error");
     return;
   }
-  toast(r.message || `Opening ${client}…`, "info");
+  toast(r.message || `${client} opened`, "success");
   setTimeout(async () => {
     await refresh();
     // Post-open liveness check: if still not running after refresh, warn
     const acc = accounts.find(a => a.path === path);
-    if (acc && !acc.running) {
+    const running = client === "AyuGram" ? acc?.ayugram_running
+      : (acc?.telegram_running ?? (acc?.running && acc?.running_client !== "AyuGram"));
+    if (acc && !running) {
       toast(`${client} launched but isn't running yet — it may have failed to start. Check the log for details.`, "warning", 8000);
     }
   }, 3000);

@@ -28,6 +28,8 @@ class RemoteAyuGramTests(unittest.TestCase):
         patch.start(); self.addCleanup(patch.stop)
         patch = mock.patch.object(remote.shutil, 'which', return_value='/synthetic/gcloud')
         patch.start(); self.addCleanup(patch.stop)
+        patch = mock.patch.object(remote, '_start_master', return_value=None)
+        patch.start(); self.addCleanup(patch.stop)
         self.config = dict(schema=1, project='test-project', zone='us-central1-a', instance='test-vm')
         self.path = self.base / 'remote_ayugram.json'
         self.write_config(self.config)
@@ -35,7 +37,7 @@ class RemoteAyuGramTests(unittest.TestCase):
                             client_state='active', disk_total_bytes=20_000_000_000, disk_free_bytes=13_000_000_000,
                             backup_configured=True, backup_active=False,
                             backup_last_result='success', backup_last_finished='today')
-        for key in ('_tunnel', '_tunnel_config', '_local_port'):
+        for key in ('_tunnel', '_tunnel_config', '_local_port', '_master'):
             patch = mock.patch.object(remote, key, None)
             patch.start(); self.addCleanup(patch.stop)
         self.session = self.base / 'TelegramForcePortable/tdata/key_datas'
@@ -261,7 +263,8 @@ class RemoteAyuGramTests(unittest.TestCase):
                 for prefix, expected in (('',404), (server.ROUTE_PREFIX,423)):
                     conn = http.client.HTTPConnection('127.0.0.1',httpd.server_port,timeout=5)
                     try:
-                        conn.request(method,prefix+'/api/remote-ayugram/'+action,body='{}')
+                        conn.request(method,prefix+'/api/remote-ayugram/'+action,
+                                     body='{}' if method == 'POST' else None)
                         response = conn.getresponse()
                         response.read()
                         self.assertEqual(response.status,expected)
@@ -400,6 +403,193 @@ eval(source.slice(source.indexOf('let remoteAyuGramBusy'), source.indexOf('let c
 '''
         result = subprocess.run(['node','-e',script,str(RESOURCES/'index.html')],capture_output=True,text=True)
         self.assertEqual(result.returncode,0,result.stderr)
+
+
+class SSHMasterTests(unittest.TestCase):
+    def setUp(self):
+        self.config = dict(schema=1, project='test-project', zone='us-central1-a', instance='test-vm')
+        self.base = ['synthetic-gcloud', 'compute', 'ssh', 'test-vm']
+        patch = mock.patch.object(remote, '_master', None)
+        patch.start(); self.addCleanup(patch.stop)
+
+    def test_unready_master_falls_back_and_backup_never_uses_pool(self):
+        with mock.patch.object(remote, '_ssh', return_value=self.base) as discover, \
+                mock.patch.object(remote, '_start_master', return_value=None) as start:
+            with remote._request_command(self.config, 'status') as command:
+                self.assertIn('ControlPath=none', command)
+            with remote._request_command(self.config, 'backup') as command:
+                self.assertIn('ControlPath=none', command)
+        self.assertEqual(discover.call_count, 2)
+        start.assert_called_once_with(self.base)
+
+    def test_reuse_is_leased_and_expiry_never_interrupts_an_active_request(self):
+        with tempfile.TemporaryDirectory(prefix='tma-', dir='/tmp') as directory:
+            listener = socket.socket(socket.AF_UNIX)
+            self.addCleanup(listener.close)
+            listener.bind(directory + '/synthetic')
+            process = mock.Mock()
+            process.poll.return_value = None
+            info = os.lstat(directory)
+            master = dict(process=process, directory=directory, identity=(info.st_dev, info.st_ino), command=self.base,
+                          created=remote.time.monotonic(), leases=0)
+            with mock.patch.object(remote, '_ssh', return_value=self.base), \
+                    mock.patch.object(remote, '_start_master', return_value=master) as start, \
+                    mock.patch.object(remote, '_close_master') as close:
+                with remote._request_command(self.config, 'history-export') as first:
+                    self.assertIn('ControlPath=' + directory + '/%k-%C', first)
+                    master['created'] -= 301
+                    with remote._request_command(self.config, 'status') as second:
+                        self.assertIn('ControlPath=none', second)
+                    close.assert_not_called()
+                    self.assertEqual(master['leases'], 1)
+                with remote._request_command(self.config, 'status'):
+                    pass
+                close.assert_called_once_with(master)
+                self.assertEqual(start.call_count, 2)
+                self.assertEqual(master['leases'], 0)
+
+    def test_failed_warmup_does_not_replay_a_remote_command(self):
+        process = mock.Mock(returncode=1)
+        process.communicate.return_value = ('', None)
+        with mock.patch.object(remote, '_ssh', return_value=self.base), \
+                mock.patch.object(remote, '_start_master', side_effect=OSError('unavailable')), \
+                mock.patch.object(remote.subprocess, 'Popen', return_value=process) as launch:
+            with self.assertRaises(ValueError):
+                remote._remote(self.config, 'status')
+        launch.assert_called_once()
+        self.assertIn('ControlPath=none', launch.call_args.args[0])
+
+    def test_timed_out_leased_request_releases_lease_without_stopping_master_or_replay(self):
+        master_process = mock.Mock(); master_process.poll.return_value = None
+        master = dict(process=master_process, directory='/tmp/synthetic', command=self.base,
+                      created=remote.time.monotonic(), leases=0)
+        process = mock.Mock()
+        process.communicate.side_effect = subprocess.TimeoutExpired('synthetic-gcloud', 30)
+        with mock.patch.object(remote, '_ssh', return_value=self.base), \
+                mock.patch.object(remote, '_start_master', return_value=master), \
+                mock.patch.object(remote, '_master_ready', return_value=True), \
+                mock.patch.object(remote.subprocess, 'Popen', return_value=process) as launch, \
+                mock.patch.object(remote, '_stop') as stop:
+            with self.assertRaises(ValueError):
+                remote._remote(self.config, 'status')
+        launch.assert_called_once()
+        stop.assert_called_once_with(process)
+        self.assertEqual(master['leases'], 0)
+        master_process.terminate.assert_not_called()
+        self.assertIs(remote._master, master)
+
+    def test_master_options_are_private_foreground_and_noninteractive(self):
+        process = mock.Mock()
+        with mock.patch.object(remote.subprocess, 'Popen', return_value=process) as launch:
+            master = remote._start_master(self.base)
+        self.addCleanup(remote._remove_master_directory, master['directory'], master['identity'])
+        self.assertEqual(os.stat(master['directory']).st_mode & 0o777, 0o700)
+        command = launch.call_args.args[0]
+        for option in ('-M', '-N', 'ControlPersist=no', 'BatchMode=yes', 'ForwardAgent=no',
+                       'ClearAllForwardings=yes'):
+            self.assertIn(option, command)
+        self.assertIn('ControlPath=' + master['directory'] + '/%k-%C', command)
+        self.assertNotIn('ControlMaster=no', command)
+        self.assertTrue(launch.call_args.kwargs['start_new_session'])
+
+    def test_replaced_or_public_master_directory_is_never_reused_or_removed(self):
+        with tempfile.TemporaryDirectory(prefix='tma-', dir='/tmp') as root:
+            directory = Path(root) / 'socket'; directory.mkdir(mode=0o700)
+            info = directory.stat(); identity = (info.st_dev, info.st_ino)
+            (directory/'keep').write_text('preserved')
+            directory.chmod(0o755)
+            with self.assertRaises(OSError):
+                remote._master_directory(str(directory), identity)
+            remote._remove_master_directory(str(directory), identity)
+            self.assertTrue((directory/'keep').exists())
+            directory.chmod(0o700)
+            directory.rename(Path(root)/'original')
+            directory.symlink_to(Path(root)/'original', target_is_directory=True)
+            with self.assertRaises(OSError):
+                remote._master_directory(str(directory), identity)
+            remote._remove_master_directory(str(directory), identity)
+            self.assertEqual((directory/'keep').read_text(), 'preserved')
+
+    def test_changed_target_and_dead_master_fall_back_while_a_request_is_leased(self):
+        with tempfile.TemporaryDirectory(prefix='tma-', dir='/tmp') as directory:
+            listener = socket.socket(socket.AF_UNIX); self.addCleanup(listener.close)
+            listener.bind(directory + '/synthetic')
+            info = os.stat(directory)
+            process = mock.Mock(); process.poll.return_value = None
+            master = dict(process=process, directory=directory, identity=(info.st_dev, info.st_ino),
+                          command=self.base, created=remote.time.monotonic(), leases=0)
+            with mock.patch.object(remote, '_ssh', return_value=self.base) as discover, \
+                    mock.patch.object(remote, '_start_master', return_value=master) as start, \
+                    mock.patch.object(remote, '_close_master') as close:
+                with remote._request_command(self.config, 'history-export'):
+                    discover.return_value = self.base + ['changed-target']
+                    with remote._request_command(self.config, 'status') as command:
+                        self.assertIn('ControlPath=none', command)
+                        self.assertIn('changed-target', command)
+                    process.poll.return_value = 1
+                    discover.return_value = self.base
+                    with remote._request_command(self.config, 'status') as command:
+                        self.assertIn('ControlPath=none', command)
+                    close.assert_not_called()
+                with remote._request_command(self.config, 'status'):
+                    pass
+                close.assert_called_once_with(master)
+                self.assertEqual(start.call_count, 2)
+
+    def test_manager_signal_closes_master_pipe_and_removes_socket_directory(self):
+        for signum in (signal.SIGTERM, signal.SIGKILL):
+            with self.subTest(signum=signum):
+                directory = tempfile.mkdtemp(prefix='tma-', dir='/tmp')
+                info = os.stat(directory); identity = (info.st_dev, info.st_ino)
+                self.addCleanup(remote._remove_master_directory, directory, identity)
+                child = Path(directory)/'child.pid'
+                script = ('import os,time; from pathlib import Path; '
+                          'Path(' + repr(str(child)) + ').write_text(str(os.getpid())); time.sleep(60)')
+                command = [sys.executable, str(RESOURCES/'remote_ayugram.py'), '--master', directory,
+                           *map(str, identity), sys.executable, '-c', script]
+                parent_script = ('import subprocess,time; p=subprocess.Popen(' + repr(command)
+                                 + ',stdin=subprocess.PIPE); time.sleep(60)')
+                parent = subprocess.Popen([sys.executable, '-c', parent_script],
+                                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                          start_new_session=True)
+                self.addCleanup(remote._stop, parent)
+                deadline = remote.time.monotonic() + 5
+                while not child.exists() and parent.poll() is None and remote.time.monotonic() < deadline:
+                    threading.Event().wait(0.02)
+                self.assertTrue(child.exists())
+                pid = int(child.read_text())
+                parent.send_signal(signum); parent.wait(timeout=5)
+                error = parent.stderr.read(); parent.stderr.close()
+                deadline = remote.time.monotonic() + 5
+                while Path(directory).exists() and remote.time.monotonic() < deadline:
+                    threading.Event().wait(0.02)
+                self.assertFalse(Path(directory).exists(), error)
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(pid, 0)
+
+    def test_master_supervisor_cleans_child_and_directory_on_manager_eof(self):
+        directory = tempfile.mkdtemp(prefix='tma-', dir='/tmp')
+        child = Path(directory) / 'child.pid'
+        script = ('import os,time; from pathlib import Path; '
+                  'Path(' + repr(str(child)) + ').write_text(str(os.getpid())); time.sleep(60)')
+        process = subprocess.Popen([sys.executable, str(RESOURCES/'remote_ayugram.py'),
+                                    '--master', directory, str(os.stat(directory).st_dev),
+                                    str(os.stat(directory).st_ino), sys.executable, '-c', script],
+                                   stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.PIPE, start_new_session=True)
+        self.addCleanup(remote._stop, process)
+        deadline = remote.time.monotonic() + 5
+        while not child.exists() and process.poll() is None and remote.time.monotonic() < deadline:
+            threading.Event().wait(0.02)
+        self.assertTrue(child.exists())
+        pid = int(child.read_text())
+        process.stdin.close()
+        process.wait(timeout=5)
+        error = process.stderr.read(); process.stderr.close()
+        self.assertEqual(process.returncode, 0, error)
+        self.assertFalse(Path(directory).exists())
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
 
 
 if __name__ == '__main__':

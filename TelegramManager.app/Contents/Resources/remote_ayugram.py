@@ -1,6 +1,7 @@
 """One isolated VPS desktop, accessed through an authenticated SSH tunnel."""
 
 import atexit
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,7 @@ import stat
 import subprocess
 import sys
 import threading
+import tempfile
 import time
 
 import state
@@ -23,6 +25,8 @@ _lock = threading.RLock()
 _tunnel = None
 _tunnel_config = None
 _local_port = None
+_master_lock = threading.Lock()
+_master = None
 _SSH_OPTIONS = ['-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10',
                 '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=2',
                 '-o', 'ForwardAgent=no', '-o', 'ControlMaster=no', '-o', 'ControlPath=none']
@@ -78,28 +82,134 @@ def _stop(process):
         process.wait(timeout=3)
 
 
+def _master_directory(directory, identity):
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    info = os.fstat(fd)
+    if ((info.st_dev, info.st_ino) != identity or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o700):
+        os.close(fd)
+        raise OSError('SSH socket directory was replaced or is not private.')
+    return fd
+
+
+def _remove_master_directory(directory, identity):
+    try:
+        fd = _master_directory(directory, identity)
+        try:
+            for name in os.listdir(fd):
+                os.unlink(name, dir_fd=fd)
+            info = os.lstat(directory)
+            if (info.st_dev, info.st_ino) == identity:
+                os.rmdir(directory)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass  # Never follow or remove a replacement directory.
+
+
+def _master_ready(master):
+    if master['process'].poll() is not None:
+        return False
+    fd = _master_directory(master['directory'], master['identity'])
+    try:
+        return any(stat.S_ISSOCK(os.stat(name, dir_fd=fd, follow_symlinks=False).st_mode)
+                   for name in os.listdir(fd))
+    finally:
+        os.close(fd)
+
+
+def _close_master(master):
+    process = master['process']
+    if not process.stdin.closed:
+        process.stdin.close()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.terminate()  # The supervisor handles SIGTERM and reaps its SSH group.
+        process.wait(timeout=5)
+    _remove_master_directory(master['directory'], master['identity'])
+
+
+def _start_master(command):
+    directory = tempfile.mkdtemp(prefix='tma-', dir='/tmp')
+    info = os.lstat(directory)
+    identity = (info.st_dev, info.st_ino)
+    options = _SSH_OPTIONS[:-4] + ['-M', '-N', '-o', 'ControlPersist=no',
+                                 '-o', 'ClearAllForwardings=yes',
+                                 '-o', 'ControlPath=' + directory + '/%k-%C']
+    try:
+        process = subprocess.Popen([sys.executable, __file__, '--master', directory, *map(str, identity),
+                                    *command, '--', *options],
+                                   stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        _remove_master_directory(directory, identity)
+        raise
+    return dict(process=process, directory=directory, identity=identity, command=command,
+                created=time.monotonic(), leases=0)
+
+
+@contextmanager
+def _request_command(config, action):
+    global _master
+    base = _ssh(config)  # Keep gcloud discovery and target refresh on every request.
+    options, lease = _SSH_OPTIONS, None
+    if action != 'backup':
+        with _master_lock:
+            try:
+                stale = (_master is not None and
+                         (_master['command'] != base or _master['process'].poll() is not None
+                          or time.monotonic() - _master['created'] >= 300))
+                if stale and not _master['leases']:
+                    old, _master = _master, None
+                    _close_master(old)
+                if _master is None:
+                    _master = _start_master(base)
+                if _master is not None and not stale:
+                    if _master_ready(_master):
+                        lease = _master
+                        lease['leases'] += 1
+                        options = _SSH_OPTIONS[:-2] + [
+                            '-o', 'ControlPath=' + lease['directory'] + '/%k-%C']
+            except (OSError, subprocess.SubprocessError):
+                pass  # Warming the connection is optional; never replay a request.
+    try:
+        yield base + ['--command=sudo -n ' + CONTROL + ' ' + action, '--', *options]
+    finally:
+        if lease is not None:
+            with _master_lock:
+                lease['leases'] -= 1
+
+
+def _shutdown_master():
+    global _master
+    with _master_lock:
+        if _master is not None:
+            old, _master = _master, None
+            _close_master(old)
+
+
 def _remote(config, action):
     if action not in ('status', 'backup'):
         raise ValueError('Unsupported remote action.')
-    command = _ssh(config) + ['--command=sudo -n ' + CONTROL + ' ' + action,
-                              '--', *_SSH_OPTIONS]
-    process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                               stderr=subprocess.DEVNULL, text=True, start_new_session=True)
-    try:
-        output, _ = process.communicate(timeout=30)
-    except subprocess.TimeoutExpired:
-        _stop(process)
-        raise ValueError('VPS connection timed out. Check Google Cloud access and try again.') from None
-    if process.returncode or len(output) > 16384:
-        raise ValueError('VPS service is unavailable. Check SSH access and finish remote setup.')
-    try:
-        result = json.loads(output)
-    except ValueError:
-        raise ValueError('VPS returned an invalid service response.') from None
-    if (not isinstance(result, dict) or result.get('ok') is not True
-            or result.get('schema') != 1):
-        raise ValueError('VPS service is not ready. Check the remote installation.')
-    return result
+    with _request_command(config, action) as command:
+        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL, text=True, start_new_session=True)
+        try:
+            output, _ = process.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            _stop(process)
+            raise ValueError('VPS connection timed out. Check Google Cloud access and try again.') from None
+        if process.returncode or len(output) > 16384:
+            raise ValueError('VPS service is unavailable. Check SSH access and finish remote setup.')
+        try:
+            result = json.loads(output)
+        except ValueError:
+            raise ValueError('VPS returned an invalid service response.') from None
+        if (not isinstance(result, dict) or result.get('ok') is not True
+                or result.get('schema') != 1):
+            raise ValueError('VPS service is not ready. Check the remote installation.')
+        return result
 
 
 def history_request(action, payload, expected_config=None):
@@ -115,46 +225,46 @@ def history_request(action, payload, expected_config=None):
     config = _config()
     if config is None or (expected_config is not None and config != expected_config):
         raise ValueError('The VPS connection is missing or changed. Confirm the history binding again.')
-    command = _ssh(config) + ['--command=sudo -n ' + CONTROL + ' ' + action, '--', *_SSH_OPTIONS]
-    process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                               stderr=subprocess.DEVNULL, start_new_session=True)
-    limit = 256 * 1024 if action == 'history-catalog' else 32 * 1024 * 1024 + 4096
-    deadline = time.monotonic() + 60
-    output = bytearray()
-    try:
-        process.stdin.write(data)
-        process.stdin.close()
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise ValueError('VPS history transfer timed out. Local history was preserved.')
-            ready, _, _ = select.select([process.stdout], [], [], min(remaining, 1))
-            if not ready:
-                continue
-            block = os.read(process.stdout.fileno(), min(65536, limit + 1 - len(output)))
-            if not block:
-                break
-            output.extend(block)
-            if len(output) > limit:
-                raise ValueError('VPS history exceeds the transfer limit. Nothing was imported.')
-        process.wait(timeout=max(0.01, deadline - time.monotonic()))
-        if process.returncode:
-            raise ValueError('VPS history is unavailable. Check the helper version, login and archive size.')
-        result = json.loads(output)
-        if (not isinstance(result, dict) or result.get('ok') is not True
-                or type(result.get('schema')) is not int or result['schema'] != 1
-                or not isinstance(result.get('archive'), dict)):
-            raise ValueError('VPS history helper returned an unsupported response.')
-        return result['archive']
-    except (UnicodeError, json.JSONDecodeError):
-        raise ValueError('VPS history helper returned invalid JSON.') from None
-    except subprocess.TimeoutExpired:
-        raise ValueError('VPS history transfer timed out. Local history was preserved.') from None
-    finally:
-        _stop(process)
-        process.stdout.close()
-        if not process.stdin.closed:
+    with _request_command(config, action) as command:
+        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL, start_new_session=True)
+        limit = 256 * 1024 if action == 'history-catalog' else 32 * 1024 * 1024 + 4096
+        deadline = time.monotonic() + 60
+        output = bytearray()
+        try:
+            process.stdin.write(data)
             process.stdin.close()
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ValueError('VPS history transfer timed out. Local history was preserved.')
+                ready, _, _ = select.select([process.stdout], [], [], min(remaining, 1))
+                if not ready:
+                    continue
+                block = os.read(process.stdout.fileno(), min(65536, limit + 1 - len(output)))
+                if not block:
+                    break
+                output.extend(block)
+                if len(output) > limit:
+                    raise ValueError('VPS history exceeds the transfer limit. Nothing was imported.')
+            process.wait(timeout=max(0.01, deadline - time.monotonic()))
+            if process.returncode:
+                raise ValueError('VPS history is unavailable. Check the helper version, login and archive size.')
+            result = json.loads(output)
+            if (not isinstance(result, dict) or result.get('ok') is not True
+                    or type(result.get('schema')) is not int or result['schema'] != 1
+                    or not isinstance(result.get('archive'), dict)):
+                raise ValueError('VPS history helper returned an unsupported response.')
+            return result['archive']
+        except (UnicodeError, json.JSONDecodeError):
+            raise ValueError('VPS history helper returned invalid JSON.') from None
+        except subprocess.TimeoutExpired:
+            raise ValueError('VPS history transfer timed out. Local history was preserved.') from None
+        finally:
+            _stop(process)
+            process.stdout.close()
+            if not process.stdin.closed:
+                process.stdin.close()
 
 
 def _disconnect():
@@ -323,7 +433,47 @@ def _supervise_tunnel(command):
         os.killpg(os.getpgrp(), signal.SIGTERM)
 
 
+def _supervise_master(directory, identity, command):
+    process = None
+    stopping = False
+    def stop(signum, frame):
+        nonlocal stopping
+        stopping = True
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    try:
+        os.close(_master_directory(directory, identity))
+        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, start_new_session=True)
+        while not stopping and process.poll() is None:
+            readable, _, _ = select.select([sys.stdin.buffer], [], [], 0.5)
+            if readable and not os.read(sys.stdin.fileno(), 1):
+                break
+    finally:
+        # Reap before removing the directory; the master must never outlive Manager.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        try:
+            if process is not None:
+                # gcloud may exit before its SSH descendant; stop the owned group anyway.
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    process.wait(timeout=3)
+                finally:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    process.wait(timeout=3)
+        finally:
+            _remove_master_directory(directory, identity)
+
+
 if __name__ == '__main__' and sys.argv[1:2] == ['--tunnel']:
     _supervise_tunnel(sys.argv[2:])
+elif __name__ == '__main__' and sys.argv[1:2] == ['--master']:
+    _supervise_master(sys.argv[2], tuple(map(int, sys.argv[3:5])), sys.argv[5:])
 else:
     atexit.register(_disconnect)
+    atexit.register(_shutdown_master)

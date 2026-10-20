@@ -16,6 +16,11 @@ class HistoryTransportTests(unittest.TestCase):
         self.config = dict(schema=1, project='test-project', zone='us-central1-a', instance='test-vm')
         patcher = mock.patch.object(remote, '_config', return_value=self.config)
         patcher.start(); self.addCleanup(patcher.stop)
+        # This suite exercises stream limits/deadlines; connection ownership is
+        # covered separately with synthetic master processes.
+        for name, value in (('_master', None), ('_start_master', mock.Mock(return_value=None))):
+            patcher = mock.patch.object(remote, name, value)
+            patcher.start(); self.addCleanup(patcher.stop)
 
     def run_child(self, code, action='history-catalog', payload=None):
         with mock.patch.object(remote, '_ssh', return_value=[sys.executable, '-c', code]) as command:

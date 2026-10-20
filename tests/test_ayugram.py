@@ -677,6 +677,10 @@ const calls = [];
 const api = async (endpoint, method, data) => { calls.push([endpoint, method, data.path]); return {success:true}; };
 const toast = () => {};
 const setTimeout = () => {};
+const accounts = [];
+const mergeLocalEdits = () => {};
+const renderAccounts = () => {};
+const refresh = async () => {};
 eval(text.slice(text.indexOf('const _openingPaths ='), text.indexOf('\nasync function openAll()')));
 (async () => {
  await openAccount('/account');
@@ -784,6 +788,32 @@ eval(text.slice(text.indexOf('const _openingPaths ='), text.indexOf('\nasync fun
         self.assertFalse(updated['saveDeletedMessages'])
         self.assertTrue(updated['semiTransparentDeletedMessages'])
         self.assertTrue(self.exe.endswith('/' + ayugram.INLINE_EXECUTABLE))
+
+    def test_inline_reopen_hashes_master_once_but_rechecks_both_bundles_each_time(self):
+        self.use_inline_master()
+        self.assertTrue(self.open()[0])
+        app = Path(ayugram.find_app(str(self.account)))
+        history = self.copy / 'synthetic-history.db'
+        history.write_bytes(b'preserved history')
+        session = (self.copy / 'key_datas').read_bytes()
+        original = (self.original / 'key_datas').read_bytes()
+        with mock.patch.object(ayugram, 'bundle_fingerprint', wraps=ayugram.bundle_fingerprint) as digest:
+            self.assertTrue(self.open()[0])
+        paths = [call.args[0] for call in digest.call_args_list]
+        self.assertEqual(paths.count(str(self.master)), 1)
+        self.assertEqual(paths.count(str(app)), 1)
+        # Reusing this launch's verified digest must not cache trust across launches.
+        clone_binary = app / 'Contents/MacOS' / ayugram.INLINE_EXECUTABLE
+        clone_binary.write_bytes(b'changed clone')
+        self.assertTrue(self.open()[0])
+        self.assertEqual(clone_binary.read_bytes(), b'test executable')
+        (self.master / 'Contents/MacOS' / ayugram.INLINE_EXECUTABLE).write_bytes(b'changed master')
+        launches = []
+        self.assertFalse(self.open(on_launch=launches.append)[0])
+        self.assertEqual(launches, [])
+        self.assertEqual(history.read_bytes(), b'preserved history')
+        self.assertEqual((self.copy / 'key_datas').read_bytes(), session)
+        self.assertEqual((self.original / 'key_datas').read_bytes(), original)
 
     def test_inline_bootstrap_also_uses_marked_workdir(self):
         self.use_inline_master()

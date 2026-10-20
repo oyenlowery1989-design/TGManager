@@ -467,9 +467,11 @@ def open_account(account_path, new_login=False):
             os.rename(staging, tdata)
             state._log.info('Created isolated AyuGram session copy for %s', account_path)
 
+        # Inline clones keep the signed plist: reuse the full master digest
+        # already verified above under the client/update lock.
         if (not os.path.isdir(app) or server._read_clone_stamp(runtime) != fingerprint
                 or bundle_fingerprint(app, ignore_display_name=not inline)
-                   != bundle_fingerprint(master, ignore_display_name=not inline)):
+                   != (fingerprint if inline else bundle_fingerprint(master, ignore_display_name=True))):
             ok, error = server._copy_app_bundle(master, app)
             if not ok:
                 return False, f'Could not copy AyuGram app: {error}'
