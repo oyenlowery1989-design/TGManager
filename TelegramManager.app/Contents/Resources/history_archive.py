@@ -561,7 +561,7 @@ def _ordered_edits(old, added, remote):
     return merged, ambiguities
 
 
-def merge_archive(path, envelope, source_id, backup_path, check_closed):
+def merge_archive(path, envelope, source_id, backup_path, check_closed, *, allow_empty=False):
     owner, incoming = _envelope(envelope)
     _binding(source_id)
     _closed(check_closed)
@@ -584,8 +584,13 @@ def merge_archive(path, envelope, source_id, backup_path, check_closed):
                 return result
         if envelope['unchanged']:
             raise ValueError('Unchanged snapshot does not match a local import receipt')
+        # A new Mac may have an initialized but empty archive. Only the selective
+        # transfer flow, after explicit numeric account confirmation, opts in.
+        # Remote sync retains its existing requirement for local owner evidence.
         if not any(local) and previous is None:
-            raise ValueError('Account ID is absent from local archive')
+            empty = not any(db.execute(f'SELECT 1 FROM {table} LIMIT 1').fetchone() for table in TABLES)
+            if allow_empty is not True or not empty:
+                raise ValueError('Account ID is absent from local archive')
         _backup(path, backup_path)
         db.execute(f'CREATE TABLE IF NOT EXISTS {_RECEIPT}(source_id TEXT NOT NULL, user_id TEXT NOT NULL, kind TEXT NOT NULL, identity TEXT NOT NULL, seen INTEGER NOT NULL, PRIMARY KEY(source_id,user_id,kind,identity))')
         db.execute(f'CREATE TABLE IF NOT EXISTS {_SNAPSHOT}(source_id TEXT NOT NULL,user_id TEXT NOT NULL,digest TEXT NOT NULL,PRIMARY KEY(source_id,user_id))')

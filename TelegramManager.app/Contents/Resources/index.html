@@ -610,6 +610,12 @@
 
   .modal h2 { font-size: 17px; margin-bottom: 18px; }
 
+  .transfer-row { border:1px solid var(--border); border-radius:6px; padding:12px; margin-bottom:10px; overflow-wrap:anywhere; }
+  .transfer-row label { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .transfer-row p { font-size:12px; line-height:1.6; margin:8px 0; }
+  .transfer-row select { max-width:100%; }
+  .transfer-row input[type="text"] { margin:0; }
+
   #settings-modal .modal { max-height: 90vh; overflow-y: auto; }
 
   .modal label {
@@ -1599,8 +1605,11 @@
         <input type="number" id="cfg-backup-keep" min="0" max="100" style="width:70px;padding:5px 8px;border:1px solid var(--border);border-radius:8px;background:rgba(255,255,255,0.05);color:var(--text);font-size:13px;outline:none">
       </div>
 
+      <p class="settings-section-title" style="margin-top:20px">Selective Mac transfer</p>
+      <button type="button" class="btn" id="mac-transfer-button" onclick="showMacTransfer()">Transfer to Another Mac</button>
+
       <p class="settings-section-title" style="margin-top:20px">Config Backup &amp; Restore</p>
-      <p style="font-size:11px;color:var(--text-dim);margin-bottom:10px;line-height:1.6">Export all metadata, settings, and workspaces to a JSON file. Import to restore on a new machine.</p>
+      <p style="font-size:11px;color:var(--text-dim);margin-bottom:10px;line-height:1.6">Back up configuration for this Mac. To move selected data and associate it with profiles on another Mac, use Transfer to Another Mac above.</p>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
         <button class="btn" style="font-size:11px;padding:5px 12px" onclick="exportConfig()">⬇ Export Config</button>
         <label class="btn" style="font-size:11px;padding:5px 12px;cursor:pointer;margin:0">
@@ -1653,6 +1662,32 @@
       <button class="btn" onclick="hideSettings()">Cancel</button>
       <button class="btn primary" onclick="saveSettings()">Save</button>
     </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="transfer-modal" style="z-index:210">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="transfer-title" style="width:760px;max-height:90vh;overflow-y:auto">
+    <h2 id="transfer-title">Transfer to Another Mac</h2>
+    <div class="modal-info">Transfer selected AyuGram text history, supported settings, and Manager organization. Files contain private message text and notes. No authorization, sessions, cache, media, VPS credentials, or local-read markers are included.<br>On the destination Mac, use New account to choose target folders, log in independently, initialize AyuGram, and close it before importing history. This tool never opens, closes, or logs in to an account.</div>
+    <fieldset id="transfer-fields" style="border:0;padding:0;min-width:0">
+      <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:14px">
+        <label><input type="checkbox" id="transfer-history" checked onchange="changeTransferInclude()"> History</label>
+        <label><input type="checkbox" id="transfer-settings" checked onchange="changeTransferInclude()"> Supported settings</label>
+        <label><input type="checkbox" id="transfer-organization" checked onchange="changeTransferInclude()"> Organization</label>
+      </div>
+      <p class="modal-info">Text history merges keep local values on conflicts; unsupported media or reply payloads fail export without changing the source. Supported settings use source values: deleted/edit history saving, global ghost mode, translation provider, peer IDs, and semitransparent deleted messages. Organization fills blank fields and merges pins and workspaces without moving or renaming accounts. A fresh initialized history database requires an explicit numeric ID and same-account confirmation. Bulk imports may partially finish; retrying is safe.</p>
+      <h3 style="font-size:14px;margin-bottom:10px">Export from this Mac</h3>
+      <div id="transfer-export-rows" style="max-height:300px;overflow-y:auto"></div>
+      <button type="button" class="btn" id="transfer-export" onclick="exportMacTransfer()">Download selected accounts</button>
+      <h3 style="font-size:14px;margin:20px 0 10px">Import on this Mac</h3>
+      <label for="transfer-file">Choose transfer JSON (maximum 64 MiB)</label>
+      <input type="file" id="transfer-file" accept=".json,application/json" onchange="previewMacTransfer(this)">
+      <p id="transfer-workspaces" style="font-size:12px;margin:10px 0;overflow-wrap:anywhere"></p>
+      <div id="transfer-import-rows" style="max-height:360px;overflow-y:auto"></div>
+      <button type="button" class="btn primary" id="transfer-import" onclick="importMacTransfer()" disabled>Import selected mappings</button>
+    </fieldset>
+    <p id="transfer-status" role="status" aria-live="polite" style="white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;line-height:1.6;margin-top:14px"></p>
+    <div class="modal-actions"><button type="button" class="btn" id="transfer-close" onclick="hideMacTransfer()">Close</button></div>
   </div>
 </div>
 
@@ -2363,6 +2398,7 @@ const _MODAL_HIDE_FNS = {
   "restore-modal":      hideRestoreModal,
   "proxy-modal":        hideProxyModal,
   "settings-modal":     hideSettings,
+  "transfer-modal":     hideMacTransfer,
 };
 
 // Click on the dark backdrop (not the dialog itself) dismisses the open
@@ -2380,6 +2416,7 @@ document.addEventListener("keydown", e => {
     return;
   }
   if (e.key === "Escape") {
+    if (transferElement("modal").classList.contains("active")) { hideMacTransfer(); return; }
     const openModal = document.querySelector(".modal-overlay.active");
     if (openModal && _MODAL_HIDE_FNS[openModal.id]) {
       _MODAL_HIDE_FNS[openModal.id]();
@@ -3805,6 +3842,226 @@ async function saveSettings() {
 }
 
 
+// Selective Mac transfer: package contents stay in memory and are never rendered.
+let macTransfer = {epoch: 0, busy: false, package: null, available: null, exportInclude: null, exports: [], imports: []};
+function transferElement(id) { return document.getElementById('transfer-' + id); }
+function transferNode(tag, text) {
+  const el = document.createElement(tag);
+  if (text !== undefined) el.textContent = String(text);
+  return el;
+}
+function transferInclude() {
+  return Object.fromEntries(['history', 'settings', 'organization'].map(k => [k, transferElement(k).checked]));
+}
+function transferStatus(text) { transferElement('status').textContent = text; }
+function clearMacTransfer() {
+  macTransfer = {epoch: macTransfer.epoch + 1, busy: false, package: null, available: null, exportInclude: null, exports: [], imports: []};
+  transferElement('export-rows').replaceChildren();
+  transferElement('import-rows').replaceChildren();
+  transferElement('file').value = '';
+  transferElement('workspaces').textContent = '';
+  transferElement('modal').classList.remove('active');
+  transferStatus('');
+  renderMacTransfer();
+}
+function hideMacTransfer() {
+  if (macTransfer.busy) { transferStatus('Please wait for the current transfer operation to finish.'); return; }
+  clearMacTransfer();
+  document.getElementById('mac-transfer-button').focus();
+}
+function showMacTransfer() {
+  if (document.getElementById('lock-screen').classList.contains('visible')) return;
+  clearMacTransfer();
+  ['history', 'settings', 'organization'].forEach(k => { transferElement(k).checked = true; });
+  for (const account of accounts) {
+    const row = {path: account.path, selected: false, catalog: null, user_id: ''};
+    macTransfer.exports.push(row);
+    const wrap = transferNode('div'); wrap.className = 'transfer-row';
+    const label = transferNode('label');
+    const check = transferNode('input'); check.type = 'checkbox';
+    check.onchange = async () => {
+      if (macTransfer.package) resetTransferImport();
+      row.selected = check.checked;
+      renderMacTransfer();
+      const include = transferInclude();
+      if (row.selected && !row.catalog && (include.history || include.settings)) await loadTransferCatalog(row);
+    };
+    label.appendChild(check); label.appendChild(transferNode('span', `${account.name} — ${account.relpath || account.path}`));
+    wrap.appendChild(label);
+    row.select = transferNode('select'); row.select.className = 'sort-select';
+    row.select.setAttribute('aria-label', `Archive account ID for ${account.name}`);
+    row.select.onchange = () => { row.user_id = row.select.value; renderMacTransfer(); };
+    wrap.appendChild(row.select);
+    row.info = transferNode('p', 'Select this account to inspect available archive IDs.'); wrap.appendChild(row.info);
+    transferElement('export-rows').appendChild(wrap);
+  }
+  transferElement('modal').classList.add('active');
+  transferStatus('Select source accounts for export, or choose a transfer JSON file for import.');
+  renderMacTransfer();
+  transferElement('close').focus();
+}
+async function loadTransferCatalog(row) {
+  const epoch = macTransfer.epoch;
+  macTransfer.busy = true; transferStatus('Inspecting selected account…'); renderMacTransfer();
+  try {
+    const r = await api('/api/mac-transfer/catalog', 'POST', {path: row.path});
+    if (epoch !== macTransfer.epoch) return;
+    if (!r?.success) throw new Error(r?.message || 'Could not inspect this account. Deselect and select it to retry.');
+    row.catalog = r;
+    row.select.replaceChildren();
+    const blank = transferNode('option', 'Choose archive account ID'); blank.value = ''; row.select.appendChild(blank);
+    for (const owner of r.owners || []) {
+      const option = transferNode('option', `${owner.user_id} — ${owner.deleted} deleted, ${owner.edited} edited`);
+      option.value = String(owner.user_id); row.select.appendChild(option);
+    }
+    row.select.value = '';
+    row.info.textContent = `History: ${r.history_available ? 'available' : 'unavailable'}; settings: ${r.settings_available ? 'available' : 'unavailable'}. ${r.message || ''}`;
+    transferStatus('Choose the archive ID for each selected account when exporting history.');
+  } catch (e) { if (epoch === macTransfer.epoch) transferStatus(e.message); }
+  finally { if (epoch === macTransfer.epoch) { macTransfer.busy = false; renderMacTransfer(); } }
+}
+function resetTransferImport() {
+  macTransfer.package = null; macTransfer.available = null; macTransfer.imports = [];
+  transferElement('import-rows').replaceChildren(); transferElement('workspaces').textContent = '';
+  if (macTransfer.exportInclude) {
+    for (const key of ['history', 'settings', 'organization']) transferElement(key).checked = macTransfer.exportInclude[key];
+  }
+  macTransfer.exportInclude = null;
+  renderMacTransfer();
+}
+async function changeTransferInclude() {
+  renderMacTransfer();
+  const include = transferInclude(), epoch = macTransfer.epoch;
+  if (macTransfer.package || macTransfer.busy || (!include.history && !include.settings)) return;
+  for (const row of macTransfer.exports.filter(row => row.selected && !row.catalog)) {
+    if (epoch !== macTransfer.epoch) return;
+    await loadTransferCatalog(row);
+  }
+}
+function transferMappings() {
+  const include = transferInclude();
+  return macTransfer.imports.filter(row => row.check.checked).map(row => ({id: row.id, path: row.target.value,
+    user_id: row.user.value.trim(), confirmed: row.confirm.checked, needsHistory: include.history && !!row.source.user_id}));
+}
+function transferMappingsValid(rows) {
+  return rows.length > 0 && new Set(rows.map(r => r.path)).size === rows.length && rows.every(row =>
+    accounts.some(a => a.path === row.path) && (!row.needsHistory || (/^[1-9][0-9]*$/.test(row.user_id) && row.confirmed)));
+}
+function renderMacTransfer() {
+  const include = transferInclude(), selected = macTransfer.exports.filter(row => row.selected);
+  for (const key of ['history', 'settings', 'organization']) transferElement(key).disabled = !!macTransfer.available && !macTransfer.available[key];
+  transferElement('fields').disabled = macTransfer.busy;
+  transferElement('close').disabled = macTransfer.busy;
+  for (const row of macTransfer.exports) row.select.disabled = !row.selected || !row.catalog || !include.history || macTransfer.busy;
+  transferElement('export').disabled = macTransfer.busy || !!macTransfer.package || !Object.values(include).some(Boolean) || !selected.length ||
+    selected.some(row => ((include.history || include.settings) && !row.catalog) ||
+      (include.history && (row.catalog?.owners || []).length > 0 && !/^[1-9][0-9]*$/.test(row.user_id)));
+  transferElement('import').disabled = macTransfer.busy || !macTransfer.package || !Object.values(include).some(Boolean) || !transferMappingsValid(transferMappings());
+  for (const row of macTransfer.imports) {
+    row.user.disabled = !include.history || !row.source.user_id;
+    row.confirm.disabled = row.user.disabled;
+  }
+}
+async function exportMacTransfer() {
+  renderMacTransfer();
+  if (transferElement('export').disabled) return;
+  const epoch = macTransfer.epoch, include = transferInclude();
+  const selected = macTransfer.exports.filter(row => row.selected).map(row => ({path: row.path, user_id: row.user_id}));
+  macTransfer.busy = true; transferStatus('Preparing transfer file…'); renderMacTransfer();
+  try {
+    const r = await api('/api/mac-transfer/export', 'POST', {accounts: selected, include});
+    if (epoch !== macTransfer.epoch) return;
+    if (!r?.success || !r.package) throw new Error(r?.message || 'Export failed.');
+    const blob = new Blob([JSON.stringify(r.package)], {type: 'application/json'});
+    const link = transferNode('a'); link.href = URL.createObjectURL(blob);
+    link.download = `telegram-manager-transfer-${new Date().toISOString().slice(0, 10)}.json`;
+    try { link.click(); } finally { setTimeout(() => URL.revokeObjectURL(link.href), 60000); }
+    transferStatus('Download started. Choose where to save the transfer file; it contains private message text and notes.');
+  } catch (e) { if (epoch === macTransfer.epoch) transferStatus(e.message); }
+  finally { if (epoch === macTransfer.epoch) { macTransfer.busy = false; renderMacTransfer(); } }
+}
+async function previewMacTransfer(input) {
+  if (macTransfer.busy) return;
+  const file = input.files[0], epoch = ++macTransfer.epoch;
+  resetTransferImport();
+  macTransfer.exportInclude = transferInclude();
+  if (!file) return;
+  macTransfer.busy = true; transferStatus('Validating transfer file…'); renderMacTransfer();
+  try {
+    if (file.size > 64 * 1024 * 1024) throw new Error('Transfer files must be 64 MiB or smaller.');
+    const payload = JSON.parse(await file.text());
+    if (epoch !== macTransfer.epoch) return;
+    const r = await api('/api/mac-transfer/preview', 'POST', {package: payload});
+    if (epoch !== macTransfer.epoch) return;
+    if (!r?.success || !Array.isArray(r.accounts)) throw new Error(r?.message || 'Invalid transfer file.');
+    macTransfer.package = payload;
+    macTransfer.available = r.include;
+    for (const key of ['history', 'settings', 'organization']) transferElement(key).checked = !!r.include[key];
+    for (const source of r.accounts) {
+      const row = {id: source.id, source};
+      const wrap = transferNode('div'); wrap.className = 'transfer-row';
+      const label = transferNode('label'); row.check = transferNode('input'); row.check.type = 'checkbox';
+      row.check.onchange = renderMacTransfer; label.appendChild(row.check);
+      label.appendChild(transferNode('span', `${source.name} — ${source.folder}`)); wrap.appendChild(label);
+      wrap.appendChild(transferNode('p', `${source.deleted} deleted, ${source.edited} edited, ${source.settings_count} settings; archive account ID: ${source.user_id || 'none'}`));
+      const targetLabel = transferNode('label', 'Destination account (choose explicitly)');
+      row.target = transferNode('select'); row.target.className = 'sort-select';
+      const blank = transferNode('option', 'Choose an existing local account'); blank.value = ''; row.target.appendChild(blank);
+      for (const account of accounts) {
+        const option = transferNode('option', `${account.name} — ${account.relpath || account.path}`);
+        option.value = account.path; row.target.appendChild(option);
+      }
+      row.target.value = ''; row.target.onchange = () => { row.confirm.checked = false; renderMacTransfer(); };
+      targetLabel.appendChild(row.target); wrap.appendChild(targetLabel);
+      const userLabel = transferNode('label', 'Confirmed numeric account ID for this history');
+      row.user = transferNode('input'); row.user.type = 'text'; row.user.inputMode = 'numeric';
+      row.user.value = source.user_id ? String(source.user_id) : '';
+      row.user.oninput = () => { row.confirm.checked = false; renderMacTransfer(); };
+      userLabel.appendChild(row.user); wrap.appendChild(userLabel);
+      const confirmLabel = transferNode('label'); row.confirm = transferNode('input'); row.confirm.type = 'checkbox';
+      row.confirm.onchange = renderMacTransfer; confirmLabel.appendChild(row.confirm);
+      confirmLabel.appendChild(transferNode('span', 'I independently logged in on this Mac and verified that the destination is the same Telegram account and matches this numeric ID.'));
+      wrap.appendChild(confirmLabel); transferElement('import-rows').appendChild(wrap); macTransfer.imports.push(row);
+    }
+    transferElement('workspaces').textContent = (r.workspaces || []).map(w => `${w.name}: ${(w.accounts || []).length} account(s)`).join('; ');
+    transferStatus('Preview ready. Select source rows, choose each destination, and confirm history identity. Nothing has been imported. To return to export, change a source account selection above.');
+  } catch (e) {
+    if (epoch === macTransfer.epoch) {
+      resetTransferImport();
+      transferStatus(e instanceof SyntaxError ? 'Invalid JSON file.' : e.message);
+    }
+  } finally {
+    input.value = '';
+    if (epoch === macTransfer.epoch) { macTransfer.busy = false; renderMacTransfer(); }
+  }
+}
+async function importMacTransfer() {
+  renderMacTransfer();
+  if (transferElement('import').disabled) return;
+  const epoch = macTransfer.epoch, include = transferInclude();
+  const mappings = transferMappings().map(({needsHistory, ...row}) => row);
+  macTransfer.busy = true; transferStatus('Importing selected rows… This may partially finish; retries are safe.'); renderMacTransfer();
+  try {
+    const r = await api('/api/mac-transfer/import', 'POST', {package: macTransfer.package, mappings, include});
+    if (epoch !== macTransfer.epoch) return;
+    const lines = [r?.partial ? 'Partially finished. Review each result; retrying is safe.' : r?.success ? 'Import finished.' : 'Import failed.', r?.message || ''];
+    for (const result of r?.results || []) {
+      let text = `${result.success ? 'OK' : 'Failed'} — ${result.path}: ${result.message || ''}`;
+      if (result.history) {
+        const h = result.history;
+        text += ` Imported: ${h.imported?.deleted || 0} deleted, ${h.imported?.edited || 0} edited; skipped: ${h.skipped?.deleted || 0} deleted, ${h.skipped?.edited || 0} edited; conflicts: ${h.conflicts || 0}; ambiguities: ${h.ambiguities || 0}.`;
+      }
+      lines.push(text);
+    }
+    transferStatus(lines.filter(Boolean).join('\n'));
+    if (include.organization && (r?.success || r?.results?.some(result => result.success))) loadWorkspaceBar().catch(() => {});
+    macTransfer.imports.forEach(row => { row.confirm.checked = false; });
+  } catch (e) { if (epoch === macTransfer.epoch) transferStatus(e.message + ' Some rows may have finished; retrying is safe.'); }
+  finally { if (epoch === macTransfer.epoch) { macTransfer.busy = false; renderMacTransfer(); } }
+}
+// End selective Mac transfer.
+
+
 async function exportConfig() {
   const r = await api("/api/export-config");
   if (!r || r.success === false) { toast(r?.message || "Export failed", "error"); return; }
@@ -4219,6 +4476,7 @@ let _lockTimer  = null;
 let _idleListenersRegistered = false;
 
 function lockApp() {
+  clearMacTransfer();
   clearTimeout(_lockTimer);
   document.getElementById('lock-screen').classList.add('visible');
   const inp = document.getElementById('lock-password-input');

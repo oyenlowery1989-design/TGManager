@@ -5,7 +5,7 @@ AyuGram patches. Git does not transfer installed Telegram/AyuGram applications,
 account sessions, saved history, backups or machine-specific configuration.
 
 For installation without Git or compilation, use the
-[1.2.0 release installation guide](RELEASE_1_2_0.md).
+[Manager 1.3.0 release installation guide](RELEASE_1_3_0.md).
 
 ## Get the Manager
 
@@ -51,7 +51,7 @@ updating; do not reset or delete account directories to make an update work.
   custom macOS build is `arm64`; an Intel Mac needs a separately validated
   `x86_64` build.
 
-The published channels use `manager-v1.2.0` and `ayugram-custom-v1.2.0`.
+The published channels use `manager-v1.3.0` and `ayugram-custom-v1.2.0`.
 The older 1.1.0 drafts are not installation targets. Pushing source does not
 publish or refresh binaries. Custom binary installation is a separate step;
 cloning this branch alone does not finish it. See
@@ -63,6 +63,13 @@ cloning this branch alone does not finish it. See
 Log in to separate local profiles on the other Mac. Any deliberate transfer of
 an existing profile or backup must be handled separately with the relevant
 client closed, never through Git.
+
+Manager builds with **Settings → Advanced → Transfer to Another Mac** can export
+selected text history, supported AyuGram preferences, and account organization
+without authentication files. Import explicitly maps source accounts to existing
+local profiles; it never guesses paths from account names. See the
+[selective transfer guide](MAC_TRANSFER.md). Both Macs need Manager 1.3.0 or
+newer; Manager 1.2.0 does not contain this feature.
 
 VPS access also needs Google Cloud CLI authentication and the appropriate
 project/SSH permissions on the other Mac. Configure its local VPS settings and

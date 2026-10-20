@@ -7,6 +7,9 @@ data/
 manager_config.json
 manager_data.json
 
+# Selective transfer downloads contain private history and account notes.
+telegram-manager-transfer-*.json
+
 # ── Build artifacts & local backups ─────────────────────────────────────
 TelegramManager.app/Contents/MacOS/launcher_swift
 TelegramManager.app/launcher_compile.log

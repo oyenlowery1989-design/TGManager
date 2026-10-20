@@ -2,6 +2,7 @@ import Cocoa
 import WebKit
 import Foundation
 import Darwin
+import UniformTypeIdentifiers
 
 // Keep direct native launches serialized with the external update helper too.
 var releaseLifetimeFD: Int32 = -1
@@ -74,7 +75,7 @@ func readSessionToken() -> String {
 }
 
 // ── App Delegate ─────────────────────────────────────────────────────────────
-class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, NSWindowDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate, NSWindowDelegate {
 
     var window: NSWindow!
     var webView: WKWebView!
@@ -84,6 +85,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
     var sessionToken = readSessionToken()
     var readyFileURL: URL?
     var serverURL: URL?
+    var downloads: [ObjectIdentifier: (directory: URL, file: URL, destination: URL)] = [:]
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -286,6 +288,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
     func webView(_ webView: WKWebView,
                  decidePolicyFor action: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        // Downloads are limited to blobs created by the authenticated main UI.
+        // Do not extend the navigation allowlist to remote/file/data URLs.
+        if action.shouldPerformDownload {
+            let trustedSource = action.sourceFrame.isMainFrame &&
+                action.sourceFrame.request.url.map(isTrustedServerURL) == true
+            if trustedSource, let url = action.request.url, isTrustedDownloadURL(url) {
+                decisionHandler(.download)
+            } else {
+                decisionHandler(.cancel)
+            }
+            return
+        }
         if action.targetFrame?.isMainFrame == true,
            let url = action.request.url,
            !isTrustedServerURL(url) {
@@ -293,6 +307,115 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
             return
         }
         decisionHandler(.allow)
+    }
+
+    func isTrustedDownloadURL(_ url: URL) -> Bool {
+        guard let serverURL, url.scheme == "blob",
+              let origin = URL(string: String(url.absoluteString.dropFirst(5))) else { return false }
+        return origin.scheme == serverURL.scheme && origin.host == serverURL.host &&
+               origin.port == serverURL.port && origin.user == nil && origin.password == nil
+    }
+
+    func webView(_ webView: WKWebView, navigationAction: WKNavigationAction,
+                 didBecome download: WKDownload) {
+        download.delegate = self
+    }
+
+    func chooseDownloadDestination(_ filename: String, completion: @escaping (URL?) -> Void) {
+        let panel = NSSavePanel()
+        panel.title = "Save Manager Export"
+        panel.message = "This file may contain private messages and notes. Choose a new JSON filename."
+        panel.nameFieldStringValue = filename
+        panel.allowedContentTypes = [.json]
+        panel.canCreateDirectories = true
+        panel.beginSheetModal(for: window) { result in
+            completion(result == .OK ? panel.url : nil)
+        }
+    }
+
+    func download(_ download: WKDownload, decideDestinationUsing response: URLResponse,
+                  suggestedFilename: String, completionHandler: @escaping (URL?) -> Void) {
+        guard response.url.map(isTrustedDownloadURL) == true,
+              suggestedFilename.hasSuffix(".json"),
+              !suggestedFilename.contains("/"), !suggestedFilename.contains("\\"),
+              response.expectedContentLength <= 65 * 1024 * 1024 else {
+            completionHandler(nil)
+            return
+        }
+        chooseDownloadDestination(suggestedFilename) { destination in
+            guard let destination else { completionHandler(nil); return }
+            // Never remove an existing file to satisfy WebKit's destination rule.
+            guard !FileManager.default.fileExists(atPath: destination.path) else {
+                self.showDownloadError("The selected file already exists. Export again with a new filename.")
+                completionHandler(nil)
+                return
+            }
+            let directory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("manager-export-\(UUID().uuidString)")
+            do {
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+                                                       attributes: [.posixPermissions: 0o700])
+                let file = directory.appendingPathComponent("export.json")
+                self.downloads[ObjectIdentifier(download)] = (directory, file, destination)
+                completionHandler(file)
+            } catch {
+                self.showDownloadError("Could not create a private export file.")
+                completionHandler(nil)
+            }
+        }
+    }
+
+    func downloadDidFinish(_ download: WKDownload) {
+        guard let saved = downloads.removeValue(forKey: ObjectIdentifier(download)) else { return }
+        defer { try? FileManager.default.removeItem(at: saved.directory) }
+        do {
+            let info = try saved.file.resourceValues(forKeys: [.fileSizeKey])
+            guard (info.fileSize ?? Int.max) <= 65 * 1024 * 1024 else {
+                showDownloadError("Export exceeds the file size limit.")
+                return
+            }
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: saved.file.path)
+            // moveItem refuses existing destinations and retains private permissions.
+            try FileManager.default.moveItem(at: saved.file, to: saved.destination)
+        } catch {
+            showDownloadError("The export could not be saved. Check the destination and available space, then export again.")
+        }
+    }
+
+    func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
+        if let saved = downloads.removeValue(forKey: ObjectIdentifier(download)) {
+            try? FileManager.default.removeItem(at: saved.directory)
+            showDownloadError("The export did not finish. Export again to save a complete file.")
+        }
+    }
+
+    func download(_ download: WKDownload, willPerformHTTPRedirection response: HTTPURLResponse,
+                  newRequest request: URLRequest, decisionHandler: @escaping (WKDownload.RedirectPolicy) -> Void) {
+        decisionHandler(.cancel)
+    }
+
+    func showDownloadError(_ message: String) {
+        let alert = NSAlert()
+        alert.messageText = "Export not saved"
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        alert.beginSheetModal(for: window)
+    }
+
+    func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping ([URL]?) -> Void) {
+        guard frame.isMainFrame, frame.request.url.map(isTrustedServerURL) == true else {
+            completionHandler(nil)
+            return
+        }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = parameters.allowsDirectories
+        panel.allowsMultipleSelection = parameters.allowsMultipleSelection
+        panel.beginSheetModal(for: window) { result in
+            completionHandler(result == .OK ? panel.urls : nil)
+        }
     }
 
     // ── WKUIDelegate — native confirm() dialog ────────────────────────────────
@@ -345,6 +468,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
 
     // ── Lifecycle ────────────────────────────────────────────────────────────
     func applicationWillTerminate(_ notification: Notification) {
+        for saved in downloads.values { try? FileManager.default.removeItem(at: saved.directory) }
         serverProcess?.terminate()
         if let readyFileURL { try? FileManager.default.removeItem(at: readyFileURL) }
         serverLog?.closeFile()

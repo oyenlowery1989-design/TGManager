@@ -45,6 +45,7 @@ import updates
 import managed_releases
 import remote_ayugram
 import remote_history
+import mac_transfer
 from state import (
     ROOT_DIR, DATA_DIR, PATH_WARNINGS,
     METADATA_FILE, WORKSPACES_FILE,
@@ -2777,7 +2778,10 @@ class RequestHandler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", 0))
         except (ValueError, TypeError):
             length = 0
-        if length < 0 or length > 10 * 1024 * 1024:
+        body_limit = (mac_transfer.MAX_BYTES + 1024 * 1024
+                      if path in ('/api/mac-transfer/preview', '/api/mac-transfer/import')
+                      else 10 * 1024 * 1024)
+        if length < 0 or length > body_limit:
             self.send_json({"success": False, "message": "Request body too large"}, 413)
             return
         # A client may promise a Content-Length it never sends — without a
@@ -2786,6 +2790,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.connection.settimeout(30)
             try:
                 body = self.rfile.read(length).decode()
+            except UnicodeError:
+                self.send_json({"success": False, "message": "Request body must be valid UTF-8"}, 400)
+                return
             except OSError:
                 self.send_json({"success": False, "message": "Request body read timed out"}, 400)
                 return
@@ -3660,6 +3667,18 @@ class RequestHandler(BaseHTTPRequestHandler):
     def _post_api_remote_history_disable(self, data):
         self.send_json(remote_history.request('disable', data))
 
+    def _post_api_mac_transfer_catalog(self, data):
+        self.send_json(mac_transfer.request('catalog', data))
+
+    def _post_api_mac_transfer_export(self, data):
+        self.send_json(mac_transfer.request('export', data))
+
+    def _post_api_mac_transfer_preview(self, data):
+        self.send_json(mac_transfer.request('preview', data))
+
+    def _post_api_mac_transfer_import(self, data):
+        self.send_json(mac_transfer.request('import', data))
+
     GET_ROUTES = {
         '/api/remote-history/status': '_get_api_remote_history_status',
         '/api/accounts': '_get_api_accounts',
@@ -3682,6 +3701,10 @@ class RequestHandler(BaseHTTPRequestHandler):
     }
 
     POST_ROUTES = {
+        '/api/mac-transfer/catalog': '_post_api_mac_transfer_catalog',
+        '/api/mac-transfer/export': '_post_api_mac_transfer_export',
+        '/api/mac-transfer/preview': '_post_api_mac_transfer_preview',
+        '/api/mac-transfer/import': '_post_api_mac_transfer_import',
         '/api/remote-history/catalog': '_post_api_remote_history_catalog',
         '/api/remote-history/configure': '_post_api_remote_history_configure',
         '/api/remote-history/sync': '_post_api_remote_history_sync',
