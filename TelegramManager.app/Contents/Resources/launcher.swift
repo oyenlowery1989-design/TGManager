@@ -33,6 +33,39 @@ func holdReleaseLease() -> Bool {
     } catch { return false }
 }
 
+// Match launcher.sh for direct launches of the native executable.
+func selectPython() -> String? {
+    func succeeds(_ executable: String, _ arguments: [String]) -> Bool {
+        guard FileManager.default.isExecutableFile(atPath: executable) else { return false }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus == 0
+        } catch { return false }
+    }
+    let probe = ["-I", "-c", "import sys; sys.exit(sys.version_info < (3, 9))"]
+    let framework = "/Library/Frameworks/Python.framework/Versions"
+    let versions = (try? FileManager.default.contentsOfDirectory(atPath: framework)) ?? []
+    let candidates = [ProcessInfo.processInfo.environment["TG_PYTHON"] ?? "",
+                      "/opt/homebrew/bin/python3", "/usr/local/bin/python3",
+                      "\(framework)/Current/bin/python3"] + versions.sorted().reversed().map {
+        "\(framework)/\($0)/bin/python3"
+    }
+    for candidate in candidates where !candidate.isEmpty {
+        if succeeds(candidate, probe) { return candidate }
+    }
+    // Avoid invoking the system developer-tools stub when tools are absent.
+    if succeeds("/usr/bin/xcode-select", ["-p"]), succeeds("/usr/bin/python3", probe) {
+        return "/usr/bin/python3"
+    }
+    return nil
+}
+
 func readSessionToken() -> String {
     if let envToken = ProcessInfo.processInfo.environment["TG_SESSION_TOKEN"], !envToken.isEmpty {
         return envToken
@@ -91,11 +124,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
             serverLog = log
         }
 
+        guard let python = selectPython() else { return }
         func tryLaunch(python: String) -> Bool {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: python)
             p.arguments = [script]
             p.environment = ProcessInfo.processInfo.environment.merging([
+                "TG_PYTHON": python,
                 "TG_SESSION_TOKEN": sessionToken,
                 "TG_READY_FILE": readyFileURL.path,
             ]) { _, new in new }
@@ -108,11 +143,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
             } catch { return false }
         }
 
-        // Try system Python, then Homebrew Intel, then Homebrew Apple Silicon
-        if !tryLaunch(python: "/usr/bin/python3") &&
-           !tryLaunch(python: "/usr/local/bin/python3") {
-            _ = tryLaunch(python: "/opt/homebrew/bin/python3")
-        }
+        _ = tryLaunch(python: python)
     }
 
     // ── Window ───────────────────────────────────────────────────────────────
@@ -191,7 +222,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDe
             return
         }
         guard let process = serverProcess else {
-            showServerError("Python could not be launched. Check data/manager.log.")
+            showServerError("Python 3.9 or newer could not be launched. Install Python from python.org or Homebrew, then reopen Telegram Manager.")
             return
         }
         guard process.isRunning else {

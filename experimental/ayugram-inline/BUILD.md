@@ -98,9 +98,10 @@ Manager validates the shared custom bundle against its pinned fingerprint and
 provenance, then opens each account's separate `.ayugram/TelegramForcePortable`
 profile. Custom Dock names are supplied without modifying the signed executable
 or sealed plist. The source commit alone does not install the compiled master.
-The online updater currently reads official Telegram and AyuGram releases;
-distribution and automatic updates for custom releases still need a separate
-release channel and installation policy.
+Manager provides a separate custom release channel with verified downloads,
+installation after normal Quit and app-only rollback. See
+[`docs/MANAGED_RELEASES.md`](../../docs/MANAGED_RELEASES.md) for the package
+contract and [`docs/RELEASE_1_2_0.md`](../../docs/RELEASE_1_2_0.md) for installation.
 
 Forum/topic/reply lists, monoforums and Saved Messages sublists are excluded.
 Old archives may lack attachment or sender information. Messages never received

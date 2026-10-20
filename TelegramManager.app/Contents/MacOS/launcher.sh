@@ -15,23 +15,50 @@ SWIFT_BIN="$MACOS_DIR/launcher_swift"
 SERVER_PY="$RESOURCES/server.py"
 PARENT="$(cd "$MACOS_DIR/../.." && pwd)"
 
+# Finder does not inherit Homebrew/Python.org paths. Probe before using a runtime.
+select_python() {
+    local candidate
+    for candidate in "${TG_PYTHON:-}" /opt/homebrew/bin/python3 /usr/local/bin/python3 \
+        /Library/Frameworks/Python.framework/Versions/Current/bin/python3 \
+        /Library/Frameworks/Python.framework/Versions/3.*/bin/python3; do
+        [ -n "$candidate" ] && [ -x "$candidate" ] || continue
+        if "$candidate" -I -c 'import sys; sys.exit(sys.version_info < (3, 9))' >/dev/null 2>&1; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    # /usr/bin/python3 can be a developer-tools stub; never invoke it without tools.
+    if /usr/bin/xcode-select -p >/dev/null 2>&1 && \
+        /usr/bin/python3 -I -c 'import sys; sys.exit(sys.version_info < (3, 9))' >/dev/null 2>&1; then
+        printf '%s\n' /usr/bin/python3
+        return 0
+    fi
+    return 1
+}
+if ! TG_PYTHON=$(select_python); then
+    echo "Telegram Manager requires Python 3.9 or newer. Install Python from python.org or Homebrew, then reopen Telegram Manager." >&2
+    osascript -e 'display alert "Python 3.9 or newer required" message "Install Python from python.org or Homebrew, then reopen Telegram Manager."' 2>/dev/null || true
+    exit 1
+fi
+export TG_PYTHON
+
 # Serialize launch against app replacement before cleanup or compilation.
 export PYTHONDONTWRITEBYTECODE=1
 if [ "${TG_RELEASE_LAUNCH_GUARD:-}" != "1" ]; then
-    exec python3 "$RESOURCES/release_runtime.py" launch "$PARENT" "$0" "$@"
+    exec "$TG_PYTHON" "$RESOURCES/release_runtime.py" launch "$PARENT" "$0" "$@"
 fi
 
 # ── Read port from manager_config.json (default 8477) ────────────────────────
 PORT=8477
 _CONFIG="$MACOS_DIR/../../manager_config.json"
 if [ -f "$_CONFIG" ]; then
-    _p=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('port',8477))" "$_CONFIG" 2>/dev/null)
+    _p=$("$TG_PYTHON" -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('port',8477))" "$_CONFIG" 2>/dev/null)
     [ -n "$_p" ] && PORT=$_p
 fi
 
 SESSION_TOKEN="${TG_SESSION_TOKEN:-}"
 if [ -z "$SESSION_TOKEN" ]; then
-    SESSION_TOKEN=$(python3 -c "import secrets; print(secrets.token_hex(16))" 2>/dev/null)
+    SESSION_TOKEN=$("$TG_PYTHON" -c "import secrets; print(secrets.token_hex(16))" 2>/dev/null)
 fi
 if [ -z "$SESSION_TOKEN" ]; then
     SESSION_TOKEN=$(uuidgen 2>/dev/null | tr -d '-')
@@ -97,7 +124,7 @@ fi
 URL="http://127.0.0.1:$PORT/$SESSION_TOKEN/"
 PROFILE="/tmp/TelegramManagerApp"
 
-python3 "$RESOURCES/server.py" &
+"$TG_PYTHON" "$RESOURCES/server.py" &
 SERVER_PID=$!
 
 for i in $(seq 1 30); do

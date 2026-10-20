@@ -4,6 +4,9 @@ The `codex/ayugram-manager` branch contains the Manager source, tests and custom
 AyuGram patches. Git does not transfer installed Telegram/AyuGram applications,
 account sessions, saved history, backups or machine-specific configuration.
 
+For installation without Git or compilation, use the
+[1.2.0 release installation guide](RELEASE_1_2_0.md).
+
 ## Get the Manager
 
 For a source checkout, have Git, Python 3.9 or newer, and Apple's Command Line
@@ -48,10 +51,10 @@ updating; do not reset or delete account directories to make an update work.
   custom macOS build is `arm64`; an Intel Mac needs a separately validated
   `x86_64` build.
 
-As checked on 2026-10-20, `manager-v1.1.0` and `ayugram-custom-v1.1.0` are
-**draft releases**. Pushing source does not publish or refresh their binaries,
-and Manager's updater cannot install these drafts. Custom binary installation
-is a separate step; cloning this branch alone does not finish it. See
+The published channels use `manager-v1.2.0` and `ayugram-custom-v1.2.0`.
+The older 1.1.0 drafts are not installation targets. Pushing source does not
+publish or refresh binaries. Custom binary installation is a separate step;
+cloning this branch alone does not finish it. See
 [managed release packaging and installation](MANAGED_RELEASES.md) and
 [custom AyuGram build instructions](../experimental/ayugram-inline/BUILD.md).
 
